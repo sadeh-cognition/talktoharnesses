@@ -1,0 +1,97 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "talktoharnesses"
+version = "0.1.0"
+description = "Unified async Python interface for coding-agent harnesses (Claude, Codex, Cursor, Grok, OpenCode)"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{ name = "talktoharnesses contributors" }]
+dependencies = [
+    "pydantic>=2",
+]
+
+[project.optional-dependencies]
+claude = ["claude-agent-sdk"]
+acp = ["agent-client-protocol==0.12.0"]
+opencode = ["httpx>=0.27", "httpx-sse>=0.4"]
+# empty marker extra — codex uses stdlib + transports only
+codex = []
+all = [
+    "talktoharnesses[claude,acp,opencode]",
+]
+
+[project.scripts]
+talktoharnesses = "talktoharnesses.__main__:main"
+
+[dependency-groups]
+# Default `uv sync` installs this group (see tool.uv.default-groups).
+# Driver extras are listed explicitly so the full offline suite works out of the box.
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "mypy>=1.11",
+    "ruff>=0.6",
+    "datamodel-code-generator>=0.26",
+    "starlette>=0.40",
+    "uvicorn>=0.30",
+    # driver extras (same as project.optional-dependencies)
+    "claude-agent-sdk",
+    "agent-client-protocol==0.12.0",
+    "httpx>=0.27",
+    "httpx-sse>=0.4",
+]
+
+[tool.uv]
+default-groups = ["dev"]
+package = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/talktoharnesses"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src",
+    "/tests",
+    "/scripts",
+    "/README.md",
+    "/pyproject.toml",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+markers = [
+    "live: opt-in smoke tests that drive real agent CLIs (skip unless binary on PATH)",
+]
+addopts = "-m 'not live'"
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+mypy_path = "src"
+packages = ["talktoharnesses"]
+
+[[tool.mypy.overrides]]
+# datamodel-code-generator output: not ours to fix, regenerated wholesale.
+module = "talktoharnesses.codex._generated.models"
+ignore_errors = true
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+src = ["src", "tests"]
+extend-exclude = ["src/talktoharnesses/codex/_generated/models.py"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "ASYNC"]
+ignore = [
+    "ASYNC240",  # Path.resolve in async is fine for local cwd; we are not on anyio
+    "ASYNC109",  # explicit timeout= kwargs are clearer for our public transport APIs
+]
