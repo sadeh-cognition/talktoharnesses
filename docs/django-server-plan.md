@@ -24,12 +24,17 @@ Outcome: a host Django project `pip install talktoharnesses[server]`, adds one a
 
 ### Decisions taken (settled with the user)
 
-1. **In-process, ASGI-only.** The app owns harnesses in an in-memory registry on the server's event
-   loop. Single worker (or `thread_id`-sticky routing) is a documented requirement.
+1. **In-process by default, ASGI-only.** The app owns harnesses in an in-memory registry on the
+   server's event loop. This is the default backend and the dev/test path.
 2. **SSE via django-ninja.** Async endpoints returning `StreamingHttpResponse`. No django-channels.
 3. **Full event log + read model.** Append-only event table projected into Django models — replay,
    reconnect-with-cursor, history APIs, Django admin.
 4. **Scope includes thread/project orchestration**, not just raw harness control.
+5. **Horizontal scale is in scope, not deferred.** The plan ships a split-tier topology — stateless
+   web workers plus dedicated harness worker processes — behind two seams: `HarnessBackend`
+   (in-process vs sidecar) and `EventBroadcast` (in-process vs polling/Postgres/Redis). See §10.
+   Because there are now two real implementations of each, the seams are load-bearing rather than
+   speculative, and they are introduced at M3/M4 so the sidecar is a drop-in rather than a rewrite.
 
 ### Two library facts that drive the design (verified in source, not assumed)
 
@@ -129,6 +134,16 @@ class TthSettings(BaseModel):
     PERSIST_RAW: bool = True
     RETAIN_EVENTS_DAYS: int | None = None
     WORKER_ID: str | None = None      # default f"{hostname}:{pid}:{uuid4()}"
+    # --- topology (§10) ---
+    HARNESS_BACKEND: str = "inprocess"      # "inprocess" | "sidecar"
+    BROADCAST_BACKEND: str = "inprocess"    # "inprocess" | "polling" | "postgres" | "redis"
+    BROADCAST_POLL_MS: int = 250
+    WORKER_ENDPOINT: str | None = None      # advertised addr: unix:///... or tcp://host:port
+    WORKER_LISTEN: str | None = None        # what `manage.py tth_worker` binds
+    WORKER_HEARTBEAT_SECONDS: float = 5.0
+    WORKER_HEARTBEAT_TIMEOUT: float = 20.0
+    WORKER_MAX_THREADS: int = 8             # per harness worker
+    WORKER_RPC_TIMEOUT: float = 30.0
 ```
 `conf.get_settings()` caches; a `setting_changed` receiver clears it so `override_settings` works.
 
@@ -166,10 +181,14 @@ src/talktoharnesses_django/
   projections/ __init__.py  apply.py  thread.py  message.py  activity.py
                plan.py  checkpoint.py  session.py  runtime.py
   runtime/     supervisor.py  pump.py  turn.py  hub.py  lifespan.py  workspace.py
+               backends/   __init__.py  base.py  inprocess.py  sidecar.py
+               broadcast/  __init__.py  base.py  inprocess.py  polling.py
+                           postgres.py  redis.py
+               worker/     server.py  routing.py  heartbeat.py  drain.py
   routers/     meta.py  projects.py  threads.py  turns.py  requests.py
                events_sse.py  commands.py
   sse.py  admin.py  migrations/0001_initial.py
-  management/commands/tth_gc_events.py  tth_status.py
+  management/commands/tth_gc_events.py  tth_status.py  tth_worker.py
 ```
 
 **Reuse, do not redefine.** django-ninja 1.x accepts plain `pydantic.BaseModel` for bodies and
@@ -230,10 +249,29 @@ SSE plumbing for little gain.
 
 ---
 
-## 4. Runtime: supervisor, pump, turn runner
+## 4. Runtime: backend seam, supervisor, pump, turn runner
+
+Everything the HTTP layer needs from the runtime is one protocol. `InProcessBackend` implements it
+by owning harnesses directly (this section); `SidecarBackend` implements it by JSON-RPC to the
+harness worker that owns the thread (§10, M9). Routers and `dispatch()` talk only to this.
 
 ```python
-# runtime/supervisor.py
+# runtime/backends/base.py
+class HarnessBackend(Protocol):
+    async def ensure(self, thread: Thread) -> SessionInfo: ...
+    async def start_turn(self, thread_id: str, prompt: SendTurnInput) -> str: ...   # -> turn_id
+    async def interrupt(self, thread_id: str, turn_id: str | None) -> None: ...
+    async def respond(self, thread_id, request_id, decision: ApprovalDecision) -> None: ...
+    async def respond_user_input(self, thread_id, request_id, answers: Mapping) -> None: ...
+    async def stop(self, thread_id: str, *, reason: str) -> None: ...
+    async def shutdown(self) -> None: ...
+```
+Deliberately the same shape as `Harness` minus the streaming methods — events never return through
+this interface, they go to the DB and out via `EventBroadcast` (§6). That is what lets the sidecar
+RPC connection stay stateless enough to drop and reopen.
+
+```python
+# runtime/supervisor.py — the InProcessBackend's internals
 @dataclass
 class HarnessEntry:
     thread_id: str; harness: Harness
@@ -244,7 +282,7 @@ class HarnessEntry:
     loop: asyncio.AbstractEventLoop; worker_id: str
     last_activity: float; session: Session | None
 
-class HarnessSupervisor:
+class HarnessSupervisor:      # == InProcessBackend
     @classmethod
     def instance(cls) -> HarnessSupervisor: ...
     async def ensure(self, thread: Thread) -> HarnessEntry: ...
@@ -307,9 +345,12 @@ the bus), interleaves two writers into one sequence space, and leaves session-li
 ```python
 async def pump_events(thread_id: str, stream: AsyncIterator[RuntimeEvent]) -> None:
     async for batch in batched(stream, EVENT_BATCH_MAX, EVENT_BATCH_INTERVAL_MS):
-        envelopes = await persist_batch(thread_id, batch)   # ONE sync_to_async hop
-        hub.publish(thread_id, envelopes)                   # AFTER commit
+        max_seq = await persist_batch(thread_id, batch)     # ONE sync_to_async hop
+        await broadcast.publish(thread_id, max_seq)         # AFTER commit
 ```
+The pump runs wherever the harness lives — in the web process under `InProcessBackend`, in
+`tth_worker` under `SidecarBackend`. It is the sole DB writer either way, so the write path in §5 is
+unchanged by topology; only its process moves.
 `batched` takes one blocking `anext`, then drains with `asyncio.wait_for(anext, interval)` up to
 `EVENT_BATCH_MAX`. Publishing after commit is what makes `after=<sequence>` lossless: anything an
 SSE subscriber can miss is already durable.
@@ -415,6 +456,7 @@ async def stream_events(request, thread_id: str, after: int = 0, live: bool = Tr
     if (lei := request.headers.get("Last-Event-ID")) and not after:
         after = int(lei)
     sub = hub.subscribe(thread_id, maxsize=SSE_BACKLOG_LIMIT)   # BEFORE the replay read
+                                                                # hub is fed by EventBroadcast (§10)
     return StreamingHttpResponse(_generate(sub, thread_id, after, live),
         content_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
@@ -587,9 +629,158 @@ subprocess, fast, and where most read-model bugs live); `test_wrong_worker.py` (
 `test_workspace_allowlist.py` (traversal, symlink escape, non-dir, empty allowlist);
 `test_command_kwargs_rejected.py` (the RCE regression — `command`/`binary`/`env` in the body rejected).
 
+**Topology tests (M8/M9), all in-process — no real multi-process deployment needed:**
+- `test_broadcast_backends.py` — parametrized over `inprocess`/`polling`/`postgres`/`redis`
+  (`skipif` on service availability), asserting the same `publish`/`subscribe` contract, and that a
+  *dropped* notification costs only latency because the next one carries a higher `max_sequence`.
+- `test_sse_foreign_owner.py` — write events directly through the pump's persist path, subscribe SSE
+  from a hub that never saw them in memory. This is the M8 property without spawning a second
+  process.
+- `test_sidecar_backend.py` — run `tth_worker`'s server coroutine in the test's own loop over
+  `asyncio.open_unix_connection` to a `tmp_path` socket, drive it through `SidecarBackend`, and
+  re-run the **5-provider conformance test unchanged against it**. Same assertions, different
+  backend — that equivalence is the whole point of the seam, so it should be a parametrized fixture
+  over `HARNESS_BACKEND` rather than a separate test.
+- `test_worker_routing.py` — claim caps (`WORKER_MAX_THREADS`), least-loaded selection, stale
+  heartbeat sweep, drain refusing new claims while finishing in-flight turns, and 503 + `Retry-After`
+  when no worker is reachable.
+
 ---
 
-## 10. Milestones
+## 10. Deployment topology
+
+### Why `uvicorn --workers N` is the failure mode, not the fix
+
+`--workers N` forks N processes sharing one listening socket; the kernel distributes accepts
+arbitrarily. Each has its own event loop, its own memory, its own `dict[thread_id, Harness]`. There
+is no affinity and no routing control. With the in-process backend, roughly (N−1)/N of follow-up
+requests land on a process that has never heard of the thread:
+
+| Request | Lands on | Result |
+|---|---|---|
+| `POST /turns` | A | harness spawned in A; futures live in A |
+| `POST /approvals/{id}` | C | C's `_pending_approvals` is empty — the agent blocks until timeout |
+| `GET /events` | B | replays from DB, then hangs on keepalives; live fan-out is A's in-memory hub |
+| `POST /interrupt` | C | no entry — 409 |
+
+The ownership CAS (§4) converts most of this from silent breakage into `409 + Retry-After`. That is
+a diagnostic, not a scaling story.
+
+### The two coupled problems, separated
+
+**Read path (SSE fan-out) is easy.** The event log plus the `after=<sequence>` cursor already make
+any thread's stream reconstructible by any process. Replace the in-memory hub with a broadcast
+backend and any web worker can serve any thread. → **M8**.
+
+**Write path (approval futures) is hard.** `respond()` resolves an `asyncio.Future` held in the
+driver's instance dict; that is irreducibly in-process and in-loop. No broker fixes it. Either route
+to the owning process, or move the harness out of the web tier entirely. → **M9**.
+
+### Three supported topologies
+
+**T1 — Single process.** Dev, single-user, small teams.
+`uvicorn --workers 1` · `HARNESS_BACKEND="inprocess"` · `BROADCAST_BACKEND="inprocess"` ·
+SQLite (WAL) or Postgres. The web process only serializes JSON, batches DB writes, and fans out SSE
+— the actual work is in the agent subprocesses. `MAX_CONCURRENT_HARNESSES` defaults to 8 because RAM
+and provider rate limits bind long before the event loop does.
+
+**T2 — Sticky-routed.** Interim; documented because people will try it, and discouraged.
+N *separate* uvicorn processes on N ports (not `--workers`) behind nginx
+`hash $thread_id consistent`, extracting the id from the path. It works, but a worker restart
+orphans that worker's agent subprocesses and strands its pending approvals, and any change to the
+worker set rebalances threads onto processes that don't own them. Use only if you need scale before
+M9 lands.
+
+**T3 — Split tier.** The target.
+- N **web workers** — stateless; `--workers N` is now correct. Serve REST + SSE. Never spawn agents,
+  never touch the workspace filesystem, don't need the agent CLIs installed.
+- K **harness workers** — `manage.py tth_worker`. Each owns a claimed set of threads, runs their
+  pumps, writes the event log, applies projections, broadcasts. These need the agent CLIs on `PATH`
+  and the workspace mounted.
+- Postgres + a broadcast backend.
+
+The split is also a security boundary: the tier reachable from the network has no workspace access
+and no ability to exec. That directly narrows the posture in §7 — "anyone who can start a turn can
+run code as the server's OS user" becomes "…as the *harness worker's* OS user", which can be a
+separate, unprivileged, containerized account.
+
+### Routing and ownership
+
+Reuse the CAS rather than adding consistent hashing. `ThreadSession.worker_id` +
+`ThreadSession.worker_endpoint` *is* the routing table:
+
+- **new thread** → least-loaded live worker (from `HarnessWorker` heartbeat rows, capped by
+  `WORKER_MAX_THREADS`) claims it through the same CAS already built in M4;
+- **existing thread** → the web worker reads `worker_id`, resolves the endpoint, opens or reuses a
+  JSON-RPC connection;
+- **dead worker** → heartbeat stale past `WORKER_HEARTBEAT_TIMEOUT`; the sweeper marks its sessions
+  `stopped`, abandons its `PendingRequest` rows (their futures died with the process), and releases
+  `worker_id` so the threads can be re-claimed;
+- **graceful drain** → the worker stops accepting claims, finishes in-flight turns, exits; the web
+  tier returns 503 + `Retry-After` for the draining window.
+
+Claim-based assignment survives worker-set changes without rebalancing, and reuses machinery M4
+already needs.
+
+### Sidecar IPC — reuse `transports/stdio_jsonrpc.py`, don't invent a protocol
+
+`JsonRpcPeer(reader, writer)` is already a complete bidirectional newline-delimited JSON-RPC 2.0
+peer: `request(timeout=)`, `notify`, `respond`, `respond_error`, and pending-future failure on EOF.
+Critically, it dispatches inbound requests on **separate tasks** — the code comments say this is
+exactly so a blocked approval handler cannot stall the read loop. That is the property the sidecar
+needs, already written and already tested against `tests/fixtures/echo_jsonrpc_peer.py`.
+
+It takes any asyncio reader/writer pair, so `asyncio.open_unix_connection(path)` (same host) or
+`asyncio.open_connection(host, port)` (multi-host, private network or mTLS) drops straight in. No
+new protocol code, no new dependency.
+
+```
+session.ensure      {thread_id, provider, kwargs}      -> {session}
+turn.start          {thread_id, prompt, model}         -> {turn_id}   # returns at turn.started
+turn.interrupt      {thread_id, turn_id?}              -> {}
+approval.respond    {thread_id, request_id, decision}  -> {}
+user_input.respond  {thread_id, request_id, answers}   -> {}
+session.stop        {thread_id, reason}                -> {}
+harness.close       {thread_id}                        -> {}
+worker.status       {}                                 -> {threads, load, uptime, version}
+```
+
+Runtime events do **not** cross this connection. The harness worker writes them to the DB and
+broadcasts a notification. One write path, one sequence space, and the RPC connection carries no
+stream state — so dropping and reopening it is free.
+
+`resolve_workspace()` (§7) runs on **both** tiers: the web worker rejects early for a good error
+message, the harness worker re-validates because it is the tier that actually execs.
+
+### Broadcast backends
+
+The notification carries `{thread_id, max_sequence}` only — never payloads. The subscriber then
+reads rows `sequence > cursor` from the DB. Postgres `NOTIFY` caps at 8000 bytes, payload-carrying
+would double-serialize, and notification-only makes replay and live use the *identical* code path.
+The DB stays the single source of truth, so "lossless reconnect" needs no separate argument.
+
+```python
+# runtime/broadcast/base.py
+class EventBroadcast(Protocol):
+    async def publish(self, thread_id: str, max_sequence: int) -> None: ...
+    def subscribe(self, thread_id: str) -> AsyncIterator[int]: ...
+```
+- `inprocess` — M3; T1 only.
+- `polling` — universal fallback. `SELECT max(sequence) WHERE thread_id=? AND sequence > cursor`
+  every `BROADCAST_POLL_MS` (default 250). Zero infra, works on SQLite, latency bounded by the
+  interval. Default for T3 on SQLite.
+- `postgres` — `LISTEN/NOTIFY` on a dedicated async psycopg3 connection. Django's ORM exposes no
+  async LISTEN, so this connection is managed outside the ORM pool and must not be counted against
+  `CONN_MAX_AGE`. Default for T3 on Postgres.
+- `redis` — for multi-host deployments that would rather not hold a PG connection per web worker.
+
+Note the hub's bounded-queue + overflow-and-resume behaviour (§6) is unchanged: on overflow the
+subscriber is dropped with its cursor and reconnects, and the DB fills the gap. That mechanism is
+what makes a lossy broadcast transport acceptable — a dropped NOTIFY costs latency, never data.
+
+---
+
+## 11. Milestones
 
 | M | Scope | Ships as |
 |---|---|---|
@@ -597,16 +788,18 @@ subprocess, fast, and where most read-model bugs live); `test_wrong_worker.py` (
 | **M1** | Packaging + skeleton: pyproject, `apps.py`, `conf.py` + `setting_changed`, `checks.py`, `errors.py` handlers, `api.py`/`urls.py`, `GET /harnesses`, `GET /healthz`, `tests/django/settings.py` | A mountable app reporting available harnesses |
 | **M2a** | Models + `0001_initial` + `EventStreamCursor` + `allocate_sequences` + `domain/events.py` + `dispatch()` + non-runtime handlers (`project.*`, `thread.create/delete/archive/settle/snooze/pin/meta/modes`) | Event-sourced core, ORM-testable |
 | **M2b** | Projections + read-model routes, `POST /commands`, `GET /events/history`, `admin.py` | Usable orchestration API, no agents attached |
-| **M3** | `runtime/hub.py`, `sse.py`, `GET /threads/{id}/events` replay→live, keepalive, `Last-Event-ID`, bounded queues + overflow-and-resume. Tested by injecting events through `dispatch()` | Live streaming, still no subprocesses |
-| **M4** | `supervisor.py`, `pump.py`, `turn.py`, `workspace.py`, `lifespan.py`, ownership CAS, idle reaper, crash-recovery sweep; `thread.turn.start/interrupt`, `session.stop/set`, assistant-message projections. **5-provider HTTP conformance test lands here.** | The actual product |
+| **M3** | `runtime/hub.py`, `sse.py`, `GET /threads/{id}/events` replay→live, keepalive, `Last-Event-ID`, bounded queues + overflow-and-resume. **Introduces the `EventBroadcast` seam** with the `inprocess` impl. Tested by injecting events through `dispatch()` | Live streaming, still no subprocesses |
+| **M4** | **Introduces the `HarnessBackend` seam** + `InProcessBackend`: `supervisor.py`, `pump.py`, `turn.py`, `workspace.py`, `lifespan.py`, ownership CAS, idle reaper, crash-recovery sweep; `thread.turn.start/interrupt`, `session.stop/set`, assistant-message projections. **5-provider HTTP conformance test lands here.** | **T1** — the working product |
 | **M5** | Approvals + user input: routes, `PendingRequest`, `has_pending_*`, 409 on stale ids, abandon-on-teardown | Interactive agents |
 | **M6** | Plans, diffs, activities, checkpoints: `proposed-plan.upsert`, `turn.diff.complete`, `activity.append`, `Checkpoint` (status `missing` with no VCS layer), `has_actionable_proposed_plan` | Full T3 read-model parity |
-| **M7** | Auth hardening (permission hooks, elevated-mode perm, throttling), `tth_gc_events`, `tth_status`, `docs/django/README.md` + deployment guide | Production-ready |
-| **M8** | Deferred: `thread.checkpoint.revert` (needs a git/worktree layer), title regeneration, and the real fix for single-worker — a per-thread harness **sidecar process** where the futures live, fronted by a small IPC protocol, letting the Django tier scale to N workers | v2 |
+| **M7** | Auth hardening (permission hooks, elevated-mode perm, throttling), `tth_gc_events`, `tth_status`, `docs/django/README.md` + T1/T2 deployment guide | Production-ready, single-process |
+| **M8** | **Multi-worker read path.** `broadcast/{polling,postgres,redis}.py`; hub fed by `EventBroadcast`; SSE correct from any web worker regardless of which process owns the harness. Verified with N web workers against a T1 harness owner | N-worker web tier for reads |
+| **M9** | **Harness worker + sidecar backend (T3).** `management/commands/tth_worker.py`; `runtime/worker/{server,routing,heartbeat,drain}.py`; `backends/sidecar.py` over `JsonRpcPeer` on unix/tcp; `HarnessWorker` heartbeat model + `ThreadSession.worker_endpoint`; claim-based assignment, stale-worker sweep, graceful drain; workspace re-validation on the worker; `worker.status` / worker `/healthz` | **T3** — full horizontal scale |
+| **M10** | Deferred remainder: `thread.checkpoint.revert` (needs a git/worktree layer) and title regeneration — both orthogonal to topology | v2 features |
 
 ---
 
-## 11. Verification
+## 12. Verification
 
 Gates, in order:
 ```bash
@@ -633,15 +826,35 @@ the turn completed regardless and the replay has no gap or duplicate. Finally
 `curl localhost:8000/api/threads/$TID | jq .messages` and check the assistant text matches the
 concatenated deltas, and `django-admin` shows the event log.
 
-Deployment sanity: `--workers 2` must produce a 409 with `Retry-After` on the second worker, not
-corruption.
+**Topology gates.**
 
-## 12. Risks
+T1 (M4): `--workers 2` with `HARNESS_BACKEND="inprocess"` must produce a 409 with `Retry-After` on
+the second worker — an explicit refusal, never corruption.
 
-1. **Single-worker is the load-bearing constraint.** `_pending_approvals` futures live in one
-   process on one loop. Mitigated by the DB CAS → 409, the `entry.loop` identity check, `/healthz`
-   exposing `worker_id`, and docs mandating `--workers 1` or `thread_id`-sticky routing. The only
-   real fix is M8's sidecar.
+T3-read (M8): keep one harness owner, run 4 web workers, and attach the SSE stream through a
+round-robin proxy. Every worker must serve the full stream — replay plus live — for a thread it does
+not own. Kill and reattach mid-turn against a *different* worker each time; the concatenation must
+still equal the DB log exactly once, no gaps, no duplicates.
+
+T3-full (M9):
+```bash
+manage.py tth_worker --listen unix:///run/tth/w1.sock &   # needs agent CLIs + workspace
+manage.py tth_worker --listen unix:///run/tth/w2.sock &
+uvicorn ...asgi:application --workers 4                   # no CLIs, no workspace mount
+```
+Assert: turns start on either harness worker; approvals posted to *any* web worker reach the owning
+harness worker and unblock the agent; `SIGTERM` to w1 drains in-flight turns and then releases its
+threads for re-claim by w2; `kill -9` to w1 leaves the sweeper to mark sessions `stopped` and
+abandon its `PendingRequest` rows within `WORKER_HEARTBEAT_TIMEOUT`; and a web worker with no
+reachable harness worker returns 503 + `Retry-After` rather than hanging.
+
+## 13. Risks
+
+1. **Loop-bound approval futures are the root constraint.** `_pending_approvals` lives in one
+   process on one loop. Through M7 this is contained by the DB CAS → 409, the `entry.loop` identity
+   check, `/healthz` exposing `backend`/`worker_id`, and T1 in the docs. M8 removes it from the read
+   path, M9 from the write path. Residual risk after M9: a harness worker crash still strands its
+   in-flight approvals — the sweep abandons them cleanly, but those turns are lost, not resumed.
 2. **`send_turn()` cancellation** (finding (b)) — if the turn runner is ever "simplified" into the
    request handler, turns die on client disconnect for claude/cursor/grok and nowhere else. Comment
    citing `drivers/claude.py:219`, plus the regression test.
