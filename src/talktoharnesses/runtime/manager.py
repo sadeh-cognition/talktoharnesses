@@ -8,6 +8,7 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from typing import cast
 from uuid import UUID, uuid4
 
 from talktoharnesses.application.persistence import Persistence
@@ -222,12 +223,30 @@ class RuntimeManager:
 
         binding = state.binding
         adapter = self._registry.create(configuration.kind)
+        set_redaction_patterns = getattr(adapter, "set_redaction_patterns", None)
+        if callable(set_redaction_patterns):
+            set_redaction_patterns(self._redaction_patterns)
         exe = executable_path or configuration.executable_path
         if not exe:
             raise DomainError(
                 ErrorCode.INVALID_EXECUTABLE,
                 "configuration has no executable_path",
             )
+
+        # Process-bound adapters may construct argv when the caller passes empty.
+        effective_argv: tuple[str, ...] = argv
+        build_argv = getattr(adapter, "build_argv", None)
+        if callable(build_argv) and not effective_argv:
+            built_obj = build_argv(configuration)
+            if isinstance(built_obj, tuple):
+                effective_argv = tuple(str(part) for part in cast(tuple[object, ...], built_obj))
+            elif isinstance(built_obj, list):
+                effective_argv = tuple(str(part) for part in cast(list[object], built_obj))
+            else:
+                raise DomainError(
+                    ErrorCode.INVALID_STATE,
+                    "build_argv must return a sequence of strings",
+                )
 
         process_id = uuid4()
         process_record = ProcessRecord(
@@ -270,13 +289,17 @@ class RuntimeManager:
                 binding_id=binding.id,
                 process_id=process_id,
                 launch=launch,
-                argv=argv,
+                argv=effective_argv,
             )
 
             handle = await self._supervisor.spawn(
                 spec,
                 redaction_patterns=self._redaction_patterns,
             )
+
+            bind_process = getattr(adapter, "bind_process", None)
+            if callable(bind_process):
+                bind_process(handle)
 
             process_record = process_record.model_copy(
                 update={

@@ -1,0 +1,36 @@
+{
+  "adapter_version": "2026.8.0.dev4",
+  "releases": [
+    {
+      "id": "grok-1.0.0-3cd0d0cbce",
+      "cli_version": "1.0.0",
+      "cli_build": "3cd0d0cbce",
+      "cli_channel": "stable",
+      "version_stdout_prefix": "grok 1.0.0 (3cd0d0cbce)",
+      "agent_name": "grok",
+      "acp_protocol_version": 1,
+      "platforms": ["linux", "darwin", "win32"],
+      "capabilities": {
+        "supports_resume": true,
+        "supports_interrupt": true,
+        "supports_steer": false,
+        "supports_multi_interaction": true,
+        "supports_nested_activity": false
+      },
+      "required_agent_methods": [
+        "session/new",
+        "session/load",
+        "session/prompt",
+        "session/cancel"
+      ],
+      "allowlisted_extensions": [
+        "_x.ai/mcp/servers_updated",
+        "_x.ai/settings/update",
+        "_x.ai/announcements/update"
+      ],
+      "notes": "Implementation target; matrix rows published only after create/resume gates pass."
+    }
+  ],
+  "create_matrix": [],
+  "resume_matrix": []
+}

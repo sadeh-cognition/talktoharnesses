@@ -24,6 +24,10 @@ class Persistence(Protocol):
         """Load an owner-scoped conversation aggregate snapshot."""
         ...
 
+    async def get_worker_snapshot(self, conversation_id: UUID) -> ConversationState:
+        """Load a conversation aggregate for a worker (no owner check)."""
+        ...
+
     async def save_snapshot(self, state: ConversationState) -> ConversationState:
         """Persist a snapshot using optimistic concurrency on ``version``."""
         ...
@@ -34,6 +38,15 @@ class Persistence(Protocol):
 
     async def claim_commands(self, worker_id: str, limit: int) -> Sequence[Command]:
         """Claim accepted work for a worker under lease semantics."""
+        ...
+
+    async def renew_command_lease(
+        self,
+        command_id: UUID,
+        worker_id: str,
+        expires_at: datetime,
+    ) -> None:
+        """Extend a claimed command lease owned by ``worker_id``."""
         ...
 
     async def update_command(self, command: Command) -> Command:
@@ -48,6 +61,17 @@ class Persistence(Protocol):
         events: Sequence[ConversationEvent],
     ) -> Sequence[ConversationEvent]:
         """Atomically persist projection state and conversation events."""
+        ...
+
+    async def commit_turn_batch(
+        self,
+        conversation_id: UUID,
+        expected_version: int,
+        state: ConversationState,
+        events: Sequence[ConversationEvent],
+        commands: Sequence[Command] = (),
+    ) -> Sequence[ConversationEvent]:
+        """Atomically persist aggregate, events, and command rows (no process)."""
         ...
 
     async def commit_runtime_lifecycle(

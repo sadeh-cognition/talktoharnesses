@@ -1,0 +1,137 @@
+"""Grok normalizer mapping tests."""
+
+from __future__ import annotations
+
+from uuid import uuid4
+
+import pytest
+
+from talktoharnesses.domain.enums import ApprovalDecision, ErrorCode
+from talktoharnesses.domain.errors import DomainError
+from talktoharnesses.domain.events import (
+    AssistantMessageDeltaPayload,
+    AssistantMessageStartedPayload,
+    ToolRequestedPayload,
+    TurnCompletedPayload,
+    TurnInterruptedPayload,
+    TurnOutcomeUnknownPayload,
+)
+from talktoharnesses.providers.grok.adapter import GrokAdapter
+from talktoharnesses.providers.grok.compatibility import load_grok_compatibility
+from talktoharnesses.providers.grok.normalizer import GrokNormalizer
+
+
+def test_message_stream_and_terminal() -> None:
+    n = GrokNormalizer()
+    n.set_session("sess-1")
+    turn = uuid4()
+    n.begin_turn(turn)
+    events = n.on_session_update(
+        {
+            "sessionId": "sess-1",
+            "update": {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": "hi"},
+            },
+        }
+    )
+    assert any(isinstance(e, AssistantMessageStartedPayload) for e in events)
+    assert any(isinstance(e, AssistantMessageDeltaPayload) for e in events)
+    terminal = n.on_prompt_terminal("end_turn")
+    assert any(isinstance(e, TurnCompletedPayload) for e in terminal)
+
+
+def test_cancelled_stop_reason() -> None:
+    n = GrokNormalizer()
+    n.set_session("s")
+    n.begin_turn(uuid4())
+    terminal = n.on_prompt_terminal("cancelled")
+    assert any(isinstance(e, TurnInterruptedPayload) for e in terminal)
+
+
+def test_mismatched_session_is_protocol_error() -> None:
+    n = GrokNormalizer()
+    n.set_session("a")
+    n.begin_turn(uuid4())
+    with pytest.raises(DomainError) as exc:
+        n.on_session_update(
+            {
+                "sessionId": "b",
+                "update": {"sessionUpdate": "agent_message_chunk", "content": "x"},
+            }
+        )
+    assert exc.value.code is ErrorCode.PROTOCOL_ERROR
+
+
+def test_resync_mode_emits_no_events() -> None:
+    n = GrokNormalizer()
+    n.set_session("s", resync=True)
+    events = n.on_session_update(
+        {
+            "sessionId": "s",
+            "update": {
+                "sessionUpdate": "agent_message_chunk",
+                "messageId": "m1",
+                "content": "old",
+            },
+        }
+    )
+    assert events == []
+
+
+def test_tool_arguments_are_redacted_before_emission() -> None:
+    n = GrokNormalizer()
+    n.set_redaction_patterns(("SECRET",))
+    n.set_session("s")
+    n.begin_turn(uuid4())
+    events = n.on_session_update(
+        {
+            "sessionId": "s",
+            "update": {
+                "sessionUpdate": "tool_call",
+                "toolCallId": "tool-1",
+                "rawInput": {"token": "prefix-SECRET-suffix"},
+            },
+        }
+    )
+    requested = next(event for event in events if isinstance(event, ToolRequestedPayload))
+    assert requested.arguments == {"token": "prefix-[REDACTED]-suffix"}
+
+
+def test_permission_decision_selects_an_advertised_option_id() -> None:
+    n = GrokNormalizer()
+    options = [{"optionId": "native-yes", "kind": "allow_once"}]
+
+    assert n.map_approval_decision(ApprovalDecision.ALLOW_ONCE, options) == {
+        "outcome": {"outcome": "selected", "optionId": "native-yes"}
+    }
+    assert n.map_approval_decision(ApprovalDecision.ALLOW_SESSION, options) == {
+        "outcome": {"outcome": "cancelled"}
+    }
+
+
+def test_delivered_protocol_fault_is_outcome_unknown() -> None:
+    n = GrokNormalizer()
+    n.set_session("s")
+    n.begin_turn(uuid4())
+
+    events = n.on_prompt_outcome_unknown("malformed notification")
+
+    assert isinstance(events[-1], TurnOutcomeUnknownPayload)
+
+
+def test_initialize_requires_pinned_identity_and_resume_capability() -> None:
+    adapter = GrokAdapter()
+    adapter._release = (  # pyright: ignore[reportPrivateUsage]
+        load_grok_compatibility().releases[0]
+    )
+    with pytest.raises(DomainError) as exc:
+        adapter._validate_initialize_identity({})  # pyright: ignore[reportPrivateUsage]
+    assert exc.value.code is ErrorCode.PROVIDER_INCOMPATIBLE
+
+    adapter._validate_initialize_identity(  # pyright: ignore[reportPrivateUsage]
+        {
+            "agentInfo": {"name": "grok", "version": "1.0.0"},
+            "agentCapabilities": {"loadSession": True},
+        }
+    )

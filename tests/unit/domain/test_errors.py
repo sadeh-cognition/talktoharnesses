@@ -11,6 +11,8 @@ def test_required_error_codes_exist() -> None:
         "conversation_busy",
         "mode_change_while_active",
         "unsupported_native_event",
+        "protocol_error",
+        "provider_incompatible",
         "working_directory_not_found",
         "workspace_root_not_found",
         "invalid_executable",
