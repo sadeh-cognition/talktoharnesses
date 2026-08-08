@@ -7,10 +7,7 @@ from typing import Any
 from uuid import UUID, uuid5
 
 from talktoharnesses.domain.enums import (
-    ApprovalDecision,
     ErrorCode,
-    FileOperation,
-    InteractionKind,
     ToolOutcome,
 )
 from talktoharnesses.domain.errors import DomainError
@@ -19,7 +16,6 @@ from talktoharnesses.domain.events import (
     AssistantMessageDeltaPayload,
     AssistantMessageStartedPayload,
     HarnessEvent,
-    InteractionRequestedPayload,
     ReasoningCompletedPayload,
     ReasoningDeltaPayload,
     ReasoningStartedPayload,
@@ -31,20 +27,13 @@ from talktoharnesses.domain.events import (
     TurnInterruptedPayload,
     UsageUpdatedPayload,
 )
-from talktoharnesses.domain.models import (
-    ApprovalRequestPayload,
-    CommandApprovalAction,
-    FileApprovalAction,
-)
 from talktoharnesses.providers.codex.schemas import (
     CodexAgentMessageDelta,
-    CodexApprovalRequest,
     CodexItemCompleted,
     CodexItemStarted,
     CodexNotification,
     CodexReasoningDelta,
     CodexTurnCompleted,
-    CodexTurnStarted,
     parse_codex_notification,
 )
 
@@ -122,47 +111,21 @@ class CodexNormalizer:
             return self._item_completed(note)
         if isinstance(note, CodexTurnCompleted):
             return self._turn_completed(note)
-        if isinstance(note, CodexTurnStarted):
-            return []
         return []
 
-    def on_approval_request(
-        self,
-        note: CodexApprovalRequest,
-        *,
-        interaction_id: UUID,
-    ) -> list[HarnessEvent]:
+    def fail_active_turn(self, *, error_code: str, message: str) -> list[HarnessEvent]:
         if self._active_turn_id is None:
-            raise DomainError(ErrorCode.INVALID_STATE, "approval without active turn")
-        action = None
-        operation = None
-        if note.argv:
-            action = CommandApprovalAction(argv=tuple(note.argv))
-        elif note.path and note.operation:
-            operation = FileOperation(note.operation)
-            action = FileApprovalAction(path=note.path, operation=operation)
-        decisions = (
-            ApprovalDecision.ALLOW_ONCE,
-            ApprovalDecision.DENY,
-            ApprovalDecision.CANCEL,
-        )
-        payload = ApprovalRequestPayload(
-            tool_name=note.tool_name,
-            command_args=tuple(note.argv) if note.argv else None,
-            path=note.path,
-            operation=operation,
-            summary=note.summary,
-            action=action,
-            available_decisions=decisions,
-        )
-        return [
-            InteractionRequestedPayload(
+            return []
+        events = self._close_open_streams()
+        events.append(
+            TurnFailedPayload(
                 turn_id=self._active_turn_id,
-                interaction_id=interaction_id,
-                kind=InteractionKind.APPROVAL,
-                request=payload,
+                error_code=error_code,
+                message=message,
             )
-        ]
+        )
+        self._active_turn_id = None
+        return events
 
     def _message_delta(self, note: CodexAgentMessageDelta) -> list[HarnessEvent]:
         if self._active_turn_id is None or self._resync_mode:

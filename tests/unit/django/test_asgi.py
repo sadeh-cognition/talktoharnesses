@@ -147,7 +147,7 @@ def test_get_service_fails_closed_without_lifespan() -> None:
     assert "not started" in exc.value.message
 
 
-def test_unsupported_codex_release_is_not_registered() -> None:
+def test_codex_without_broker_compatible_approval_api_is_not_registered() -> None:
     service = asgi_mod._build_service()  # pyright: ignore[reportPrivateUsage]
     assert (
         HarnessKind.CODEX not in service._registry.kinds()  # pyright: ignore[reportPrivateUsage]

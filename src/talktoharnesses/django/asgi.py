@@ -90,6 +90,8 @@ def _build_service() -> TalkToHarnessesService:
     registry.register(HarnessKind.CURSOR, CursorAdapter)
     registry.register(HarnessKind.CLAUDE, ClaudeAdapter)
     registry.register(HarnessKind.OPENCODE, OpenCodeAdapter)
+    # Codex is intentionally absent while its published compatibility matrices
+    # are empty: AsyncCodex 0.144.4 cannot defer and answer brokered approvals.
     broker = DjangoCommittedEventBroker()
     runtime = RuntimeManager(persistence, registry, clock=_utc_clock)
     return TalkToHarnessesService(

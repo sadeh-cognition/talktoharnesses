@@ -5,13 +5,12 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Callable
 from typing import Any, ClassVar, Literal, cast
-from uuid import UUID, uuid4
 
-from talktoharnesses.domain.enums import ApprovalDecision, ErrorCode, HarnessKind
+from talktoharnesses.domain.enums import ErrorCode, HarnessKind
 from talktoharnesses.domain.errors import DomainError
-from talktoharnesses.domain.events import HarnessEvent, InteractionRequestedPayload
+from talktoharnesses.domain.events import HarnessEvent
 from talktoharnesses.domain.models import (
     HarnessCapabilities,
     HarnessConfiguration,
@@ -28,12 +27,11 @@ from talktoharnesses.providers.adapter import (
 from talktoharnesses.providers.codex.compatibility import CodexReleaseRecord
 from talktoharnesses.providers.codex.normalizer import CodexNormalizer
 from talktoharnesses.providers.codex.probe import probe_codex
-from talktoharnesses.providers.codex.schemas import CodexApprovalRequest, parse_codex_notification
+from talktoharnesses.providers.codex.schemas import parse_codex_notification
 
 logger = logging.getLogger(__name__)
 
 ClientFactory = Callable[[], Any]
-ApprovalBridge = Callable[[CodexApprovalRequest], Awaitable[ApprovalDecision | None]]
 
 
 def _codex_settings(mode: str | None) -> tuple[Any, Any]:
@@ -71,10 +69,8 @@ class CodexAdapter:
         self,
         *,
         client_factory: ClientFactory | None = None,
-        approval_bridge: ApprovalBridge | None = None,
     ) -> None:
         self._client_factory = client_factory
-        self._approval_bridge = approval_bridge
         self._client: Any | None = None
         self._thread: Any | None = None
         self._turn_handle: Any | None = None
@@ -86,7 +82,6 @@ class CodexAdapter:
         self._event_q: asyncio.Queue[HarnessEvent | HarnessInteractionRequest | None] = (
             asyncio.Queue()
         )
-        self._pending_interactions: dict[UUID, asyncio.Future[ApprovalDecision | None]] = {}
         self._closed = False
 
     def set_redaction_patterns(self, patterns: tuple[str, ...]) -> None:
@@ -203,10 +198,6 @@ class CodexAdapter:
 
     async def interrupt(self, session: HarnessSession) -> None:
         self._require_session(session)
-        for interaction_id, future in list(self._pending_interactions.items()):
-            if not future.done():
-                future.set_result(ApprovalDecision.CANCEL)
-            del self._pending_interactions[interaction_id]
         if self._turn_handle is not None:
             with contextlib.suppress(Exception):
                 await self._turn_handle.interrupt()
@@ -217,16 +208,11 @@ class CodexAdapter:
         answer: InteractionAnswer,
     ) -> None:
         self._require_session(session)
-        pending = self._pending_interactions.get(answer.interaction_id)
-        if pending is None:
-            raise DomainError(
-                ErrorCode.INVALID_STATE,
-                "no pending interaction for answer",
-                details={"interaction_id": str(answer.interaction_id)},
-            )
-        del self._pending_interactions[answer.interaction_id]
-        if not pending.done():
-            pending.set_result(answer.decision)
+        del answer
+        raise DomainError(
+            ErrorCode.PROVIDER_INCOMPATIBLE,
+            "the pinned Codex AsyncCodex SDK cannot answer brokered interactions",
+        )
 
     def events(
         self,
@@ -272,10 +258,6 @@ class CodexAdapter:
                     if asyncio.iscoroutine(result):
                         await result
             self._client = None
-        for future in self._pending_interactions.values():
-            if not future.done():
-                future.set_result(ApprovalDecision.CANCEL)
-        self._pending_interactions.clear()
         with contextlib.suppress(asyncio.QueueFull):
             self._event_q.put_nowait(None)
 
@@ -314,27 +296,28 @@ class CodexAdapter:
                 await self._handle_native_event(event)
         except asyncio.CancelledError:
             return
+        except DomainError as exc:
+            logger.warning("codex stream rejected: %s", exc.message)
+            await self._emit_many(
+                self._normalizer.fail_active_turn(
+                    error_code=exc.code.value,
+                    message=exc.message,
+                )
+            )
+            await self._event_q.put(None)
         except Exception as exc:  # noqa: BLE001
             logger.exception("codex stream failed")
-            events = self._normalizer.on_notification(
-                {
-                    "method": "turnCompleted",
-                    "thread_id": self._session.native_session_id if self._session else "",
-                    "turn_id": str(getattr(handle, "id", "")),
-                    "status": "failed",
-                    "error_message": str(exc),
-                }
+            await self._emit_many(
+                self._normalizer.fail_active_turn(
+                    error_code="provider_error",
+                    message=str(exc),
+                )
             )
-            await self._emit_many(events)
         finally:
             self._turn_handle = None
 
     async def _handle_native_event(self, event: Any) -> None:
         raw = self._coerce_notification(event)
-        if raw.get("method") == "approvalRequest":
-            note = CodexApprovalRequest.model_validate(raw)
-            await self._handle_approval(note)
-            return
         try:
             parsed = parse_codex_notification(raw)
         except Exception as exc:
@@ -344,31 +327,6 @@ class CodexAdapter:
             ) from exc
         events = self._normalizer.on_notification(parsed)
         await self._emit_many(events)
-
-    async def _handle_approval(self, note: CodexApprovalRequest) -> None:
-        interaction_id = uuid4()
-        loop = asyncio.get_running_loop()
-        future: asyncio.Future[ApprovalDecision | None] = loop.create_future()
-        self._pending_interactions[interaction_id] = future
-        events = self._normalizer.on_approval_request(note, interaction_id=interaction_id)
-        for event in events:
-            if isinstance(event, InteractionRequestedPayload):
-                await self._event_q.put(
-                    HarnessInteractionRequest(
-                        payload=event,
-                        provider_correlation={"request_id": note.request_id},
-                    )
-                )
-            else:
-                await self._event_q.put(event)
-        if self._approval_bridge is not None:
-            decision = await self._approval_bridge(note)
-            if not future.done():
-                future.set_result(decision)
-            self._pending_interactions.pop(interaction_id, None)
-            return
-        # Await broker answer via answer_interaction (in-memory waiter).
-        await future
 
     def _coerce_notification(self, event: Any) -> dict[str, Any]:
         if isinstance(event, dict):

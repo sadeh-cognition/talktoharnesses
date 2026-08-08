@@ -132,6 +132,21 @@ class ClaudeNormalizer:
             )
         ]
 
+    def fail_active_turn(self, *, error_code: str, message: str) -> list[HarnessEvent]:
+        """Close open streams and fail the active turn."""
+        if self._active_turn_id is None:
+            return []
+        events = self._close_open_streams()
+        events.append(
+            TurnFailedPayload(
+                turn_id=self._active_turn_id,
+                error_code=error_code,
+                message=message,
+            )
+        )
+        self._active_turn_id = None
+        return events
+
     def _assistant(self, msg: ClaudeAssistantMessage) -> list[HarnessEvent]:
         if self._active_turn_id is None or self._resync_mode:
             return []
@@ -249,27 +264,7 @@ class ClaudeNormalizer:
                 "claude result session_id mismatch",
                 details={"expected": self._native_session_id, "got": msg.session_id},
             )
-        events: list[HarnessEvent] = []
-        if self._reasoning_id is not None:
-            events.append(
-                ReasoningCompletedPayload(
-                    turn_id=self._active_turn_id,
-                    reasoning_id=self._reasoning_id,
-                    text=self._reasoning_text,
-                )
-            )
-            self._reasoning_id = None
-            self._reasoning_text = ""
-        if self._message_id is not None:
-            events.append(
-                AssistantMessageCompletedPayload(
-                    turn_id=self._active_turn_id,
-                    message_id=self._message_id,
-                    text=self._message_text,
-                )
-            )
-            self._message_id = None
-            self._message_text = ""
+        events = self._close_open_streams()
         if msg.usage:
             events.append(
                 UsageUpdatedPayload(
@@ -297,6 +292,31 @@ class ClaudeNormalizer:
                 )
             )
         self._active_turn_id = None
+        return events
+
+    def _close_open_streams(self) -> list[HarnessEvent]:
+        assert self._active_turn_id is not None
+        events: list[HarnessEvent] = []
+        if self._reasoning_id is not None:
+            events.append(
+                ReasoningCompletedPayload(
+                    turn_id=self._active_turn_id,
+                    reasoning_id=self._reasoning_id,
+                    text=self._reasoning_text,
+                )
+            )
+            self._reasoning_id = None
+            self._reasoning_text = ""
+        if self._message_id is not None:
+            events.append(
+                AssistantMessageCompletedPayload(
+                    turn_id=self._active_turn_id,
+                    message_id=self._message_id,
+                    text=self._message_text,
+                )
+            )
+            self._message_id = None
+            self._message_text = ""
         return events
 
     def _redact(self, text: str) -> str:

@@ -342,7 +342,7 @@ class CursorAdapter:
         except asyncio.CancelledError:
             return
         except ProtocolCloseError as exc:
-            await self._emit_prompt_outcome_unknown(exc.message)
+            await self._emit_prompt_outcome_unknown_and_close(exc.message)
             return
         except JsonRpcRemoteError as exc:
             events = self._normalizer.on_prompt_terminal(
@@ -352,7 +352,7 @@ class CursorAdapter:
             await self._emit_many(events)
             return
         except DomainError as exc:
-            await self._emit_prompt_outcome_unknown(exc.message)
+            await self._emit_prompt_outcome_unknown_and_close(exc.message)
             return
         except Exception as exc:
             events = self._normalizer.on_prompt_terminal("error", error_message=str(exc))
@@ -368,7 +368,10 @@ class CursorAdapter:
         events = self._normalizer.on_prompt_terminal(stop_reason)
         await self._emit_many(events)
 
-    async def _emit_prompt_outcome_unknown(self, message: str) -> None:
+    async def _emit_prompt_outcome_unknown_and_close(self, message: str) -> None:
+        # These errors come from an ACP connection that has already stopped
+        # accepting writes. Persist the uncertain outcome before closing only
+        # this adapter's event stream.
         events = self._normalizer.on_prompt_outcome_unknown(message)
         await self._emit_many(events)
         await self._event_q.put(None)

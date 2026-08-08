@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict
 
 _STRICT = ConfigDict(extra="forbid", frozen=True)
 
@@ -80,22 +80,6 @@ class CodexItemCompleted(BaseModel):
     status: str | None = None
 
 
-class CodexApprovalRequest(BaseModel):
-    """Injectable approval bridge payload (public AsyncCodex has no deferred handler)."""
-
-    model_config = _STRICT
-
-    method: Literal["approvalRequest"] = "approvalRequest"
-    request_id: str
-    thread_id: str
-    turn_id: str | None = None
-    tool_name: str | None = None
-    summary: str | None = None
-    argv: list[str] = Field(default_factory=list)
-    path: str | None = None
-    operation: str | None = None
-
-
 CodexNotification = (
     CodexAgentMessageDelta
     | CodexReasoningDelta
@@ -103,7 +87,6 @@ CodexNotification = (
     | CodexTurnCompleted
     | CodexItemStarted
     | CodexItemCompleted
-    | CodexApprovalRequest
 )
 
 
@@ -121,6 +104,4 @@ def parse_codex_notification(raw: dict[str, Any]) -> CodexNotification:
         return CodexItemStarted.model_validate(raw)
     if method == "itemCompleted":
         return CodexItemCompleted.model_validate(raw)
-    if method == "approvalRequest":
-        return CodexApprovalRequest.model_validate(raw)
     raise ValueError(f"unsupported codex notification method: {method!r}")

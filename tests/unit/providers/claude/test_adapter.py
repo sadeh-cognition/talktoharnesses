@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from uuid import uuid4
@@ -9,7 +10,7 @@ from uuid import uuid4
 import pytest
 
 from talktoharnesses.domain.enums import HarnessKind
-from talktoharnesses.domain.events import ToolCompletedPayload
+from talktoharnesses.domain.events import ToolCompletedPayload, TurnFailedPayload
 from talktoharnesses.domain.models import HarnessCapabilities, HarnessConfiguration, LaunchSnapshot
 from talktoharnesses.providers.adapter import StartSessionRequest, SteerRequest, TurnRequest
 from talktoharnesses.providers.claude.adapter import ClaudeAdapter
@@ -31,6 +32,7 @@ class FakeClaudeClient:
     prompts: list[str] = field(default_factory=list[str])
     interrupted: bool = False
     disconnected: bool = False
+    responses: list[dict[str, object]] | None = None
 
     def __post_init__(self) -> None:
         resume = _option_get(self.options, "resume")
@@ -54,6 +56,10 @@ class FakeClaudeClient:
 
     def receive_response(self) -> AsyncIterator[dict[str, object]]:
         async def _gen() -> AsyncIterator[dict[str, object]]:
+            if self.responses is not None:
+                for response in self.responses:
+                    yield response
+                return
             yield {
                 "type": "assistant",
                 "content": [{"type": "text", "text": "pong"}],
@@ -132,14 +138,49 @@ async def test_start_submit_no_steer(monkeypatch: pytest.MonkeyPatch) -> None:
                 return out
         return out
 
-    import asyncio
-
     events = await asyncio.wait_for(_drain(), timeout=2.0)
     assert any(getattr(e, "type", None) == "turn_completed" for e in events)
     await adapter.interrupt(session)
     assert clients[0].interrupted is True
     await adapter.close(session)
     assert clients[0].disconnected is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("responses", "error_code"),
+    [
+        ([], "protocol_error"),
+        ([{"type": "future_message"}], "unsupported_native_event"),
+    ],
+)
+async def test_response_protocol_error_fails_turn_and_ends_stream(
+    responses: list[dict[str, object]],
+    error_code: str,
+) -> None:
+    def factory(options: object) -> FakeClaudeClient:
+        return FakeClaudeClient(options=options, responses=responses)
+
+    adapter = ClaudeAdapter(client_factory=factory)
+    session = await adapter.start(
+        StartSessionRequest(
+            conversation_id=uuid4(),
+            binding_id=uuid4(),
+            configuration=_config(),
+            launch=_launch(),
+        )
+    )
+    turn_id = uuid4()
+    await adapter.submit(session, TurnRequest(turn_id=turn_id, prompt="hi"))
+
+    async def _drain() -> list[object]:
+        return [item async for item in adapter.events(session)]
+
+    events = await asyncio.wait_for(_drain(), timeout=2.0)
+    failed = next(event for event in events if isinstance(event, TurnFailedPayload))
+    assert failed.turn_id == turn_id
+    assert failed.error_code == error_code
+    await adapter.close(session)
 
 
 def test_tool_result_uses_canonical_utf8_tail() -> None:

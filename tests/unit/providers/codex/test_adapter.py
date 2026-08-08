@@ -2,15 +2,22 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from uuid import uuid4
 
 import pytest
 
-from talktoharnesses.domain.enums import HarnessKind
-from talktoharnesses.domain.events import HarnessEvent, TurnCompletedPayload
-from talktoharnesses.domain.models import HarnessCapabilities, HarnessConfiguration, LaunchSnapshot
+from talktoharnesses.domain.enums import ApprovalDecision, ErrorCode, HarnessKind
+from talktoharnesses.domain.errors import DomainError
+from talktoharnesses.domain.events import HarnessEvent, TurnCompletedPayload, TurnFailedPayload
+from talktoharnesses.domain.models import (
+    HarnessCapabilities,
+    HarnessConfiguration,
+    InteractionAnswer,
+    LaunchSnapshot,
+)
 from talktoharnesses.providers.adapter import (
     HarnessInteractionRequest,
     StartSessionRequest,
@@ -191,6 +198,49 @@ async def test_two_conversations_isolated(monkeypatch: pytest.MonkeyPatch) -> No
     assert FakeCodex.instances[0] is not FakeCodex.instances[1]
     await a1.close(s1)
     await a2.close(s2)
+
+
+@pytest.mark.asyncio
+async def test_unanswerable_approval_event_fails_closed() -> None:
+    adapter = CodexAdapter(client_factory=FakeCodex)
+    session = await adapter.start(
+        StartSessionRequest(
+            conversation_id=uuid4(),
+            binding_id=uuid4(),
+            configuration=_config(),
+            launch=_launch(),
+        )
+    )
+    turn_id = uuid4()
+    await adapter.submit(session, TurnRequest(turn_id=turn_id, prompt="hi"))
+    assert adapter._thread is not None  # pyright: ignore[reportPrivateUsage]
+    handle = adapter._thread.handles[0]  # pyright: ignore[reportPrivateUsage]
+    handle.events.append(
+        {
+            "method": "approvalRequest",
+            "request_id": "approval-1",
+            "thread_id": session.native_session_id or "",
+        }
+    )
+
+    async def _drain() -> list[HarnessEvent | HarnessInteractionRequest]:
+        return [item async for item in adapter.events(session)]
+
+    events = await asyncio.wait_for(_drain(), timeout=2.0)
+    failed = next(event for event in events if isinstance(event, TurnFailedPayload))
+    assert failed.turn_id == turn_id
+    assert failed.error_code == ErrorCode.UNSUPPORTED_NATIVE_EVENT.value
+
+    with pytest.raises(DomainError) as exc:
+        await adapter.answer_interaction(
+            session,
+            InteractionAnswer(
+                interaction_id=uuid4(),
+                decision=ApprovalDecision.ALLOW_ONCE,
+            ),
+        )
+    assert exc.value.code is ErrorCode.PROVIDER_INCOMPATIBLE
+    await adapter.close(session)
 
 
 def test_normalizer_rejects_unknown_field() -> None:

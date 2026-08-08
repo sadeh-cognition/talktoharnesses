@@ -313,21 +313,25 @@ class ClaudeAdapter:
                 )
         except asyncio.CancelledError:
             return
-        except DomainError:
-            raise
+        except DomainError as exc:
+            logger.warning("claude response rejected: %s", exc.message)
+            await self._emit_many(
+                self._normalizer.fail_active_turn(
+                    error_code=exc.code.value,
+                    message=exc.message,
+                )
+            )
+            # Protocol/schema faults make the response stream unusable. Publish
+            # the terminal event first, then let the runtime close this adapter.
+            await self._event_q.put(None)
         except Exception as exc:  # noqa: BLE001
             logger.exception("claude response consumer failed")
-            if self._session and self._session.native_session_id:
-                events = self._normalizer.on_message(
-                    {
-                        "type": "result",
-                        "subtype": "error",
-                        "session_id": self._session.native_session_id,
-                        "is_error": True,
-                        "errors": [str(exc)],
-                    }
+            await self._emit_many(
+                self._normalizer.fail_active_turn(
+                    error_code="provider_error",
+                    message=str(exc),
                 )
-                await self._emit_many(events)
+            )
 
     async def _can_use_tool(
         self,
