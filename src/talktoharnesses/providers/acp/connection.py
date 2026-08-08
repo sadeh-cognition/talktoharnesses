@@ -21,12 +21,7 @@ from talktoharnesses.providers.acp.jsonrpc import (
     encode_frame,
     parse_envelope,
 )
-from talktoharnesses.providers.acp.schemas.base import (
-    GROK_CONTROL_NOTIFICATIONS,
-    is_allowlisted_method,
-    is_allowlisted_permission_request,
-    is_allowlisted_session_update,
-)
+from talktoharnesses.providers.acp.protocol import AcpProtocolConfig, grok_acp_protocol
 from talktoharnesses.runtime.handle import ProcessHandle
 
 logger = logging.getLogger(__name__)
@@ -44,8 +39,14 @@ class Delivered:
 class AcpConnection:
     """Single-consumer NDJSON JSON-RPC over ProcessHandle stdout/stdin."""
 
-    def __init__(self, process: ProcessHandle) -> None:
+    def __init__(
+        self,
+        process: ProcessHandle,
+        protocol: AcpProtocolConfig | None = None,
+    ) -> None:
         self._process = process
+        # Default preserves historical Grok wiring for existing call sites/tests.
+        self._protocol = protocol if protocol is not None else grok_acp_protocol()
         self._write_lock = asyncio.Lock()
         self._next_id = 1
         self._pending: dict[str | int, asyncio.Future[Any]] = {}
@@ -78,7 +79,7 @@ class AcpConnection:
         allow_unknown_method: bool = False,
     ) -> tuple[asyncio.Future[Any], Delivered]:
         """Send a request; return (response future, delivered marker after drain)."""
-        if not allow_unknown_method and not is_allowlisted_method(method, direction="outbound"):
+        if not allow_unknown_method and not self._protocol.is_outbound_method(method):
             raise DomainError(
                 ErrorCode.UNSUPPORTED_NATIVE_EVENT,
                 f"outbound method not allowlisted: {method}",
@@ -113,7 +114,7 @@ class AcpConnection:
         *,
         allow_unknown_method: bool = False,
     ) -> None:
-        if not allow_unknown_method and not is_allowlisted_method(method, direction="outbound"):
+        if not allow_unknown_method and not self._protocol.is_outbound_method(method):
             raise DomainError(
                 ErrorCode.UNSUPPORTED_NATIVE_EVENT,
                 f"outbound method not allowlisted: {method}",
@@ -270,7 +271,7 @@ class AcpConnection:
             future.set_result(result)
 
     async def _handle_inbound_request(self, request: JsonRpcRequest) -> None:
-        if not is_allowlisted_method(request.method, direction="inbound"):
+        if not self._protocol.is_inbound_request_method(request.method):
             raise DomainError(
                 ErrorCode.UNSUPPORTED_NATIVE_EVENT,
                 f"inbound request method not allowlisted: {request.method}",
@@ -278,7 +279,7 @@ class AcpConnection:
             )
         if request.method == "session/request_permission":
             params = request.params if isinstance(request.params, dict) else None
-            if not is_allowlisted_permission_request(params):
+            if not self._protocol.permission_request_validator(params):
                 raise DomainError(
                     ErrorCode.UNSUPPORTED_NATIVE_EVENT,
                     "permission request shape not allowlisted",
@@ -299,7 +300,7 @@ class AcpConnection:
 
     async def _handle_inbound_notification(self, notification: JsonRpcNotification) -> None:
         method = notification.method
-        if method in GROK_CONTROL_NOTIFICATIONS:
+        if self._protocol.is_control_notification(method):
             handler = self._notification_handlers.get(method)
             if handler is not None:
                 await handler(notification)
@@ -308,13 +309,13 @@ class AcpConnection:
 
         if method == "session/update":
             params = notification.params if isinstance(notification.params, dict) else None
-            if not is_allowlisted_session_update(params):
+            if not self._protocol.session_update_validator(params):
                 raise DomainError(
                     ErrorCode.UNSUPPORTED_NATIVE_EVENT,
                     "session/update variant not allowlisted",
                     details={"params": notification.params},
                 )
-        elif not is_allowlisted_method(method, direction="inbound"):
+        elif not self._protocol.is_inbound_method(method):
             raise DomainError(
                 ErrorCode.UNSUPPORTED_NATIVE_EVENT,
                 f"inbound notification not allowlisted: {method}",

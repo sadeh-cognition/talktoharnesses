@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import cast
@@ -23,6 +23,7 @@ from talktoharnesses.domain.events import (
     ProviderWarningPayload,
 )
 from talktoharnesses.domain.models import (
+    HarnessCapabilities,
     HarnessConfiguration,
     LaunchSnapshot,
     ProcessRecord,
@@ -36,6 +37,7 @@ from talktoharnesses.domain.transitions import (
     resume_session,
     start_session,
 )
+from talktoharnesses.providers._sdk_managed import SdkManagedAdapter
 from talktoharnesses.providers.adapter import (
     HarnessAdapter,
     HarnessSession,
@@ -51,6 +53,7 @@ from talktoharnesses.runtime.events import (
     ProcessStderrTruncatedEvent,
 )
 from talktoharnesses.runtime.handle import ProcessHandle
+from talktoharnesses.runtime.paths import resolve_directory, resolve_executable
 from talktoharnesses.runtime.policy import RuntimePolicy
 from talktoharnesses.runtime.spec import ProcessSpec
 from talktoharnesses.runtime.supervisor import ProcessSupervisor
@@ -66,13 +69,17 @@ def _empty_tasks() -> list[asyncio.Task[None]]:
     return []
 
 
+def _is_sdk_managed(adapter: HarnessAdapter) -> bool:
+    return isinstance(adapter, SdkManagedAdapter) or getattr(adapter, "sdk_managed", False) is True
+
+
 @dataclass
 class ManagedRuntime:
     conversation_id: UUID
     owner_id: str
     adapter: HarnessAdapter
     session: HarnessSession
-    process: ProcessHandle
+    process: ProcessHandle | None
     process_record: ProcessRecord
     launch: LaunchSnapshot
     tasks: list[asyncio.Task[None]] = field(default_factory=_empty_tasks)
@@ -226,8 +233,9 @@ class RuntimeManager:
         set_redaction_patterns = getattr(adapter, "set_redaction_patterns", None)
         if callable(set_redaction_patterns):
             set_redaction_patterns(self._redaction_patterns)
+        sdk_managed = _is_sdk_managed(adapter)
         exe = executable_path or configuration.executable_path
-        if not exe:
+        if not sdk_managed and not exe:
             raise DomainError(
                 ErrorCode.INVALID_EXECUTABLE,
                 "configuration has no executable_path",
@@ -275,36 +283,48 @@ class RuntimeManager:
                 adapter.probe(configuration),
                 timeout=self._policy.start_resume_timeout,
             )
-            launch = self._supervisor.build_launch_snapshot(
-                executable_path=exe,
-                working_directory=configuration.working_directory,
-                workspace_roots=configuration.workspace_roots,
-                capabilities=caps,
-                model=configuration.model,
-                mode=configuration.mode,
-                adapter_version=adapter_version,
-            )
-            spec = ProcessSpec(
-                conversation_id=conversation_id,
-                binding_id=binding.id,
-                process_id=process_id,
-                launch=launch,
-                argv=effective_argv,
-            )
+            if sdk_managed:
+                launch = self._build_sdk_launch_snapshot(
+                    executable_path=exe,
+                    working_directory=configuration.working_directory,
+                    workspace_roots=configuration.workspace_roots,
+                    capabilities=caps,
+                    model=configuration.model,
+                    mode=configuration.mode,
+                    adapter_version=adapter_version,
+                )
+            else:
+                assert exe is not None
+                launch = self._supervisor.build_launch_snapshot(
+                    executable_path=exe,
+                    working_directory=configuration.working_directory,
+                    workspace_roots=configuration.workspace_roots,
+                    capabilities=caps,
+                    model=configuration.model,
+                    mode=configuration.mode,
+                    adapter_version=adapter_version,
+                )
+                spec = ProcessSpec(
+                    conversation_id=conversation_id,
+                    binding_id=binding.id,
+                    process_id=process_id,
+                    launch=launch,
+                    argv=effective_argv,
+                )
 
-            handle = await self._supervisor.spawn(
-                spec,
-                redaction_patterns=self._redaction_patterns,
-            )
+                handle = await self._supervisor.spawn(
+                    spec,
+                    redaction_patterns=self._redaction_patterns,
+                )
 
-            bind_process = getattr(adapter, "bind_process", None)
-            if callable(bind_process):
-                bind_process(handle)
+                bind_process = getattr(adapter, "bind_process", None)
+                if callable(bind_process):
+                    bind_process(handle)
 
             process_record = process_record.model_copy(
                 update={
                     "status": ProcessStatus.RUNNING,
-                    "pid": handle.pid,
+                    "pid": handle.pid if handle is not None else None,
                     "started_at": self._clock(),
                 }
             )
@@ -320,18 +340,106 @@ class RuntimeManager:
             )
             state = await self._persistence.get_snapshot(conversation_id, owner_id)
 
-            if resume_native_id is None:
-                session = await asyncio.wait_for(
-                    adapter.start(
-                        StartSessionRequest(
+            startup_retried = False
+            while True:
+                try:
+                    if resume_native_id is None:
+                        operation = adapter.start(
+                            StartSessionRequest(
+                                conversation_id=conversation_id,
+                                binding_id=binding.id,
+                                configuration=configuration,
+                                launch=launch,
+                            )
+                        )
+                    else:
+                        operation = adapter.resume(
+                            ResumeSessionRequest(
+                                conversation_id=conversation_id,
+                                binding_id=binding.id,
+                                configuration=configuration,
+                                native_session_id=resume_native_id,
+                                launch=launch,
+                            )
+                        )
+                    session = await asyncio.wait_for(
+                        operation,
+                        timeout=self._policy.start_resume_timeout,
+                    )
+                    break
+                except DomainError as exc:
+                    retry_startup_obj = getattr(adapter, "retry_startup", None)
+                    if startup_retried or not callable(retry_startup_obj) or handle is None:
+                        raise
+                    retry_startup = cast(
+                        Callable[[DomainError], Awaitable[tuple[str, ...] | None]],
+                        retry_startup_obj,
+                    )
+                    retry_argv_obj = await retry_startup(exc)
+                    if retry_argv_obj is None:
+                        raise
+                    startup_retried = True
+                    await handle.force_terminate(reason="startup_bind_retry")
+                    failed_record = process_record.model_copy(
+                        update={
+                            "status": ProcessStatus.FAILED,
+                            "exited_at": self._clock(),
+                            "exit_code": handle.returncode,
+                            "redacted_stderr_tail": handle.redacted_stderr_tail,
+                        }
+                    )
+                    await self._commit_process(
+                        state=state,
+                        process=failed_record,
+                        launch_history_entry=None,
+                        events=(),
+                    )
+                    state = await self._persistence.get_snapshot(conversation_id, owner_id)
+                    process_id = uuid4()
+                    process_record = ProcessRecord(
+                        id=process_id,
+                        conversation_id=conversation_id,
+                        binding_id=binding.id,
+                        status=ProcessStatus.STARTING,
+                    )
+                    await self._commit_process(
+                        state=state,
+                        process=process_record,
+                        launch_history_entry=None,
+                        events=(),
+                    )
+                    state = await self._persistence.get_snapshot(conversation_id, owner_id)
+                    retry_argv = tuple(str(part) for part in retry_argv_obj)
+                    handle = None
+                    handle = await self._supervisor.spawn(
+                        ProcessSpec(
                             conversation_id=conversation_id,
                             binding_id=binding.id,
-                            configuration=configuration,
+                            process_id=process_id,
                             launch=launch,
-                        )
-                    ),
-                    timeout=self._policy.start_resume_timeout,
-                )
+                            argv=retry_argv,
+                        ),
+                        redaction_patterns=self._redaction_patterns,
+                    )
+                    bind_process = getattr(adapter, "bind_process", None)
+                    if callable(bind_process):
+                        bind_process(handle)
+                    process_record = process_record.model_copy(
+                        update={
+                            "status": ProcessStatus.RUNNING,
+                            "pid": handle.pid,
+                            "started_at": self._clock(),
+                        }
+                    )
+                    await self._commit_process(
+                        state=state,
+                        process=process_record,
+                        launch_history_entry=None,
+                        events=(),
+                    )
+                    state = await self._persistence.get_snapshot(conversation_id, owner_id)
+
+            if resume_native_id is None:
                 result = start_session(
                     state,
                     now=self._clock(),
@@ -339,18 +447,6 @@ class RuntimeManager:
                     launch=launch,
                 )
             else:
-                session = await asyncio.wait_for(
-                    adapter.resume(
-                        ResumeSessionRequest(
-                            conversation_id=conversation_id,
-                            binding_id=binding.id,
-                            configuration=configuration,
-                            native_session_id=resume_native_id,
-                            launch=launch,
-                        )
-                    ),
-                    timeout=self._policy.start_resume_timeout,
-                )
                 result = resume_session(
                     state,
                     now=self._clock(),
@@ -377,16 +473,26 @@ class RuntimeManager:
                 process_record=process_record,
                 launch=launch,
             )
-            pump = asyncio.create_task(
-                self._lifecycle_pump(managed),
-                name=f"lifecycle-{conversation_id}",
-            )
-            managed.tasks.append(pump)
+            if handle is not None:
+                pump = asyncio.create_task(
+                    self._lifecycle_pump(managed),
+                    name=f"lifecycle-{conversation_id}",
+                )
+                managed.tasks.append(pump)
             self._runtimes[conversation_id] = managed
             self._arm_idle_timer(conversation_id)
             return session
 
         except asyncio.CancelledError:
+            if sdk_managed:
+                await asyncio.shield(
+                    self._rollback_sdk_startup(
+                        adapter,
+                        conversation_id=conversation_id,
+                        binding_id=binding.id,
+                        configuration=configuration,
+                    )
+                )
             if handle is not None:
                 await asyncio.shield(handle.force_terminate(reason="startup_cancelled"))
                 await asyncio.shield(
@@ -399,8 +505,26 @@ class RuntimeManager:
                         "session startup cancelled during shutdown",
                     )
                 )
+            elif sdk_managed:
+                await asyncio.shield(
+                    self._persist_failure(
+                        conversation_id,
+                        owner_id,
+                        process_record,
+                        None,
+                        ErrorCode.RUNTIME_TIMEOUT.value,
+                        "session startup cancelled during shutdown",
+                    )
+                )
             raise
         except TimeoutError as exc:
+            if sdk_managed:
+                await self._rollback_sdk_startup(
+                    adapter,
+                    conversation_id=conversation_id,
+                    binding_id=binding.id,
+                    configuration=configuration,
+                )
             if handle is not None:
                 await handle.force_terminate(reason="start_resume_timeout")
             await self._persist_failure(
@@ -417,6 +541,13 @@ class RuntimeManager:
                 details={"conversation_id": str(conversation_id)},
             ) from exc
         except DomainError as exc:
+            if sdk_managed:
+                await self._rollback_sdk_startup(
+                    adapter,
+                    conversation_id=conversation_id,
+                    binding_id=binding.id,
+                    configuration=configuration,
+                )
             if handle is not None:
                 await handle.force_terminate(reason="startup_failure")
             await self._persist_failure(
@@ -429,6 +560,13 @@ class RuntimeManager:
             )
             raise
         except Exception as exc:
+            if sdk_managed:
+                await self._rollback_sdk_startup(
+                    adapter,
+                    conversation_id=conversation_id,
+                    binding_id=binding.id,
+                    configuration=configuration,
+                )
             if handle is not None:
                 await handle.force_terminate(reason="startup_failure")
             await self._persist_failure(
@@ -440,6 +578,27 @@ class RuntimeManager:
                 str(exc),
             )
             raise
+
+    async def _rollback_sdk_startup(
+        self,
+        adapter: HarnessAdapter,
+        *,
+        conversation_id: UUID,
+        binding_id: UUID,
+        configuration: HarnessConfiguration,
+    ) -> None:
+        provisional = HarnessSession(
+            conversation_id=conversation_id,
+            binding_id=binding_id,
+            kind=configuration.kind,
+            model=configuration.model,
+            mode=configuration.mode,
+        )
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(
+                adapter.close(provisional),
+                timeout=self._policy.graceful_close_timeout,
+            )
 
     async def _persist_failure(
         self,
@@ -501,10 +660,46 @@ class RuntimeManager:
             events,
         )
 
+    def _build_sdk_launch_snapshot(
+        self,
+        *,
+        executable_path: str | None,
+        working_directory: str,
+        workspace_roots: tuple[str, ...],
+        capabilities: HarnessCapabilities,
+        model: str | None,
+        mode: str | None,
+        adapter_version: str,
+    ) -> LaunchSnapshot:
+        """Resolve cwd/roots for SDK-managed runtimes; executable is optional."""
+        workdir = resolve_directory(
+            working_directory,
+            error_code=ErrorCode.WORKING_DIRECTORY_NOT_FOUND,
+        )
+        roots = tuple(
+            resolve_directory(root, error_code=ErrorCode.WORKSPACE_ROOT_NOT_FOUND)
+            for root in workspace_roots
+        )
+        resolved_exe: str | None = None
+        if executable_path:
+            resolved_exe = str(resolve_executable(executable_path))
+        return LaunchSnapshot(
+            resolved_executable=resolved_exe,
+            harness_version=capabilities.version,
+            working_directory=str(workdir),
+            workspace_roots=tuple(str(r) for r in roots),
+            model=model,
+            mode=mode,
+            adapter_version=adapter_version,
+            capabilities=capabilities,
+        )
+
     async def _lifecycle_pump(
         self,
         managed: ManagedRuntime,
     ) -> None:
+        if managed.process is None:
+            return
         try:
             async for event in managed.process.events():
                 await self._handle_process_event(managed, event)
@@ -570,11 +765,11 @@ class RuntimeManager:
     ) -> tuple[ConversationState, ProcessRecord, tuple[ConversationEvent, ...]]:
         now = self._clock()
         process = managed.process_record
+        handle = managed.process
         payloads: list[EventPayload]
         if isinstance(event, ProcessStderrTruncatedEvent):
-            process = process.model_copy(
-                update={"redacted_stderr_tail": managed.process.redacted_stderr_tail}
-            )
+            stderr_tail = handle.redacted_stderr_tail if handle is not None else ""
+            process = process.model_copy(update={"redacted_stderr_tail": stderr_tail})
             payloads = [
                 ProcessStderrTruncatedPayload(
                     process_id=event.process_id,
@@ -589,14 +784,18 @@ class RuntimeManager:
                 )
             ]
         elif isinstance(event, ProcessExitedEvent):
+            stderr_tail = handle.redacted_stderr_tail if handle is not None else ""
+            # SDK-managed opaque processes (pid=None) exit with code None → EXITED.
+            if event.exit_code is None and handle is None or event.exit_code == 0:
+                status = ProcessStatus.EXITED
+            else:
+                status = ProcessStatus.FAILED
             process = process.model_copy(
                 update={
-                    "status": (
-                        ProcessStatus.EXITED if event.exit_code == 0 else ProcessStatus.FAILED
-                    ),
+                    "status": status,
                     "exit_code": event.exit_code,
                     "exited_at": now,
-                    "redacted_stderr_tail": managed.process.redacted_stderr_tail,
+                    "redacted_stderr_tail": stderr_tail,
                 }
             )
             if event.exit_code not in (0, None):
@@ -616,12 +815,13 @@ class RuntimeManager:
                 ProcessExitedPayload(process_id=event.process_id, exit_code=event.exit_code)
             ]
         elif isinstance(event, ProcessForcedTerminationEvent):
+            stderr_tail = handle.redacted_stderr_tail if handle is not None else ""
             process = process.model_copy(
                 update={
                     "status": ProcessStatus.TERMINATED,
                     "exited_at": now,
-                    "exit_code": managed.process.returncode,
-                    "redacted_stderr_tail": managed.process.redacted_stderr_tail,
+                    "exit_code": handle.returncode if handle is not None else None,
+                    "redacted_stderr_tail": stderr_tail,
                 }
             )
             payloads = [
@@ -650,7 +850,8 @@ class RuntimeManager:
                     timeout=self._policy.interrupt_timeout,
                 )
             except TimeoutError:
-                await managed.process.force_terminate(reason="interrupt_timeout")
+                if managed.process is not None:
+                    await managed.process.force_terminate(reason="interrupt_timeout")
                 try:
                     await self._persist_terminal(managed)
                 finally:
@@ -683,9 +884,12 @@ class RuntimeManager:
                 timeout=self._policy.graceful_close_timeout,
             )
         except TimeoutError:
-            await managed.process.force_terminate(reason="graceful_close_timeout")
+            if managed.process is not None:
+                await managed.process.force_terminate(reason="graceful_close_timeout")
         else:
-            await managed.process.close()
+            if managed.process is not None:
+                await managed.process.close()
+        # Persist terminal status for both process-bound and SDK-managed runtimes.
         await self._persist_terminal(managed, session_action="close", reason=reason)
         await self._teardown_runtime(managed, close_adapter=False)
 
@@ -707,7 +911,8 @@ class RuntimeManager:
                     managed.adapter.close(managed.session),
                     timeout=self._policy.graceful_close_timeout,
                 )
-            await managed.process.close()
+            if managed.process is not None:
+                await managed.process.close()
             await self._persist_terminal(managed, session_action="reap", reason="idle")
             await self._teardown_runtime(managed, close_adapter=False)
             return True
@@ -721,16 +926,17 @@ class RuntimeManager:
     ) -> None:
         if managed.terminal_persisted:
             return
+        handle = managed.process
         event: ProcessEvent
-        if managed.process.forced:
+        if handle is not None and handle.forced:
             event = ProcessForcedTerminationEvent(
                 process_id=managed.process_record.id,
-                reason=managed.process.forced_reason or reason,
+                reason=handle.forced_reason or reason,
             )
         else:
             event = ProcessExitedEvent(
                 process_id=managed.process_record.id,
-                exit_code=managed.process.returncode,
+                exit_code=handle.returncode if handle is not None else None,
             )
 
         while True:
@@ -740,13 +946,17 @@ class RuntimeManager:
             )
             expected_version = state.conversation.version
             prior_events: tuple[ConversationEvent, ...] = ()
-            if managed.process.stderr_truncated and not managed.stderr_truncation_persisted:
+            if (
+                handle is not None
+                and handle.stderr_truncated
+                and not managed.stderr_truncation_persisted
+            ):
                 state, _, prior_events = self._apply_process_event(
                     managed,
                     state,
                     ProcessStderrTruncatedEvent(
                         process_id=managed.process_record.id,
-                        retained_bytes=managed.process.retained_stderr_bytes,
+                        retained_bytes=handle.retained_stderr_bytes,
                     ),
                 )
             new_state, process, process_events = self._apply_process_event(
@@ -822,11 +1032,12 @@ class RuntimeManager:
                     managed.adapter.close(managed.session),
                     timeout=self._policy.graceful_close_timeout,
                 )
-        with contextlib.suppress(Exception):
-            if managed.process.returncode is None:
-                await managed.process.force_terminate(reason="teardown")
-            else:
-                await managed.process.close()
+        if managed.process is not None:
+            with contextlib.suppress(Exception):
+                if managed.process.returncode is None:
+                    await managed.process.force_terminate(reason="teardown")
+                else:
+                    await managed.process.close()
         self._runtimes.pop(managed.conversation_id, None)
 
     async def shutdown(self) -> None:
@@ -892,8 +1103,15 @@ class RuntimeManager:
             async with self._lock_for(managed.conversation_id):
                 if managed.closed:
                     return
-                with contextlib.suppress(Exception):
-                    await managed.process.force_terminate(reason="shutdown")
+                if managed.process is not None:
+                    with contextlib.suppress(Exception):
+                        await managed.process.force_terminate(reason="shutdown")
+                else:
+                    with contextlib.suppress(Exception):
+                        await asyncio.wait_for(
+                            managed.adapter.close(managed.session),
+                            timeout=self._policy.graceful_close_timeout,
+                        )
                 with contextlib.suppress(Exception):
                     await self._persist_terminal(
                         managed,

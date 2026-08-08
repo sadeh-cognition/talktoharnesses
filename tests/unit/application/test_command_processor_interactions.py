@@ -13,6 +13,7 @@ import pytest
 from tests.runtime.memory_persistence import MemoryPersistence
 
 from talktoharnesses.application.command_processor import CommandProcessor
+from talktoharnesses.application.delta_batcher import DeltaBatcher
 from talktoharnesses.application.interaction_broker import InteractionBroker
 from talktoharnesses.domain import (
     ApprovalDecision,
@@ -33,9 +34,11 @@ from talktoharnesses.domain import (
     submit_turn,
 )
 from talktoharnesses.domain.events import (
+    AssistantMessageDeltaPayload,
     ConversationEvent,
     InteractionRequestedPayload,
     TurnCompletedPayload,
+    TurnInterruptedPayload,
 )
 from talktoharnesses.domain.models import (
     AnswerInteractionPayload,
@@ -402,3 +405,84 @@ async def test_interrupt_cancels_open_interactions_before_adapter() -> None:
     assert p.interaction_answers[interaction.id].decision is ApprovalDecision.CANCEL
     assert any(e.type == "interaction_resolved" for e in publisher.events)
     await processor.stop()
+
+
+@pytest.mark.asyncio
+async def test_interrupt_flushes_pending_deltas_before_cancelling_interactions() -> None:
+    p = MemoryPersistence()
+    publisher = _Publisher()
+    broker = InteractionBroker(p, publisher, clock=_now)
+    adapter = _InteractionAdapter()
+    runtime = _Runtime(adapter)
+    processor = CommandProcessor(
+        p,
+        publisher,
+        cast(RuntimeManager, runtime),
+        clock=_now,
+        interaction_broker=broker,
+    )
+    cid, turn_id = await _seed_running(p)
+    state = await p.get_worker_snapshot(cid)
+    interaction = PendingInteraction(
+        conversation_id=cid,
+        turn_id=turn_id,
+        kind=InteractionKind.APPROVAL,
+        request=ApprovalRequestPayload(available_decisions=(ApprovalDecision.CANCEL,)),
+        created_at=_now(),
+    )
+    requested = request_interaction(state, interaction, now=_now())
+    await p.commit_facade_mutation(
+        cid,
+        "owner",
+        state.conversation.version,
+        requested.state,
+        requested.events,
+    )
+    await runtime.start(conversation_id=cid, owner_id="owner")
+
+    async def flush(
+        base_version: int,
+        pending_state: Any,
+        events: Sequence[ConversationEvent],
+        commands: Sequence[Command],
+    ) -> Sequence[ConversationEvent]:
+        return await p.commit_turn_batch(cid, base_version, pending_state, events, commands)
+
+    batcher = DeltaBatcher(conversation_id=cid, flush=flush, interval_ms=60_000)
+    processor._batchers[cid] = batcher  # pyright: ignore[reportPrivateUsage]
+    await processor._on_harness_event(  # pyright: ignore[reportPrivateUsage]
+        cid,
+        AssistantMessageDeltaPayload(
+            turn_id=turn_id,
+            message_id=uuid4(),
+            sequence=1,
+            text="partial",
+        ),
+        batcher,
+    )
+    assert batcher.state is not None
+
+    interrupt = Command(
+        conversation_id=cid,
+        kind=CommandKind.INTERRUPT,
+        status=CommandStatus.ACCEPTED,
+        idempotency_key="int-with-pending-delta",
+        target_turn_id=turn_id,
+        payload=__import__(
+            "talktoharnesses.domain.models", fromlist=["InterruptPayload"]
+        ).InterruptPayload(),
+        created_at=_now(),
+    )
+    await p.accept_command(interrupt)
+    await processor._execute_command(interrupt)  # pyright: ignore[reportPrivateUsage]
+    assert batcher.state is None
+
+    await processor._on_harness_event(  # pyright: ignore[reportPrivateUsage]
+        cid,
+        TurnInterruptedPayload(turn_id=turn_id, reason="user"),
+        batcher,
+    )
+
+    event_types = [event.type for event in p.events[cid]]
+    assert event_types.count("interaction_resolved") == 1
+    assert event_types[-1] == "turn_interrupted"

@@ -18,7 +18,7 @@ from talktoharnesses.django.asgi import (
     reset_service_for_tests,
     talktoharnesses_lifespan,
 )
-from talktoharnesses.domain import DomainError
+from talktoharnesses.domain import DomainError, HarnessKind
 
 
 @pytest.fixture(autouse=True)
@@ -145,6 +145,13 @@ def test_get_service_fails_closed_without_lifespan() -> None:
     with pytest.raises(DomainError) as exc:
         get_service()
     assert "not started" in exc.value.message
+
+
+def test_codex_without_broker_compatible_approval_api_is_not_registered() -> None:
+    service = asgi_mod._build_service()  # pyright: ignore[reportPrivateUsage]
+    assert (
+        HarnessKind.CODEX not in service._registry.kinds()  # pyright: ignore[reportPrivateUsage]
+    )
 
 
 def test_appconfig_ready_starts_nothing() -> None:

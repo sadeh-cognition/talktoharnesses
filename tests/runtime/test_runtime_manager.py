@@ -19,9 +19,10 @@ from tests.runtime.conftest import (
 
 from talktoharnesses.domain import DomainError, ErrorCode, HarnessKind
 from talktoharnesses.domain.enums import ActivityStatus
-from talktoharnesses.domain.models import BackgroundActivity
+from talktoharnesses.domain.models import BackgroundActivity, HarnessConfiguration
 from talktoharnesses.providers import AdapterRegistry
-from talktoharnesses.runtime import RuntimeManager, RuntimePolicy
+from talktoharnesses.providers.adapter import StartSessionRequest
+from talktoharnesses.runtime import ProcessHandle, RuntimeManager, RuntimePolicy
 from talktoharnesses.runtime.supervisor import ProcessSupervisor
 
 
@@ -446,6 +447,100 @@ async def test_launch_snapshot_survives_adapter_start_timeout(
     assert stored.binding is not None
     assert stored.binding.launch_snapshot is not None
     assert store.launch_history[state.conversation.id]
+
+
+@pytest.mark.asyncio
+async def test_sdk_client_is_closed_when_start_fails(
+    short_policy: RuntimePolicy,
+    owned_python: Path,
+    workdir: Path,
+    now: datetime,
+) -> None:
+    class FailingSdkAdapter(FakeAdapter):
+        sdk_managed = True
+
+        async def start(self, request: StartSessionRequest):
+            del request
+            raise DomainError(ErrorCode.PROTOCOL_ERROR, "injected SDK startup failure")
+
+    created: list[FailingSdkAdapter] = []
+
+    def factory() -> FailingSdkAdapter:
+        adapter = FailingSdkAdapter()
+        created.append(adapter)
+        return adapter
+
+    store = MemoryPersistence()
+    state = make_state(now=now, workdir=workdir, executable=str(owned_python))
+    store.seed(state)
+    registry = AdapterRegistry()
+    registry.register(HarnessKind.OPENCODE, factory)
+    manager = RuntimeManager(store, registry, policy=short_policy)
+    with pytest.raises(DomainError) as exc_info:
+        await manager.start(
+            conversation_id=state.conversation.id,
+            owner_id="owner-1",
+            configuration=state.binding.configuration,  # type: ignore[union-attr]
+            argv=(),
+        )
+    assert exc_info.value.code is ErrorCode.PROTOCOL_ERROR
+    assert created[0].closed is True
+
+
+@pytest.mark.asyncio
+async def test_process_adapter_retries_one_pre_session_bind_failure(
+    short_policy: RuntimePolicy,
+    owned_python: Path,
+    workdir: Path,
+    now: datetime,
+) -> None:
+    class RetryAdapter(FakeAdapter):
+        def __init__(self) -> None:
+            super().__init__()
+            self.process: ProcessHandle | None = None
+            self.start_calls = 0
+            self.retry_calls = 0
+
+        def build_argv(self, config: HarnessConfiguration) -> tuple[str, ...]:
+            del config
+            return _argv("exit_code", "7")
+
+        def bind_process(self, process: ProcessHandle) -> None:
+            self.process = process
+
+        async def start(self, request: StartSessionRequest):
+            self.start_calls += 1
+            if self.start_calls == 1:
+                assert self.process is not None
+                await self.process.wait()
+                raise DomainError(ErrorCode.RUNTIME_TIMEOUT, "bind failed")
+            return await super().start(request)
+
+        async def retry_startup(self, error: DomainError) -> tuple[str, ...]:
+            assert error.code is ErrorCode.RUNTIME_TIMEOUT
+            self.retry_calls += 1
+            return _argv("silence", "2")
+
+    adapter = RetryAdapter()
+    store = MemoryPersistence()
+    state = make_state(now=now, workdir=workdir, executable=str(owned_python))
+    store.seed(state)
+    registry = AdapterRegistry()
+    registry.register(HarnessKind.OPENCODE, lambda: adapter)
+    manager = RuntimeManager(store, registry, policy=short_policy)
+    await manager.start(
+        conversation_id=state.conversation.id,
+        owner_id="owner-1",
+        configuration=state.binding.configuration,  # type: ignore[union-attr]
+        argv=(),
+        executable_path=str(owned_python),
+    )
+    assert adapter.start_calls == 2
+    assert adapter.retry_calls == 1
+    records = list(store.processes.values())
+    assert len(records) == 2
+    assert any(record.status.value == "failed" for record in records)
+    await manager.shutdown()
 
 
 @pytest.mark.asyncio

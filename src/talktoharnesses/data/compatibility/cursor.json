@@ -1,0 +1,30 @@
+{
+  "adapter_version": "2026.8.0.dev7",
+  "releases": [
+    {
+      "id": "cursor-2026.08.04-aaa8809",
+      "cli_version": "2026.08.04-aaa8809",
+      "version_stdout_prefix": "2026.08.04-aaa8809",
+      "agent_name": "cursor",
+      "acp_protocol_version": 1,
+      "platforms": ["linux", "darwin", "win32"],
+      "capabilities": {
+        "supports_resume": true,
+        "supports_interrupt": true,
+        "supports_steer": false,
+        "supports_multi_interaction": true,
+        "supports_nested_activity": false
+      },
+      "required_agent_methods": [
+        "session/new",
+        "session/load",
+        "session/prompt",
+        "session/cancel"
+      ],
+      "allowlisted_extensions": [],
+      "notes": "Implementation target; matrix rows published only after create/resume gates pass."
+    }
+  ],
+  "create_matrix": [],
+  "resume_matrix": []
+}

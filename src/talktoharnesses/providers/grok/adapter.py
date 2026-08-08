@@ -19,6 +19,7 @@ from talktoharnesses.domain.models import (
 )
 from talktoharnesses.providers.acp.connection import AcpConnection
 from talktoharnesses.providers.acp.jsonrpc import JsonRpcRemoteError, ProtocolCloseError
+from talktoharnesses.providers.acp.protocol import grok_acp_protocol
 from talktoharnesses.providers.acp.schemas.base import ALLOWED_OUTBOUND_METHODS
 from talktoharnesses.providers.adapter import (
     HarnessInteractionRequest,
@@ -36,7 +37,7 @@ from talktoharnesses.runtime.handle import ProcessHandle
 
 logger = logging.getLogger(__name__)
 
-CLIENT_INFO = {"name": "talktoharnesses", "version": "2026.8.0.dev5"}
+CLIENT_INFO = {"name": "talktoharnesses", "version": "2026.8.0.dev7"}
 
 
 def _map_dict(value: object) -> dict[str, Any]:
@@ -258,7 +259,7 @@ class GrokAdapter:
                 "GrokAdapter has no bound process; RuntimeManager must bind_process first",
             )
         if self._connection is None:
-            conn = AcpConnection(self._process)
+            conn = AcpConnection(self._process, protocol=grok_acp_protocol())
             conn.set_notification_handler("session/update", self._on_session_update)
             for method in (
                 "_x.ai/mcp/servers_updated",
