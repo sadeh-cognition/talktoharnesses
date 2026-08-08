@@ -127,3 +127,5 @@ class ErrorCode(StrEnum):
     NO_QUEUED_PROMPT = "no_queued_prompt"
     IDEMPOTENCY_CONFLICT = "idempotency_conflict"
     OPTIMISTIC_CONFLICT = "optimistic_conflict"
+    INVALID_CURSOR = "invalid_cursor"
+    NOT_FOUND = "not_found"

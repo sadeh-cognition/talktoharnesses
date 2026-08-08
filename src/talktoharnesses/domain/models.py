@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Generic, Literal, TypeVar
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -456,6 +456,18 @@ class UsageRecord(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+T = TypeVar("T")
+
+
+class Page(BaseModel, Generic[T]):
+    """Keyset page shared by facade reads, HTTP JSON, and list endpoints."""
+
+    model_config = FROZEN
+
+    items: tuple[T, ...] = ()
+    next_cursor: str | None = None
+
+
 class ConversationShell(BaseModel):
     model_config = FROZEN
 
@@ -473,15 +485,84 @@ class ConversationShell(BaseModel):
     latest_activity_at: UtcDateTime | None = None
 
 
+class HarnessProjection(BaseModel):
+    model_config = FROZEN
+
+    id: UUID
+    owner_id: str
+    name: str
+    kind: HarnessKind
+    configuration: HarnessConfiguration
+    created_at: UtcDateTime
+
+
+class HarnessProbeProjection(BaseModel):
+    model_config = FROZEN
+
+    harness_id: UUID
+    capabilities: HarnessCapabilities
+    probed_at: UtcDateTime
+
+
 class TurnProjection(BaseModel):
     model_config = FROZEN
 
     id: UUID
+    conversation_id: UUID | None = None
     status: TurnStatus
+    user_message_id: UUID | None = None
+    command_id: UUID | None = None
     created_at: UtcDateTime
     started_at: UtcDateTime | None = None
     completed_at: UtcDateTime | None = None
     terminal_reason: str | None = None
+
+
+class MessageProjection(BaseModel):
+    model_config = FROZEN
+
+    id: UUID
+    turn_id: UUID
+    role: MessageRole
+    text: str = ""
+    sequence: int = 0
+    interrupted: bool = False
+    created_at: UtcDateTime
+
+
+class ToolProjection(BaseModel):
+    model_config = FROZEN
+
+    id: UUID
+    turn_id: UUID
+    tool_name: str
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    outcome: ToolOutcome = ToolOutcome.UNKNOWN
+    exit_status: int | None = None
+    paths: tuple[str, ...] = ()
+    output_tail: str = ""
+
+
+class PlanProjection(BaseModel):
+    model_config = FROZEN
+
+    id: UUID
+    turn_id: UUID
+    items: tuple[PlanItem, ...] = ()
+
+
+class ActivityProjection(BaseModel):
+    model_config = FROZEN
+
+    id: UUID
+    conversation_id: UUID
+    parent_turn_id: UUID
+    parent_activity_id: UUID | None = None
+    status: ActivityStatus = ActivityStatus.RUNNING
+    title: str | None = None
+    summary: str | None = None
+    created_at: UtcDateTime
+    completed_at: UtcDateTime | None = None
 
 
 class CommandProjection(BaseModel):
@@ -503,6 +584,7 @@ class InteractionProjection(BaseModel):
     status: InteractionStatus
     turn_id: UUID
     request: InteractionRequestPayload
+    draft: dict[str, Any] | None = None
     created_at: UtcDateTime
 
 
@@ -514,5 +596,45 @@ class ConversationDetail(BaseModel):
     model: str | None = None
     mode: str | None = None
     turns: tuple[TurnProjection, ...] = ()
+    messages: tuple[MessageProjection, ...] = ()
+    tools: tuple[ToolProjection, ...] = ()
+    plans: tuple[PlanProjection, ...] = ()
+    activity: tuple[ActivityProjection, ...] = ()
     pending_interactions: tuple[InteractionProjection, ...] = ()
     active_command: CommandProjection | None = None
+
+
+class ConversationSnapshot(BaseModel):
+    model_config = FROZEN
+
+    sequence: int = Field(ge=0)
+    detail: ConversationDetail
+
+
+class SyncProjection(BaseModel):
+    model_config = FROZEN
+
+    sequence: int = Field(ge=0)
+
+
+class SubmitTurnResult(BaseModel):
+    model_config = FROZEN
+
+    command: CommandProjection
+    turn: TurnProjection
+
+
+class TokenProjection(BaseModel):
+    """Bearer token response. Never includes raw jti."""
+
+    model_config = FROZEN
+
+    token: str
+    expires_at: UtcDateTime
+
+
+class ErrorProjection(BaseModel):
+    model_config = FROZEN
+
+    code: str
+    message: str

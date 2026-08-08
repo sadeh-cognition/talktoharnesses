@@ -9,6 +9,7 @@ import pytest
 
 from talktoharnesses.domain import (
     ApprovalDecision,
+    CommandKind,
     ConversationStatus,
     DomainError,
     ErrorCode,
@@ -180,6 +181,8 @@ def test_steer_success_and_fallback() -> None:
     )
     assert r.state.queued_user_text == "fallback"
     assert r.events[-1].payload.type == "turn_queued"
+    assert r.command is not None
+    assert r.command.kind is CommandKind.SUBMIT_TURN
 
 
 def test_submit_auto_steer_when_supported() -> None:

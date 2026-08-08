@@ -86,6 +86,7 @@ class GrokNormalizer:
         self._tools: dict[str, UUID] = {}
         self._tool_names: dict[str, str] = {}
         self._tool_outputs: dict[str, str] = {}
+        self._tool_seqs: dict[str, int] = {}
         self._seen_native_ids: set[str] = set()
         self._seen_offsets: set[str] = set()
         self._redaction_patterns: tuple[str, ...] = ()
@@ -370,11 +371,13 @@ class GrokNormalizer:
         if isinstance(content, str) and content:
             prev = self._tool_outputs.get(tool_call_id, "")
             self._tool_outputs[tool_call_id] = prev + content
+            seq = self._tool_seqs.get(tool_call_id, 0) + 1
+            self._tool_seqs[tool_call_id] = seq
             events.append(
                 ToolOutputDeltaPayload(
                     turn_id=turn_id,
                     tool_id=tool_id,
-                    sequence=len(self._tool_outputs[tool_call_id]),
+                    sequence=seq,
                     text=content,
                 )
             )
@@ -567,8 +570,7 @@ class GrokNormalizer:
             option_id = option.get("optionId") or option.get("option_id")
             kind = option.get("kind")
             if isinstance(option_id, str) and (
-                (isinstance(kind, str) and kind.lower() in kinds)
-                or option_id.lower() in kinds
+                (isinstance(kind, str) and kind.lower() in kinds) or option_id.lower() in kinds
             ):
                 return {"outcome": {"outcome": "selected", "optionId": option_id}}
         return {"outcome": {"outcome": "cancelled"}}

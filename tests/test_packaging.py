@@ -96,6 +96,8 @@ import talktoharnesses
 
 assert talktoharnesses.__version__
 assert find_spec("django") is None
+assert find_spec("jwt") is None
+assert find_spec("ninja") is None
 """,
     )
 
@@ -113,7 +115,11 @@ from django.core.checks import run_checks
 
 settings.configure(
     SECRET_KEY="test-not-for-production",
-    INSTALLED_APPS=["django.contrib.contenttypes", "talktoharnesses.django"],
+    INSTALLED_APPS=[
+        "django.contrib.contenttypes",
+        "django.contrib.auth",
+        "talktoharnesses.django",
+    ],
     DATABASES={"default": {"ENGINE": "django.db.backends.sqlite3", "NAME": ":memory:"}},
 )
 django.setup()

@@ -408,6 +408,18 @@ class ConversationTitleUpdatedPayload(BaseModel):
     title_native: str
 
 
+class ConversationMetadataChangedPayload(BaseModel):
+    """Complete current metadata values for archive/pin/snooze/delete clients."""
+
+    model_config = FROZEN
+
+    type: Literal["conversation_metadata_changed"] = "conversation_metadata_changed"
+    archived_at: UtcDateTime | None = None
+    pinned_at: UtcDateTime | None = None
+    snoozed_until: UtcDateTime | None = None
+    deleted_at: UtcDateTime | None = None
+
+
 class InteractionRequestedPayload(BaseModel):
     model_config = FROZEN
 
@@ -544,6 +556,7 @@ EventPayload = Annotated[
     | FileChangeProposedPayload
     | FileChangeAppliedPayload
     | ConversationTitleUpdatedPayload
+    | ConversationMetadataChangedPayload
     | InteractionRequestedPayload
     | InteractionDraftUpdatedPayload
     | InteractionResolvedPayload

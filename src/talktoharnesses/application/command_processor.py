@@ -19,7 +19,7 @@ from talktoharnesses.application.event_dispatcher import (
 )
 from talktoharnesses.application.persistence import Persistence
 from talktoharnesses.application.publisher import CommittedEventPublisher
-from talktoharnesses.domain.enums import CommandKind, ErrorCode
+from talktoharnesses.domain.enums import CommandKind, CommandStatus, ErrorCode
 from talktoharnesses.domain.errors import DomainError
 from talktoharnesses.domain.events import ConversationEvent, HarnessEvent
 from talktoharnesses.domain.models import (
@@ -29,7 +29,7 @@ from talktoharnesses.domain.models import (
     SteerPayload,
     SubmitTurnPayload,
 )
-from talktoharnesses.domain.transitions import ConversationState, start_turn
+from talktoharnesses.domain.transitions import ConversationState, apply_steer, start_turn
 from talktoharnesses.providers.adapter import SteerRequest, TurnRequest
 from talktoharnesses.runtime.manager import RuntimeManager
 
@@ -169,6 +169,27 @@ class CommandProcessor:
         if managed is None:
             raise DomainError(ErrorCode.INVALID_STATE, "failed to obtain runtime")
 
+        # Queued next-turn SUBMIT must wait until the active turn finishes.
+        if (
+            command.kind == CommandKind.SUBMIT_TURN
+            and state.active_turn is not None
+            and state.active_turn.command_id != command.id
+        ):
+            logger.info(
+                "deferring submit until active turn finishes conversation=%s command=%s",
+                command.conversation_id,
+                command.id,
+            )
+            await self._persistence.commit_turn_batch(
+                command.conversation_id,
+                state.conversation.version,
+                state,
+                (),
+                (command,),
+            )
+            await self._renew_lease(command)
+            return
+
         queued_prompt: str | None = None
         if (
             command.kind == CommandKind.SUBMIT_TURN
@@ -227,7 +248,9 @@ class CommandProcessor:
                 ),
             )
             if not ok:
-                logger.info("steer unsupported for command %s", command.id)
+                logger.info("steer unsupported for command %s; queueing prompt", command.id)
+                await self._fallback_failed_steer(started_cmd)
+                return
         elif command.kind == CommandKind.INTERRUPT:
             await adapter.interrupt(session)
         elif command.kind == CommandKind.ANSWER_INTERACTION:
@@ -241,6 +264,15 @@ class CommandProcessor:
             await adapter.answer_interaction(session, answer)
         else:
             logger.warning("command kind %s not executable by worker", command.kind)
+            settled = started_cmd.model_copy(
+                update={
+                    "status": CommandStatus.SETTLED,
+                    "settled_at": self._clock(),
+                    "worker_id": None,
+                    "lease_expires_at": None,
+                }
+            )
+            await self._persistence.update_command(settled)
             return
 
         now = self._clock()
@@ -248,14 +280,47 @@ class CommandProcessor:
         if command.id in state.commands:
             _, delivered_cmd = mark_command_delivered(state, command.id, now=now)
         else:
-            from talktoharnesses.domain.enums import CommandStatus
-
             delivered_cmd = started_cmd.model_copy(
                 update={"status": CommandStatus.DELIVERED, "delivered_at": now}
             )
         await self._persistence.update_command(delivered_cmd)
 
         self._ensure_pump(command.conversation_id)
+
+    async def _fallback_failed_steer(self, command: Command) -> None:
+        """Queue the steer prompt and release the command for later submit."""
+        assert isinstance(command.payload, SteerPayload)
+        state = await self._persistence.get_worker_snapshot(command.conversation_id)
+        now = self._clock()
+        current = state.commands.get(command.id, command)
+        result = apply_steer(
+            state,
+            prompt=command.payload.prompt,
+            idempotency_key=command.idempotency_key,
+            now=now,
+            command=current,
+            steer_succeeded=False,
+        )
+        queued = result.command or current
+        released = queued.model_copy(
+            update={
+                "status": CommandStatus.ACCEPTED,
+                "worker_id": None,
+                "lease_expires_at": None,
+                "delivery_started_at": None,
+            }
+        )
+        commands = dict(result.state.commands)
+        commands[released.id] = released
+        next_state = result.state.model_copy(update={"commands": commands})
+        committed = await self._persistence.commit_turn_batch(
+            command.conversation_id,
+            state.conversation.version,
+            next_state,
+            result.events,
+            (released,),
+        )
+        await self._safe_publish(committed)
 
     async def _ensure_runtime(self, state: ConversationState) -> None:
         if state.binding is None:
@@ -396,6 +461,33 @@ class CommandProcessor:
                 commands=result.commands,
                 force=result.terminal,
             )
+            if result.terminal:
+                await self._wake_queued_submit(conversation_id)
+
+    async def _wake_queued_submit(self, conversation_id: UUID) -> None:
+        """Re-accept a deferred queued submit so claim can start the next turn."""
+        state = await self._persistence.get_worker_snapshot(conversation_id)
+        if state.active_turn is not None or state.queued_turn is None:
+            return
+        command_id = state.queued_turn.command_id
+        if command_id is None:
+            return
+        command = state.commands.get(command_id)
+        if (
+            command is None
+            or command.kind != CommandKind.SUBMIT_TURN
+            or command.status != CommandStatus.CLAIMED
+            or command.delivery_started_at is not None
+        ):
+            return
+        released = command.model_copy(
+            update={
+                "status": CommandStatus.ACCEPTED,
+                "worker_id": None,
+                "lease_expires_at": None,
+            }
+        )
+        await self._persistence.update_command(released)
 
     async def _renew_lease(self, command: Command) -> None:
         if self._worker_id is None:

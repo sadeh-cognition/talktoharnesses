@@ -1,6 +1,6 @@
 [project]
 name = "talktoharnesses"
-version = "2026.8.0.dev4"
+version = "2026.8.0.dev5"
 description = "Unified coding-agent harness interface and optional Django app scaffold"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -16,6 +16,7 @@ dependencies = [
 django = [
     "django>=5.2,<5.3",
     "django-ninja",
+    "PyJWT>=2.8",
     "uvicorn",
 ]
 postgres = [
@@ -54,6 +55,7 @@ members = []
 target-version = "py311"
 line-length = 100
 src = ["src", "tests"]
+extend-exclude = ["**/migrations/**"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]

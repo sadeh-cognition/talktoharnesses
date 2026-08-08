@@ -8,7 +8,25 @@ from typing import Protocol
 from uuid import UUID
 
 from talktoharnesses.domain.events import ConversationEvent
-from talktoharnesses.domain.models import Command, InteractionAnswer, LaunchSnapshot, ProcessRecord
+from talktoharnesses.domain.models import (
+    ActivityProjection,
+    Command,
+    ConversationShell,
+    ConversationSnapshot,
+    HarnessCapabilities,
+    HarnessInstance,
+    HarnessProbeProjection,
+    HarnessProjection,
+    InteractionAnswer,
+    InteractionProjection,
+    LaunchSnapshot,
+    MessageProjection,
+    Page,
+    PlanProjection,
+    ProcessRecord,
+    ToolProjection,
+    TurnProjection,
+)
 from talktoharnesses.domain.transitions import ConversationState
 
 
@@ -115,4 +133,157 @@ class Persistence(Protocol):
 
     async def purge_soft_deleted(self, cutoff: datetime) -> int:
         """Retention: permanently purge soft-deleted conversations. Returns count."""
+        ...
+
+    # ------------------------------------------------------------------
+    # Phase 5 facade projection surface
+    # ------------------------------------------------------------------
+
+    async def create_harness(self, harness: HarnessInstance) -> HarnessProjection:
+        """Persist a new owner-scoped harness configuration."""
+        ...
+
+    async def list_harnesses(
+        self,
+        owner_id: str,
+        *,
+        cursor: str | None = None,
+        limit: int = 50,
+    ) -> Page[HarnessProjection]:
+        """Keyset-page harnesses for one owner (created_at DESC, id DESC)."""
+        ...
+
+    async def get_harness(self, harness_id: UUID, owner_id: str) -> HarnessProjection:
+        """Load one owner-scoped harness; cross-owner ≡ missing."""
+        ...
+
+    async def save_harness_probe(
+        self,
+        harness_id: UUID,
+        owner_id: str,
+        capabilities: HarnessCapabilities,
+        *,
+        probed_at: datetime,
+    ) -> HarnessProbeProjection:
+        """Persist the last successful probe for an owned harness."""
+        ...
+
+    async def get_harness_probe(
+        self,
+        harness_id: UUID,
+        owner_id: str,
+    ) -> HarnessProbeProjection:
+        """Return the last successful probe projection for an owned harness."""
+        ...
+
+    async def list_conversations(
+        self,
+        owner_id: str,
+        *,
+        cursor: str | None = None,
+        limit: int = 50,
+        include_archived: bool = True,
+    ) -> Page[ConversationShell]:
+        """Keyset-page conversation shells (updated_at DESC, id DESC). Soft-deleted excluded."""
+        ...
+
+    async def search_conversations(
+        self,
+        owner_id: str,
+        query: str,
+        *,
+        cursor: str | None = None,
+        limit: int = 50,
+    ) -> Page[ConversationShell]:
+        """Portable case-insensitive substring search over sanitized documents."""
+        ...
+
+    async def get_conversation_snapshot(
+        self,
+        conversation_id: UUID,
+        owner_id: str,
+    ) -> ConversationSnapshot:
+        """Sequence-stamped detail (20 user-anchored turns) in one transaction."""
+        ...
+
+    async def get_high_water_sequence(
+        self,
+        conversation_id: UUID,
+        owner_id: str,
+        *,
+        include_deleted: bool = False,
+    ) -> int:
+        """Committed conversation-local high-water sequence (owner-scoped)."""
+        ...
+
+    async def page_turns(
+        self,
+        conversation_id: UUID,
+        owner_id: str,
+        *,
+        cursor: str | None = None,
+        limit: int = 50,
+    ) -> Page[TurnProjection]: ...
+
+    async def page_messages(
+        self,
+        conversation_id: UUID,
+        owner_id: str,
+        *,
+        cursor: str | None = None,
+        limit: int = 50,
+    ) -> Page[MessageProjection]: ...
+
+    async def page_tools(
+        self,
+        conversation_id: UUID,
+        owner_id: str,
+        *,
+        cursor: str | None = None,
+        limit: int = 50,
+    ) -> Page[ToolProjection]: ...
+
+    async def page_plans(
+        self,
+        conversation_id: UUID,
+        owner_id: str,
+        *,
+        cursor: str | None = None,
+        limit: int = 50,
+    ) -> Page[PlanProjection]: ...
+
+    async def page_activity(
+        self,
+        conversation_id: UUID,
+        owner_id: str,
+        *,
+        cursor: str | None = None,
+        limit: int = 50,
+    ) -> Page[ActivityProjection]: ...
+
+    async def page_pending_interactions(
+        self,
+        conversation_id: UUID,
+        owner_id: str,
+        *,
+        cursor: str | None = None,
+        limit: int = 50,
+    ) -> Page[InteractionProjection]:
+        """Pending/draft interactions ordered created_at ASC, id ASC."""
+        ...
+
+    async def commit_facade_mutation(
+        self,
+        conversation_id: UUID,
+        owner_id: str,
+        expected_version: int,
+        state: ConversationState,
+        events: Sequence[ConversationEvent],
+        commands: Sequence[Command] = (),
+        interaction_answers: Sequence[InteractionAnswer] = (),
+    ) -> Sequence[ConversationEvent]:
+        """Atomic aggregate, projections, events, commands, and answers commit.
+
+        Returns only the committed events for broker publication.
+        """
         ...

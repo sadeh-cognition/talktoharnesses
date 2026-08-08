@@ -28,6 +28,33 @@ uv add "talktoharnesses[django]"
 
 Django app path for host projects: `talktoharnesses.django`.
 
+### ASGI / API (django extra)
+
+```python
+# host/asgi.py
+from django.core.asgi import get_asgi_application
+from talktoharnesses.django.asgi import talktoharnesses_lifespan
+
+application = talktoharnesses_lifespan(get_asgi_application())
+```
+
+```python
+# host/urls.py
+from django.urls import include, path
+
+urlpatterns = [
+    path("api/v1/", include("talktoharnesses.django.api.urls")),
+]
+```
+
+```bash
+uvicorn host.asgi:application --host 127.0.0.1
+```
+
+Required setting: `TALKTOHARNESSES_JWT_SIGNING_KEY` (≥32 bytes, must not equal
+`SECRET_KEY`). Authentication does not sandbox harness execution — authorized
+turn submitters run local programs as the Django OS user.
+
 ## Development
 
 ```bash
