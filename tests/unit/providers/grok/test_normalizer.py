@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -11,11 +12,14 @@ from talktoharnesses.domain.errors import DomainError
 from talktoharnesses.domain.events import (
     AssistantMessageDeltaPayload,
     AssistantMessageStartedPayload,
+    InteractionRequestedPayload,
     ToolRequestedPayload,
     TurnCompletedPayload,
     TurnInterruptedPayload,
     TurnOutcomeUnknownPayload,
 )
+from talktoharnesses.domain.models import ApprovalRequestPayload
+from talktoharnesses.providers.adapter import HarnessInteractionRequest
 from talktoharnesses.providers.grok.adapter import GrokAdapter
 from talktoharnesses.providers.grok.compatibility import load_grok_compatibility
 from talktoharnesses.providers.grok.normalizer import GrokNormalizer
@@ -107,6 +111,43 @@ def test_permission_decision_selects_an_advertised_option_id() -> None:
     }
     assert n.map_approval_decision(ApprovalDecision.ALLOW_SESSION, options) == {
         "outcome": {"outcome": "cancelled"}
+    }
+
+
+def test_permission_advertises_cancel_even_without_selected_option() -> None:
+    n = GrokNormalizer()
+    n.set_session("s")
+    n.begin_turn(uuid4())
+
+    event = n.on_permission_request({}, interaction_id=uuid4())[0]
+
+    assert isinstance(event, InteractionRequestedPayload)
+    assert isinstance(event.request, ApprovalRequestPayload)
+    assert event.request.available_decisions == (ApprovalDecision.CANCEL,)
+
+
+@pytest.mark.asyncio
+async def test_adapter_wraps_permission_correlation_in_private_envelope() -> None:
+    adapter = GrokAdapter()
+    adapter._normalizer.set_session("s")  # pyright: ignore[reportPrivateUsage]
+    adapter._normalizer.begin_turn(uuid4())  # pyright: ignore[reportPrivateUsage]
+    request = SimpleNamespace(
+        id="rpc-7",
+        params={
+            "sessionId": "s",
+            "toolCall": {"toolCallId": "tool-3"},
+            "options": [],
+        },
+    )
+
+    await adapter._on_permission_request(request)  # pyright: ignore[reportPrivateUsage]
+    event = adapter._event_q.get_nowait()  # pyright: ignore[reportPrivateUsage]
+
+    assert isinstance(event, HarnessInteractionRequest)
+    assert event.provider_correlation == {
+        "json_rpc_request_id": "rpc-7",
+        "tool_call_id": "tool-3",
+        "native_session_id": "s",
     }
 
 

@@ -402,8 +402,15 @@ def _apply_event(conversation_id: UUID, event: ConversationEvent) -> None:
         return
 
     if isinstance(payload, InteractionResolvedPayload):
+        from talktoharnesses.domain.enums import ApprovalDecision
+
+        status = (
+            InteractionStatus.CANCELLED
+            if payload.decision is ApprovalDecision.CANCEL
+            else InteractionStatus.RESOLVED
+        )
         InteractionRecord.objects.filter(interaction_id=payload.interaction_id).update(
-            status=InteractionStatus.RESOLVED.value
+            status=status.value
         )
         return
 

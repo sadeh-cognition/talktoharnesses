@@ -95,31 +95,29 @@ async def _bounded_replay(
 ) -> tuple[list[str], int, bool]:
     """Return frames and new last_sent after replay-or-snapshot (no sync)."""
     high_water = await service.get_stream_high_water_sequence(owner_id, conversation_id)
-    if after > high_water:
-        snapshot = await service.get_snapshot(owner_id, conversation_id)
-        return [_snapshot_frame(snapshot)], snapshot.sequence, False
-
-    events = list(
-        await service.replay_stream_events(
-            owner_id,
-            conversation_id,
-            after_sequence=after,
-            event_count_limit=_EVENT_COUNT_LIMIT + 1,
-            byte_limit=_BYTE_LIMIT + 1,
+    if after <= high_water:
+        events = list(
+            await service.replay_stream_events(
+                owner_id,
+                conversation_id,
+                after_sequence=after,
+                event_count_limit=_EVENT_COUNT_LIMIT + 1,
+                byte_limit=_BYTE_LIMIT + 1,
+            )
         )
-    )
-    if _exceeds_caps(events, after=after, high_water=high_water):
-        snapshot = await service.get_snapshot(owner_id, conversation_id)
-        return [_snapshot_frame(snapshot)], snapshot.sequence, False
+        if not _exceeds_caps(events, after=after, high_water=high_water):
+            frames = [_event_frame(e) for e in events]
+            last_sent = events[-1].sequence if events else after
+            deleted = any(
+                isinstance(event.payload, ConversationMetadataChangedPayload)
+                and event.payload.deleted_at is not None
+                for event in events
+            )
+            return frames, last_sent, deleted
 
-    frames = [_event_frame(e) for e in events]
-    last_sent = events[-1].sequence if events else after
-    deleted = any(
-        isinstance(event.payload, ConversationMetadataChangedPayload)
-        and event.payload.deleted_at is not None
-        for event in events
-    )
-    return frames, last_sent, deleted
+    snapshot = await service.get_stream_snapshot(owner_id, conversation_id)
+    deleted = snapshot.detail.conversation.deleted_at is not None
+    return [_snapshot_frame(snapshot)], snapshot.sequence, deleted
 
 
 async def iter_sse(

@@ -35,7 +35,7 @@ def test_first_answer_wins(decisions: list[ApprovalDecision]) -> None:
         conversation_id=r.state.conversation.id,
         turn_id=turn_id,
         kind=InteractionKind.APPROVAL,
-        request=ApprovalRequestPayload(summary="ok"),
+        request=ApprovalRequestPayload(summary="ok", available_decisions=tuple(ApprovalDecision)),
         created_at=now,
     )
     r = request_interaction(r.state, interaction, now=now)

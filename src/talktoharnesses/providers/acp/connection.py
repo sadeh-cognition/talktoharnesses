@@ -24,6 +24,7 @@ from talktoharnesses.providers.acp.jsonrpc import (
 from talktoharnesses.providers.acp.schemas.base import (
     GROK_CONTROL_NOTIFICATIONS,
     is_allowlisted_method,
+    is_allowlisted_permission_request,
     is_allowlisted_session_update,
 )
 from talktoharnesses.runtime.handle import ProcessHandle
@@ -275,6 +276,14 @@ class AcpConnection:
                 f"inbound request method not allowlisted: {request.method}",
                 details={"method": request.method},
             )
+        if request.method == "session/request_permission":
+            params = request.params if isinstance(request.params, dict) else None
+            if not is_allowlisted_permission_request(params):
+                raise DomainError(
+                    ErrorCode.UNSUPPORTED_NATIVE_EVENT,
+                    "permission request shape not allowlisted",
+                    details={"params": request.params},
+                )
         handler = self._request_handlers.get(request.method)
         if handler is None:
             raise DomainError(

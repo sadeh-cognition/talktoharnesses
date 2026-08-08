@@ -10,10 +10,12 @@ from uuid import UUID
 import pytest
 from django.contrib.auth import get_user_model
 from django.test import Client
+from pydantic import ValidationError
 
 from talktoharnesses.application.broker import InProcessCommittedEventBroker
 from talktoharnesses.application.service import TalkToHarnessesService
 from talktoharnesses.django import asgi as asgi_mod
+from talktoharnesses.django.api.schemas import ApprovalRuleBody
 from talktoharnesses.django.asgi import reset_service_for_tests
 from talktoharnesses.django.auth import (
     authenticate_bearer_sync,
@@ -28,6 +30,33 @@ from talktoharnesses.runtime.manager import RuntimeManager
 
 def _now() -> datetime:
     return datetime(2026, 8, 8, 16, 0, 0, tzinfo=UTC)
+
+
+def test_approval_rule_body_uses_strict_discriminated_unions() -> None:
+    valid = ApprovalRuleBody.model_validate(
+        {
+            "decision": "allow",
+            "scope": {"kind": "principal_global"},
+            "matcher": {"kind": "exact_argv", "argv": ["ls"]},
+        }
+    )
+    assert valid.matcher.kind == "exact_argv"
+    with pytest.raises(ValidationError):
+        ApprovalRuleBody.model_validate(
+            {
+                "decision": "allow",
+                "scope": {"kind": "future_scope"},
+                "matcher": {"kind": "exact_argv", "argv": ["ls"]},
+            }
+        )
+    with pytest.raises(ValidationError):
+        ApprovalRuleBody.model_validate(
+            {
+                "decision": "allow",
+                "scope": {"kind": "principal_global", "unexpected": True},
+                "matcher": {"kind": "exact_argv", "argv": ["ls"]},
+            }
+        )
 
 
 @pytest.fixture

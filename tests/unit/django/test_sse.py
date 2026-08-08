@@ -89,7 +89,7 @@ class _Service:
             return ()
         return tuple(event for event in self.events if event.sequence > after_sequence)
 
-    async def get_snapshot(
+    async def get_stream_snapshot(
         self,
         owner_id: str,
         conversation_id: UUID,
@@ -126,6 +126,29 @@ async def test_incomplete_replay_uses_snapshot_even_below_count_cap(
 
 
 @pytest.mark.asyncio
+async def test_incomplete_replay_uses_deleted_stream_snapshot() -> None:
+    conversation_id = uuid4()
+    service = _Service(conversation_id, high_waters=(1,))
+    conversation = service.snapshot.detail.conversation.model_copy(
+        update={"deleted_at": datetime(2026, 8, 8, tzinfo=UTC)}
+    )
+    service.snapshot = service.snapshot.model_copy(
+        update={"detail": service.snapshot.detail.model_copy(update={"conversation": conversation})}
+    )
+
+    frames, sequence, deleted = await _bounded_replay(  # pyright: ignore[reportPrivateUsage]
+        cast(TalkToHarnessesService, service),
+        owner_id="owner",
+        conversation_id=conversation_id,
+        after=0,
+    )
+
+    assert "event: snapshot" in frames[0]
+    assert sequence == 1
+    assert deleted is True
+
+
+@pytest.mark.asyncio
 async def test_stale_wakeup_still_reconciles_persistence() -> None:
     conversation_id = uuid4()
     service = _Service(
@@ -158,9 +181,7 @@ async def test_existing_stream_receives_soft_delete_event_then_closes() -> None:
         sequence=1,
         timestamp=datetime(2026, 8, 8, tzinfo=UTC),
         type="conversation_metadata_changed",
-        payload=ConversationMetadataChangedPayload(
-            deleted_at=datetime(2026, 8, 8, tzinfo=UTC)
-        ),
+        payload=ConversationMetadataChangedPayload(deleted_at=datetime(2026, 8, 8, tzinfo=UTC)),
     )
     service = _Service(conversation_id, high_waters=(1,), events=(deleted,))
     stream = iter_sse(

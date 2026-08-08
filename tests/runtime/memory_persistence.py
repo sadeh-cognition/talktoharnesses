@@ -4,13 +4,21 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import datetime
+from typing import cast
 from uuid import UUID
 
 from talktoharnesses.application.cursors import clamp_page_limit, decode_cursor, encode_cursor
 from talktoharnesses.application.search_documents import build_search_document_from_parts
+from talktoharnesses.domain.approval_matching import (
+    InteractionMatchContext,
+    select_matching_rule,
+)
 from talktoharnesses.domain.enums import (
+    ApprovalDecision,
+    ApprovalRuleDecision,
     CommandStatus,
     ErrorCode,
+    InteractionKind,
     InteractionStatus,
     TurnStatus,
 )
@@ -18,6 +26,9 @@ from talktoharnesses.domain.errors import DomainError
 from talktoharnesses.domain.events import ConversationEvent
 from talktoharnesses.domain.models import (
     ActivityProjection,
+    ApprovalRequestPayload,
+    ApprovalRule,
+    ApprovalRuleProjection,
     BackgroundActivity,
     CanonicalToolResult,
     Command,
@@ -30,7 +41,9 @@ from talktoharnesses.domain.models import (
     HarnessProbeProjection,
     HarnessProjection,
     InteractionAnswer,
+    InteractionAuditProjection,
     InteractionProjection,
+    InteractionResolutionResult,
     LaunchSnapshot,
     Message,
     MessageProjection,
@@ -43,7 +56,7 @@ from talktoharnesses.domain.models import (
     Turn,
     TurnProjection,
 )
-from talktoharnesses.domain.transitions import ConversationState
+from talktoharnesses.domain.transitions import ConversationState, submit_interaction_answer
 
 
 def _not_found(resource: str = "conversation") -> DomainError:
@@ -70,6 +83,9 @@ class MemoryPersistence:
         self.activities: dict[UUID, dict[UUID, BackgroundActivity]] = {}
         self.interactions: dict[UUID, dict[UUID, PendingInteraction]] = {}
         self.interaction_answers: dict[UUID, InteractionAnswer] = {}
+        self.interaction_meta: dict[UUID, dict[str, object]] = {}
+        self.approval_rules: dict[UUID, ApprovalRule] = {}
+        self.interaction_audits: dict[UUID, InteractionAuditProjection] = {}
         self.search_docs: dict[UUID, str] = {}
         self.turn_order: dict[UUID, list[UUID]] = {}
 
@@ -324,12 +340,371 @@ class MemoryPersistence:
         items = [e for e in self.events.get(conversation_id, []) if e.sequence > after_sequence]
         return tuple(items[:event_count_limit])
 
-    async def resolve_interaction(
+    async def commit_interaction_request(
+        self,
+        conversation_id: UUID,
+        expected_version: int,
+        state: ConversationState,
+        events: Sequence[ConversationEvent],
+        *,
+        interaction_id: UUID,
+        provider_correlation: dict[str, str] | None = None,
+        request_event_sequence: int,
+    ) -> Sequence[ConversationEvent]:
+        committed = await self.commit_turn_batch(conversation_id, expected_version, state, events)
+        meta = self.interaction_meta.setdefault(interaction_id, {})
+        meta["provider_correlation"] = provider_correlation or {}
+        meta["request_event_sequence"] = request_event_sequence
+        return committed
+
+    async def commit_interaction_resolution(
+        self,
+        conversation_id: UUID,
+        owner_id: str,
+        expected_version: int,
+        state: ConversationState,
+        events: Sequence[ConversationEvent],
+        answer: InteractionAnswer,
+        *,
+        automatic: bool = False,
+        create_rule: ApprovalRule | None = None,
+        deciding_rule: ApprovalRule | None = None,
+        provider_kind: str | None = None,
+        provider_request_ids: dict[str, str] | None = None,
+        resolution_event_sequence: int,
+        mark_policy_evaluated: bool = False,
+        interaction_id: UUID | None = None,
+        suppress_answer_command: bool = False,
+    ) -> InteractionResolutionResult:
+        from uuid import uuid4
+
+        iid = interaction_id or answer.interaction_id
+        if iid in self.interaction_answers and not self.interaction_answers[iid].is_draft:
+            return InteractionResolutionResult(
+                answer=self.interaction_answers[iid],
+                command=None,
+                was_first_write=False,
+                audit=None,
+            )
+        if automatic:
+            current = self.states[conversation_id]
+            interaction = current.interactions.get(iid)
+            action = (
+                interaction.request.action
+                if interaction is not None
+                and isinstance(interaction.request, ApprovalRequestPayload)
+                else None
+            )
+            match = select_matching_rule(
+                list(self.approval_rules.values()),
+                action=action,
+                ctx=InteractionMatchContext(
+                    principal_id=owner_id,
+                    conversation_id=conversation_id,
+                    owner_id=owner_id,
+                    binding=current.binding,
+                    working_directory=(
+                        current.binding.launch_snapshot.working_directory
+                        if current.binding and current.binding.launch_snapshot
+                        else None
+                    ),
+                ),
+            )
+            immediate = None
+            if match.decision is ApprovalRuleDecision.ALLOW:
+                immediate = ApprovalDecision.ALLOW_ONCE
+            elif match.decision is ApprovalRuleDecision.DENY:
+                immediate = ApprovalDecision.DENY
+            available = (
+                interaction.request.available_decisions
+                if interaction is not None
+                and isinstance(interaction.request, ApprovalRequestPayload)
+                else ()
+            )
+            if immediate is None or immediate not in available or match.rule is None:
+                self.interaction_meta.setdefault(iid, {})["policy_evaluated_at"] = (
+                    current.conversation.updated_at
+                )
+                return InteractionResolutionResult(
+                    answer=answer, command=None, was_first_write=False, audit=None
+                )
+            result = submit_interaction_answer(
+                current,
+                InteractionAnswer(interaction_id=iid, decision=immediate),
+                now=answer.submitted_at or state.conversation.updated_at,
+                automatic=True,
+            )
+            state = result.state
+            events = result.events
+            answer = state.answers[iid]
+            resolution_event_sequence = events[-1].sequence
+            deciding_rule = match.rule
+            expected_version = current.conversation.version
+        elif mark_policy_evaluated and not events:
+            meta = self.interaction_meta.setdefault(iid, {})
+            meta["policy_evaluated_at"] = state.conversation.updated_at
+            return InteractionResolutionResult(
+                answer=answer, command=None, was_first_write=False, audit=None
+            )
+        if events:
+            await self.commit_turn_batch(conversation_id, expected_version, state, events)
+        if create_rule is not None:
+            self.approval_rules[create_rule.id] = create_rule
+            deciding_rule = create_rule
+        self.interaction_answers[iid] = answer
+        meta = self.interaction_meta.setdefault(iid, {})
+        meta["resolution_event_sequence"] = resolution_event_sequence
+        if suppress_answer_command:
+            meta["answer_command_suppressed"] = True
+        if mark_policy_evaluated or automatic:
+            meta["policy_evaluated_at"] = answer.submitted_at or state.conversation.updated_at
+        interaction = state.interactions.get(iid)
+        raw_correlation: dict[str, str] = provider_request_ids or {}
+        if provider_request_ids is None:
+            stored_correlation = self.interaction_meta.get(iid, {}).get("provider_correlation", {})
+            if isinstance(stored_correlation, dict):
+                raw_correlation = {
+                    str(key): str(value)
+                    for key, value in cast(dict[object, object], stored_correlation).items()
+                }
+        audit = InteractionAuditProjection(
+            id=uuid4(),
+            principal_id=owner_id,
+            interaction_id=iid,
+            conversation_id=conversation_id,
+            turn_id=interaction.turn_id if interaction else uuid4(),
+            kind=interaction.kind if interaction else InteractionKind.APPROVAL,
+            decision=answer.decision,
+            answers=answer.answers,
+            automatic=automatic,
+            created_at=answer.submitted_at or state.conversation.updated_at,
+            provider_kind=state.binding.kind if state.binding else None,
+            provider_request_ids={str(key): str(value) for key, value in raw_correlation.items()},
+            deciding_rule_id=deciding_rule.id if deciding_rule else None,
+            rule_decision=deciding_rule.decision if deciding_rule else None,
+            rule_scope=deciding_rule.scope if deciding_rule else None,
+            rule_matcher=deciding_rule.matcher if deciding_rule else None,
+        )
+        self.interaction_audits[audit.id] = audit
+        return InteractionResolutionResult(
+            answer=answer, command=None, was_first_write=True, audit=audit
+        )
+
+    async def release_interaction_answer(
+        self,
+        conversation_id: UUID,
+        owner_id: str,
+        interaction_id: UUID,
+        command: Command,
+        *,
+        expected_version: int,
+        state: ConversationState,
+    ) -> Command:
+        meta = self.interaction_meta.setdefault(interaction_id, {})
+        existing_id = meta.get("command_id")
+        if isinstance(existing_id, UUID) and existing_id in self.commands:
+            return self.commands[existing_id]
+        self.commands[command.id] = command
+        if command.status == CommandStatus.ACCEPTED and command.id not in self.accepted_queue:
+            self.accepted_queue.append(command.id)
+        meta["command_id"] = command.id
+        meta["released_at"] = command.created_at
+        current = self.states[conversation_id]
+        commands = dict(current.commands)
+        commands[command.id] = command
+        self.states[conversation_id] = current.model_copy(update={"commands": commands})
+        return command
+
+    async def get_interaction_resolution_event(
+        self,
+        conversation_id: UUID,
+        interaction_id: UUID,
+    ) -> ConversationEvent:
+        sequence = self.interaction_meta.get(interaction_id, {}).get("resolution_event_sequence")
+        for event in self.events.get(conversation_id, ()):
+            if (
+                event.sequence == sequence
+                and event.type == "interaction_resolved"
+                and getattr(event.payload, "interaction_id", None) == interaction_id
+            ):
+                return event
+        raise DomainError(ErrorCode.INVALID_STATE, "interaction resolution event missing")
+
+    async def get_interaction_request_event(
+        self,
+        conversation_id: UUID,
+        interaction_id: UUID,
+    ) -> ConversationEvent:
+        sequence = self.interaction_meta.get(interaction_id, {}).get("request_event_sequence")
+        for event in self.events.get(conversation_id, ()):
+            if (
+                event.sequence == sequence
+                and event.type == "interaction_requested"
+                and getattr(event.payload, "interaction_id", None) == interaction_id
+            ):
+                return event
+        raise DomainError(ErrorCode.INVALID_STATE, "interaction request event missing")
+
+    async def complete_suppressed_interaction_resolution(
         self,
         interaction_id: UUID,
-        answer: InteractionAnswer,
-    ) -> InteractionAnswer:
-        return self.interaction_answers.setdefault(interaction_id, answer)
+        published_at: datetime,
+    ) -> bool:
+        meta = self.interaction_meta.get(interaction_id)
+        if meta is None:
+            raise DomainError(ErrorCode.INVALID_STATE, "interaction answer missing")
+        if meta.get("answer_command_suppressed") is not True:
+            return False
+        meta["released_at"] = published_at
+        return True
+
+    async def mark_interaction_policy_evaluated(
+        self,
+        interaction_id: UUID,
+        evaluated_at: datetime,
+    ) -> None:
+        self.interaction_meta.setdefault(interaction_id, {})["policy_evaluated_at"] = evaluated_at
+
+    async def list_unevaluated_open_interactions(self) -> Sequence[tuple[UUID, UUID]]:
+        out: list[tuple[UUID, UUID]] = []
+        for cid, interactions in self.interactions.items():
+            for iid, interaction in interactions.items():
+                if interaction.status not in {
+                    InteractionStatus.PENDING,
+                    InteractionStatus.DRAFT,
+                }:
+                    continue
+                meta = self.interaction_meta.get(iid, {})
+                if meta.get("policy_evaluated_at") is None:
+                    out.append((cid, iid))
+        return tuple(out)
+
+    async def list_unreleased_resolutions(self) -> Sequence[tuple[UUID, UUID]]:
+        out: list[tuple[UUID, UUID]] = []
+        for iid, answer in self.interaction_answers.items():
+            if answer.is_draft:
+                continue
+            meta = self.interaction_meta.get(iid, {})
+            if meta.get("released_at") is None:
+                # Find conversation id from states.
+                for cid, state in self.states.items():
+                    if iid in state.interactions:
+                        out.append((cid, iid))
+                        break
+        return tuple(out)
+
+    async def create_approval_rule(self, rule: ApprovalRule) -> ApprovalRuleProjection:
+        self.approval_rules[rule.id] = rule
+        return ApprovalRuleProjection(
+            id=rule.id,
+            principal_id=rule.principal_id,
+            decision=rule.decision,
+            scope=rule.scope,
+            matcher=rule.matcher,
+            created_at=rule.created_at,
+            updated_at=rule.updated_at,
+        )
+
+    async def get_approval_rule(self, rule_id: UUID, principal_id: str) -> ApprovalRuleProjection:
+        rule = self.approval_rules.get(rule_id)
+        if rule is None or rule.principal_id != principal_id:
+            raise _not_found("approval rule")
+        return ApprovalRuleProjection(
+            id=rule.id,
+            principal_id=rule.principal_id,
+            decision=rule.decision,
+            scope=rule.scope,
+            matcher=rule.matcher,
+            created_at=rule.created_at,
+            updated_at=rule.updated_at,
+        )
+
+    async def replace_approval_rule(self, rule: ApprovalRule) -> ApprovalRuleProjection:
+        existing = self.approval_rules.get(rule.id)
+        if existing is None or existing.principal_id != rule.principal_id:
+            raise _not_found("approval rule")
+        self.approval_rules[rule.id] = rule
+        return ApprovalRuleProjection(
+            id=rule.id,
+            principal_id=rule.principal_id,
+            decision=rule.decision,
+            scope=rule.scope,
+            matcher=rule.matcher,
+            created_at=rule.created_at,
+            updated_at=rule.updated_at,
+        )
+
+    async def delete_approval_rule(self, rule_id: UUID, principal_id: str) -> None:
+        rule = self.approval_rules.get(rule_id)
+        if rule is None or rule.principal_id != principal_id:
+            raise _not_found("approval rule")
+        del self.approval_rules[rule_id]
+
+    async def page_approval_rules(
+        self,
+        principal_id: str,
+        *,
+        cursor: str | None = None,
+        limit: int = 50,
+    ) -> Page[ApprovalRuleProjection]:
+        from talktoharnesses.application.cursors import clamp_page_limit, encode_cursor
+
+        limit = clamp_page_limit(limit)
+        rules = sorted(
+            (r for r in self.approval_rules.values() if r.principal_id == principal_id),
+            key=lambda r: (r.created_at, r.id),
+            reverse=True,
+        )
+        items = [
+            ApprovalRuleProjection(
+                id=r.id,
+                principal_id=r.principal_id,
+                decision=r.decision,
+                scope=r.scope,
+                matcher=r.matcher,
+                created_at=r.created_at,
+                updated_at=r.updated_at,
+            )
+            for r in rules[:limit]
+        ]
+        next_cursor = None
+        if len(rules) > limit:
+            last = items[-1]
+            next_cursor = encode_cursor(sort=last.created_at.isoformat(), id=last.id)
+        return Page(items=tuple(items), next_cursor=next_cursor)
+
+    async def list_applicable_approval_rules(self, principal_id: str) -> Sequence[ApprovalRule]:
+        return tuple(r for r in self.approval_rules.values() if r.principal_id == principal_id)
+
+    async def get_interaction_audit(
+        self, audit_id: UUID, principal_id: str
+    ) -> InteractionAuditProjection:
+        audit = self.interaction_audits.get(audit_id)
+        if audit is None or audit.principal_id != principal_id:
+            raise _not_found("interaction audit")
+        return audit
+
+    async def page_interaction_audits(
+        self,
+        principal_id: str,
+        *,
+        cursor: str | None = None,
+        limit: int = 50,
+    ) -> Page[InteractionAuditProjection]:
+        from talktoharnesses.application.cursors import clamp_page_limit, encode_cursor
+
+        limit = clamp_page_limit(limit)
+        audits = sorted(
+            (a for a in self.interaction_audits.values() if a.principal_id == principal_id),
+            key=lambda a: (a.created_at, a.id),
+            reverse=True,
+        )
+        items = audits[:limit]
+        next_cursor = None
+        if len(audits) > limit:
+            last = items[-1]
+            next_cursor = encode_cursor(sort=last.created_at.isoformat(), id=last.id)
+        return Page(items=tuple(items), next_cursor=next_cursor)
 
     async def delete_expired_turn_aggregates(self, cutoff: datetime) -> int:
         return 0
@@ -488,8 +863,14 @@ class MemoryPersistence:
         self,
         conversation_id: UUID,
         owner_id: str,
+        *,
+        include_deleted: bool = False,
     ) -> ConversationSnapshot:
-        state = await self._require_owned(conversation_id, owner_id)
+        state = await self._require_owned(
+            conversation_id,
+            owner_id,
+            include_deleted=include_deleted,
+        )
         high_water = max(0, state.conversation.next_event_sequence - 1)
         turns = list(self.turns.get(conversation_id, {}).values())
         user_turns = [t for t in turns if t.user_message_id is not None]
@@ -713,8 +1094,7 @@ class MemoryPersistence:
             tools = [
                 item
                 for item in tools
-                if item[0] < order_index
-                or (item[0] == order_index and item[1].id < item_id)
+                if item[0] < order_index or (item[0] == order_index and item[1].id < item_id)
             ]
         page = tools[:page_size]
         next_cursor = None
@@ -756,8 +1136,7 @@ class MemoryPersistence:
             plans = [
                 item
                 for item in plans
-                if item[0] < order_index
-                or (item[0] == order_index and item[1].id < item_id)
+                if item[0] < order_index or (item[0] == order_index and item[1].id < item_id)
             ]
         page = plans[:page_size]
         next_cursor = None
@@ -891,12 +1270,18 @@ class MemoryPersistence:
     # Helpers
     # ------------------------------------------------------------------
 
-    async def _require_owned(self, conversation_id: UUID, owner_id: str) -> ConversationState:
+    async def _require_owned(
+        self,
+        conversation_id: UUID,
+        owner_id: str,
+        *,
+        include_deleted: bool = False,
+    ) -> ConversationState:
         state = self.states.get(conversation_id)
         if (
             state is None
             or state.conversation.owner_id != owner_id
-            or state.conversation.deleted_at is not None
+            or (state.conversation.deleted_at is not None and not include_deleted)
         ):
             raise _not_found("conversation")
         return state

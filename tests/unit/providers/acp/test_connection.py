@@ -138,6 +138,27 @@ async def test_inbound_permission_handler_may_respond_later() -> None:
 
 
 @pytest.mark.asyncio
+async def test_permission_request_rejects_unallowlisted_action_fields() -> None:
+    proc = FakeProcess()
+    conn = AcpConnection(proc)  # type: ignore[arg-type]
+
+    async def handler(_req: object) -> None:
+        return None
+
+    conn.set_request_handler("session/request_permission", handler)
+    await conn.start()
+    pending, _ = await conn.request("initialize", {"protocolVersion": 1})
+    await proc.feed(
+        '{"jsonrpc":"2.0","id":"p1","method":"session/request_permission",'
+        '"params":{"network":true}}'
+    )
+    with pytest.raises(DomainError) as exc:
+        await asyncio.wait_for(pending, timeout=1)
+    assert exc.value.code is ErrorCode.UNSUPPORTED_NATIVE_EVENT
+    await conn.close()
+
+
+@pytest.mark.asyncio
 async def test_session_update_is_validated_with_strict_variant_schema() -> None:
     proc = FakeProcess()
     conn = AcpConnection(proc)  # type: ignore[arg-type]

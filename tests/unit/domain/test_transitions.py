@@ -240,7 +240,11 @@ def test_interaction_draft_and_first_write_wins() -> None:
         conversation_id=r.state.conversation.id,
         turn_id=turn_id,
         kind=InteractionKind.APPROVAL,
-        request=ApprovalRequestPayload(tool_name="Bash", command_args=("ls",)),
+        request=ApprovalRequestPayload(
+            tool_name="Bash",
+            command_args=("ls",),
+            available_decisions=tuple(ApprovalDecision),
+        ),
         created_at=_now(),
     )
     r = request_interaction(r.state, interaction, now=_now())
@@ -255,6 +259,7 @@ def test_interaction_draft_and_first_write_wins() -> None:
     )
     r = submit_interaction_answer(r.state, first, now=_now())
     assert interaction.id in r.state.answers
+    assert r.command is None
     second = InteractionAnswer(
         interaction_id=interaction.id,
         decision=ApprovalDecision.DENY,
@@ -262,6 +267,119 @@ def test_interaction_draft_and_first_write_wins() -> None:
     r2 = submit_interaction_answer(r.state, second, now=_now())
     assert r2.events == ()
     assert r2.state.answers[interaction.id].decision is ApprovalDecision.ALLOW_ONCE
+
+
+def test_approval_with_no_advertised_decisions_rejects_answer() -> None:
+    state = _idle()
+    r = submit_turn(state, prompt="x", idempotency_key="a", now=_now())
+    r = start_turn(r.state, now=_now())
+    interaction = PendingInteraction(
+        conversation_id=r.state.conversation.id,
+        turn_id=r.state.active_turn.id,  # type: ignore[union-attr]
+        kind=InteractionKind.APPROVAL,
+        request=ApprovalRequestPayload(summary="manual only"),
+        created_at=_now(),
+    )
+    r = request_interaction(r.state, interaction, now=_now())
+
+    with pytest.raises(DomainError) as exc:
+        submit_interaction_answer(
+            r.state,
+            InteractionAnswer(
+                interaction_id=interaction.id,
+                decision=ApprovalDecision.ALLOW_ONCE,
+            ),
+            now=_now(),
+        )
+
+    assert exc.value.code is ErrorCode.INVALID_STATE
+
+
+def test_multiple_interactions_keep_waiting_until_last() -> None:
+
+    state = _idle()
+    r = submit_turn(state, prompt="x", idempotency_key="a", now=_now())
+    r = start_turn(r.state, now=_now())
+    turn_id = r.state.active_turn.id  # type: ignore[union-attr]
+    i1 = PendingInteraction(
+        conversation_id=r.state.conversation.id,
+        turn_id=turn_id,
+        kind=InteractionKind.APPROVAL,
+        request=ApprovalRequestPayload(summary="one", available_decisions=tuple(ApprovalDecision)),
+        created_at=_now(),
+    )
+    i2 = PendingInteraction(
+        conversation_id=r.state.conversation.id,
+        turn_id=turn_id,
+        kind=InteractionKind.APPROVAL,
+        request=ApprovalRequestPayload(summary="two", available_decisions=tuple(ApprovalDecision)),
+        created_at=_now(),
+    )
+    r = request_interaction(r.state, i1, now=_now())
+    r = request_interaction(r.state, i2, now=_now())
+    assert r.state.active_turn is not None
+    assert r.state.active_turn.status is TurnStatus.WAITING
+    r = submit_interaction_answer(
+        r.state,
+        InteractionAnswer(interaction_id=i1.id, decision=ApprovalDecision.ALLOW_ONCE),
+        now=_now(),
+    )
+    assert r.state.active_turn is not None
+    assert r.state.active_turn.status is TurnStatus.WAITING
+    r = submit_interaction_answer(
+        r.state,
+        InteractionAnswer(interaction_id=i2.id, decision=ApprovalDecision.DENY),
+        now=_now(),
+    )
+    assert r.state.active_turn is not None
+    assert r.state.active_turn.status is TurnStatus.RUNNING
+
+
+def test_duplicate_request_idempotent_conflict_rejected() -> None:
+    state = _idle()
+    r = submit_turn(state, prompt="x", idempotency_key="a", now=_now())
+    r = start_turn(r.state, now=_now())
+    turn_id = r.state.active_turn.id  # type: ignore[union-attr]
+    i = PendingInteraction(
+        conversation_id=r.state.conversation.id,
+        turn_id=turn_id,
+        kind=InteractionKind.APPROVAL,
+        request=ApprovalRequestPayload(summary="same"),
+        created_at=_now(),
+    )
+    r = request_interaction(r.state, i, now=_now())
+    again = request_interaction(r.state, i, now=_now())
+    assert again.events == ()
+    conflict = PendingInteraction(
+        id=i.id,
+        conversation_id=r.state.conversation.id,
+        turn_id=turn_id,
+        kind=InteractionKind.APPROVAL,
+        request=ApprovalRequestPayload(summary="different"),
+        created_at=_now(),
+    )
+    with pytest.raises(DomainError) as exc:
+        request_interaction(r.state, conflict, now=_now())
+    assert exc.value.code is ErrorCode.INVALID_STATE
+
+
+def test_interrupt_cancels_open_interactions() -> None:
+    state = _idle()
+    r = submit_turn(state, prompt="x", idempotency_key="a", now=_now())
+    r = start_turn(r.state, now=_now())
+    turn_id = r.state.active_turn.id  # type: ignore[union-attr]
+    i = PendingInteraction(
+        conversation_id=r.state.conversation.id,
+        turn_id=turn_id,
+        kind=InteractionKind.APPROVAL,
+        request=ApprovalRequestPayload(summary="pending"),
+        created_at=_now(),
+    )
+    r = request_interaction(r.state, i, now=_now())
+    r = interrupt_turn(r.state, now=_now(), reason="user")
+    assert r.state.interactions[i.id].status.value == "cancelled"
+    assert any(e.type == "interaction_resolved" for e in r.events)
+    assert r.events[-1].type == "turn_interrupted"
 
 
 @pytest.mark.parametrize("foreign_field", ["conversation", "turn"])

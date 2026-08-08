@@ -326,6 +326,8 @@ async def test_queued_submit_does_not_run_against_active_turn() -> None:
     )
     assert persistence.commands[claimed.id].status is CommandStatus.ACCEPTED
     assert claimed.id in persistence.accepted_queue
+    aggregate = await persistence.get_worker_snapshot(state.conversation.id)
+    assert aggregate.commands[claimed.id].status is CommandStatus.ACCEPTED
 
 
 @pytest.mark.asyncio

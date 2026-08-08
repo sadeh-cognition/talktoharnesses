@@ -9,8 +9,10 @@ from typing import Any, cast
 from uuid import UUID, uuid4
 
 from talktoharnesses.application.command_processor import CommandProcessor
+from talktoharnesses.application.interaction_broker import InteractionBroker
 from talktoharnesses.application.persistence import Persistence
 from talktoharnesses.application.publisher import CommittedEventPublisher
+from talktoharnesses.domain.approval_matching import normalize_approval_rule
 from talktoharnesses.domain.enums import (
     CommandKind,
     CommandStatus,
@@ -21,20 +23,21 @@ from talktoharnesses.domain.errors import DomainError
 from talktoharnesses.domain.events import ConversationEvent
 from talktoharnesses.domain.models import (
     ActivityProjection,
-    AnswerInteractionPayload,
+    ApprovalRule,
     Command,
     CommandProjection,
     ConversationHarnessBinding,
+    ConversationRuleScope,
     ConversationShell,
     ConversationSnapshot,
     HarnessCapabilities,
     HarnessConfiguration,
     HarnessInstance,
+    HarnessInstanceRuleScope,
     HarnessModeInfo,
     HarnessModelInfo,
     HarnessProbeProjection,
     HarnessProjection,
-    InteractionAnswer,
     InteractionProjection,
     InterruptPayload,
     MessageProjection,
@@ -45,6 +48,7 @@ from talktoharnesses.domain.models import (
     ToolProjection,
     Turn,
     TurnProjection,
+    UserRuleScope,
 )
 from talktoharnesses.domain.transitions import (
     ConversationState,
@@ -57,12 +61,10 @@ from talktoharnesses.domain.transitions import (
     pin_conversation,
     snooze_conversation,
     soft_delete_conversation,
-    submit_interaction_answer,
     submit_turn,
     unarchive_conversation,
     unpin_conversation,
     unsnooze_conversation,
-    update_interaction_draft,
 )
 from talktoharnesses.providers.registry import AdapterRegistry
 from talktoharnesses.runtime.manager import RuntimeManager
@@ -115,11 +117,13 @@ class TalkToHarnessesService:
         self._publisher = publisher
         self._clock = clock
         self._runtime = runtime_manager
+        self._broker = InteractionBroker(persistence, publisher, clock=clock)
         self._processor = CommandProcessor(
             persistence,
             publisher,
             runtime_manager,
             clock=clock,
+            interaction_broker=self._broker,
         )
         self._started = False
         self._worker_id: str | None = None
@@ -145,6 +149,7 @@ class TalkToHarnessesService:
         start = getattr(self._publisher, "start", None)
         if callable(start):
             await cast(Awaitable[None], start())
+        await self._broker.reconcile_on_startup()
         await self._processor.start(worker_id)
         self._worker_id = worker_id
         self._started = True
@@ -249,6 +254,7 @@ class TalkToHarnessesService:
             conversation_id=cid,
             kind=harness.kind,
             configuration=harness.configuration,
+            harness_instance_id=harness.id,
             created_at=now,
         )
         capabilities: HarnessCapabilities | None = None
@@ -629,32 +635,8 @@ class TalkToHarnessesService:
         *,
         draft: dict[str, Any],
     ) -> InteractionProjection:
-        state = await self._persistence.get_snapshot(conversation_id, owner_id)
-        if interaction_id not in state.interactions:
-            raise DomainError(ErrorCode.NOT_FOUND, "interaction not found")
-        result = update_interaction_draft(
-            state,
-            interaction_id=interaction_id,
-            draft=draft,
-            now=self._clock(),
-        )
-        events = await self._persistence.commit_facade_mutation(
-            conversation_id,
-            owner_id,
-            state.conversation.version,
-            result.state,
-            result.events,
-        )
-        await self._publish(events)
-        interaction = result.state.interactions[interaction_id]
-        return InteractionProjection(
-            id=interaction.id,
-            kind=interaction.kind,
-            status=interaction.status,
-            turn_id=interaction.turn_id,
-            request=interaction.request,
-            draft=interaction.draft,
-            created_at=interaction.created_at,
+        return await self._broker.update_draft(
+            owner_id, conversation_id, interaction_id, draft=draft
         )
 
     async def resolve_interaction(
@@ -665,47 +647,69 @@ class TalkToHarnessesService:
         *,
         decision: Any = None,
         answers: dict[str, Any] | None = None,
+        create_rule: Any = None,
         idempotency_key: str | None = None,
     ) -> CommandProjection:
-        state = await self._persistence.get_snapshot(conversation_id, owner_id)
-        if interaction_id not in state.interactions:
-            raise DomainError(ErrorCode.NOT_FOUND, "interaction not found")
-        answer = InteractionAnswer(
-            interaction_id=interaction_id,
+        return await self._broker.resolve_manual(
+            owner_id,
+            conversation_id,
+            interaction_id,
             decision=decision,
             answers=answers,
-        )
-        result = submit_interaction_answer(
-            state,
-            answer,
-            now=self._clock(),
+            create_rule=create_rule,
             idempotency_key=idempotency_key,
         )
-        if result.command is None:
-            # First-write-wins: already resolved; return existing answer command if any.
-            for cmd in state.commands.values():
-                if (
-                    cmd.kind is CommandKind.ANSWER_INTERACTION
-                    and isinstance(cmd.payload, AnswerInteractionPayload)
-                    and cmd.payload.interaction_id == interaction_id
-                ):
-                    return _command_projection(cmd)
-            raise DomainError(
-                ErrorCode.INTERACTION_ALREADY_RESOLVED,
-                "interaction already resolved",
-            )
-        submitted_answer = result.state.answers[interaction_id]
-        events = await self._persistence.commit_facade_mutation(
-            conversation_id,
-            owner_id,
-            state.conversation.version,
-            result.state,
-            result.events,
-            commands=(result.command,),
-            interaction_answers=(submitted_answer,),
-        )
-        await self._publish(events)
-        return _command_projection(result.command)
+
+    # ------------------------------------------------------------------
+    # Approval rules and audits
+    # ------------------------------------------------------------------
+
+    async def create_approval_rule(self, owner_id: str, rule: Any) -> Any:
+        normalized = await self._normalize_owned_approval_rule(owner_id, rule)
+        return await self._persistence.create_approval_rule(normalized)
+
+    async def list_approval_rules(
+        self, owner_id: str, *, cursor: str | None = None, limit: int = 50
+    ) -> Any:
+        return await self._persistence.page_approval_rules(owner_id, cursor=cursor, limit=limit)
+
+    async def get_approval_rule(self, owner_id: str, rule_id: UUID) -> Any:
+        return await self._persistence.get_approval_rule(rule_id, owner_id)
+
+    async def replace_approval_rule(self, owner_id: str, rule: Any) -> Any:
+        normalized = await self._normalize_owned_approval_rule(owner_id, rule)
+        return await self._persistence.replace_approval_rule(normalized)
+
+    async def _normalize_owned_approval_rule(
+        self,
+        owner_id: str,
+        rule: Any,
+    ) -> ApprovalRule:
+        if not isinstance(rule, ApprovalRule):
+            raise DomainError(ErrorCode.INVALID_STATE, "invalid approval rule")
+        if rule.principal_id != owner_id:
+            raise DomainError(ErrorCode.INVALID_STATE, "rule principal must match caller")
+        if isinstance(rule.scope, ConversationRuleScope):
+            await self._persistence.get_snapshot(rule.scope.conversation_id, owner_id)
+        elif isinstance(rule.scope, HarnessInstanceRuleScope):
+            await self._persistence.get_harness(rule.scope.harness_instance_id, owner_id)
+        elif isinstance(rule.scope, UserRuleScope) and rule.scope.user_id != owner_id:
+            raise DomainError(ErrorCode.INVALID_STATE, "rule user scope must match caller")
+        try:
+            return normalize_approval_rule(rule)
+        except ValueError as exc:
+            raise DomainError(ErrorCode.INVALID_STATE, str(exc)) from exc
+
+    async def delete_approval_rule(self, owner_id: str, rule_id: UUID) -> None:
+        await self._persistence.delete_approval_rule(rule_id, owner_id)
+
+    async def list_interaction_audits(
+        self, owner_id: str, *, cursor: str | None = None, limit: int = 50
+    ) -> Any:
+        return await self._persistence.page_interaction_audits(owner_id, cursor=cursor, limit=limit)
+
+    async def get_interaction_audit(self, owner_id: str, audit_id: UUID) -> Any:
+        return await self._persistence.get_interaction_audit(audit_id, owner_id)
 
     # ------------------------------------------------------------------
     # Event sync
@@ -724,6 +728,18 @@ class TalkToHarnessesService:
     ) -> int:
         """Owner-scoped high water for an already-authorized live stream."""
         return await self._persistence.get_high_water_sequence(
+            conversation_id,
+            owner_id,
+            include_deleted=True,
+        )
+
+    async def get_stream_snapshot(
+        self,
+        owner_id: str,
+        conversation_id: UUID,
+    ) -> ConversationSnapshot:
+        """Owner-scoped snapshot for an already-authorized live stream."""
+        return await self._persistence.get_conversation_snapshot(
             conversation_id,
             owner_id,
             include_deleted=True,

@@ -13,10 +13,12 @@ from pydantic import BaseModel, Field
 from talktoharnesses.domain._base import FROZEN, UtcDateTime, require_utc
 from talktoharnesses.domain.enums import (
     ActivityStatus,
+    ApprovalDecision,
     CommandKind,
     CommandStatus,
     ConversationStatus,
     ErrorCode,
+    InteractionKind,
     InteractionStatus,
     TurnStatus,
 )
@@ -50,7 +52,7 @@ from talktoharnesses.domain.events import (
     TurnWaitingPayload,
 )
 from talktoharnesses.domain.models import (
-    AnswerInteractionPayload,
+    ApprovalRequestPayload,
     BackgroundActivity,
     Command,
     Conversation,
@@ -62,6 +64,7 @@ from talktoharnesses.domain.models import (
     LaunchSnapshot,
     PendingInteraction,
     SteerPayload,
+    StructuredQuestionPayload,
     SubmitTurnPayload,
     SwitchHarnessPayload,
     Turn,
@@ -486,6 +489,11 @@ def complete_turn(
             f"cannot complete turn in status {state.active_turn.status}",
         )
 
+    cancelled = cancel_open_interactions(state, now=now)
+    state = cancelled.state
+    prefix = cancelled.events
+    assert state.active_turn is not None
+
     ts = _now(now)
     turn = state.active_turn.model_copy(
         update={
@@ -522,7 +530,7 @@ def complete_turn(
         ],
     )
     new_state = _recompute_status(new_state, ts)
-    return TransitionResult(state=new_state, events=events)
+    return TransitionResult(state=new_state, events=prefix + events)
 
 
 def register_activity(
@@ -599,20 +607,114 @@ def complete_activity(
     return TransitionResult(state=new_state, events=events)
 
 
+def _open_interactions(state: ConversationState) -> list[PendingInteraction]:
+    return [
+        i
+        for i in state.interactions.values()
+        if i.status in {InteractionStatus.PENDING, InteractionStatus.DRAFT}
+    ]
+
+
+def _request_bytes(interaction: PendingInteraction) -> bytes:
+    return interaction.request.model_dump_json().encode("utf-8")
+
+
+def _validate_interaction_answer(
+    interaction: PendingInteraction,
+    answer: InteractionAnswer,
+) -> None:
+    if interaction.kind is InteractionKind.APPROVAL:
+        if answer.answers is not None:
+            raise DomainError(
+                ErrorCode.INVALID_STATE,
+                "approval interaction cannot include structured answers",
+            )
+        if answer.decision is None:
+            raise DomainError(
+                ErrorCode.INVALID_STATE,
+                "approval interaction requires a decision",
+            )
+        if not isinstance(interaction.request, ApprovalRequestPayload):
+            raise DomainError(ErrorCode.INVALID_STATE, "approval request payload mismatch")
+        available = interaction.request.available_decisions
+        if answer.decision not in available:
+            raise DomainError(
+                ErrorCode.INVALID_STATE,
+                f"decision {answer.decision.value} not available for this interaction",
+            )
+        return
+    if interaction.kind is InteractionKind.STRUCTURED_QUESTION:
+        if answer.decision is not None:
+            raise DomainError(
+                ErrorCode.INVALID_STATE,
+                "structured question cannot include an approval decision",
+            )
+        if answer.answers is None:
+            raise DomainError(
+                ErrorCode.INVALID_STATE,
+                "structured question requires answers",
+            )
+        if not isinstance(interaction.request, StructuredQuestionPayload):
+            raise DomainError(ErrorCode.INVALID_STATE, "structured question payload mismatch")
+        return
+    raise DomainError(ErrorCode.INVALID_STATE, f"unknown interaction kind {interaction.kind}")
+
+
+def _maybe_resume_after_interactions(
+    state: ConversationState,
+    *,
+    now: datetime,
+) -> ConversationState:
+    """Return active turn to running only when no open interactions remain."""
+    if state.active_turn is None or state.active_turn.status != TurnStatus.WAITING:
+        return state
+    if _open_interactions(state):
+        return state
+    ts = _now(now)
+    return state.model_copy(
+        update={
+            "active_turn": state.active_turn.model_copy(update={"status": TurnStatus.RUNNING}),
+            "conversation": state.conversation.model_copy(
+                update={"status": ConversationStatus.RUNNING, "updated_at": ts}
+            ),
+        }
+    )
+
+
 def request_interaction(
     state: ConversationState,
     interaction: PendingInteraction,
     *,
     now: datetime,
 ) -> TransitionResult:
+    """Accept a pending interaction. Multiple open interactions are allowed.
+
+    Duplicate canonical ID with byte-identical request data is idempotent;
+    conflicting reuse is ``invalid_state``.
+    """
     if state.active_turn is None:
         raise DomainError(ErrorCode.NO_ACTIVE_TURN, "interaction requires an active turn")
     if interaction.conversation_id != state.conversation.id:
         raise DomainError(ErrorCode.INVALID_STATE, "interaction belongs to another conversation")
     if interaction.turn_id != state.active_turn.id:
         raise DomainError(ErrorCode.INVALID_STATE, "interaction belongs to another turn")
+
+    existing = state.interactions.get(interaction.id)
+    if existing is not None:
+        if (
+            existing.kind is interaction.kind
+            and existing.turn_id == interaction.turn_id
+            and _request_bytes(existing) == _request_bytes(interaction)
+        ):
+            return TransitionResult(state=state, events=())
+        raise DomainError(
+            ErrorCode.INVALID_STATE,
+            f"interaction {interaction.id} already exists with different data",
+        )
+
+    pending = interaction.model_copy(update={"status": InteractionStatus.PENDING})
     interactions = dict(state.interactions)
-    interactions[interaction.id] = interaction
+    interactions[pending.id] = pending
     turn = state.active_turn.model_copy(update={"status": TurnStatus.WAITING})
     new_state = state.model_copy(
         update={
@@ -629,12 +731,12 @@ def request_interaction(
         now,
         [
             InteractionRequestedPayload(
-                turn_id=interaction.turn_id,
-                interaction_id=interaction.id,
-                kind=interaction.kind,
-                request=interaction.request,
+                turn_id=pending.turn_id,
+                interaction_id=pending.id,
+                kind=pending.kind,
+                request=pending.request,
             ),
-            TurnWaitingPayload(turn_id=turn.id, interaction_id=interaction.id),
+            TurnWaitingPayload(turn_id=turn.id, interaction_id=pending.id),
         ],
     )
     return TransitionResult(state=new_state, events=events)
@@ -650,10 +752,10 @@ def update_interaction_draft(
     if interaction_id not in state.interactions:
         raise DomainError(ErrorCode.INVALID_STATE, f"unknown interaction {interaction_id}")
     interaction = state.interactions[interaction_id]
-    if interaction.status in {InteractionStatus.SUBMITTED, InteractionStatus.RESOLVED}:
+    if interaction.status not in {InteractionStatus.PENDING, InteractionStatus.DRAFT}:
         raise DomainError(
             ErrorCode.INTERACTION_ALREADY_RESOLVED,
-            "cannot edit a submitted or resolved interaction",
+            "cannot edit a submitted, resolved, or cancelled interaction",
         )
     updated = interaction.model_copy(update={"status": InteractionStatus.DRAFT, "draft": draft})
     interactions = dict(state.interactions)
@@ -672,13 +774,12 @@ def submit_interaction_answer(
     answer: InteractionAnswer,
     *,
     now: datetime,
-    idempotency_key: str | None = None,
-    command_id: UUID | None = None,
+    automatic: bool = False,
 ) -> TransitionResult:
     """First-write-wins submission of an interaction answer.
 
-    On the winning write, emits ``interaction_resolved`` and accepts an executable
-    ``answer_interaction`` command for the Phase 4 worker.
+    Does **not** create the ``answer_interaction`` command; the interaction
+    broker releases that command only after the resolution event is published.
     """
     interaction_id = answer.interaction_id
     if interaction_id not in state.interactions:
@@ -689,11 +790,19 @@ def submit_interaction_answer(
         return TransitionResult(state=state, events=(), command=None)
 
     interaction = state.interactions[interaction_id]
-    if interaction.status == InteractionStatus.RESOLVED:
+    if interaction.status in {
+        InteractionStatus.RESOLVED,
+        InteractionStatus.SUBMITTED,
+        InteractionStatus.CANCELLED,
+    }:
+        if interaction_id in state.answers and not state.answers[interaction_id].is_draft:
+            return TransitionResult(state=state, events=(), command=None)
         raise DomainError(
             ErrorCode.INTERACTION_ALREADY_RESOLVED,
             "interaction already resolved",
         )
+
+    _validate_interaction_answer(interaction, answer)
 
     ts = _now(now)
     submitted = answer.model_copy(update={"is_draft": False, "submitted_at": ts})
@@ -704,35 +813,8 @@ def submit_interaction_answer(
         update={"status": InteractionStatus.RESOLVED}
     )
 
-    key = idempotency_key or f"answer-interaction:{interaction_id}"
-    command = Command(
-        id=command_id or uuid4(),
-        conversation_id=state.conversation.id,
-        kind=CommandKind.ANSWER_INTERACTION,
-        status=CommandStatus.ACCEPTED,
-        idempotency_key=key,
-        target_turn_id=interaction.turn_id,
-        payload=AnswerInteractionPayload(interaction_id=interaction_id),
-        created_at=ts,
-    )
-    commands = dict(state.commands)
-    commands[command.id] = command
-
-    new_state = state.model_copy(
-        update={"answers": answers, "interactions": interactions, "commands": commands}
-    )
-    # Resume running if this was the waiting turn.
-    if new_state.active_turn is not None and new_state.active_turn.status == TurnStatus.WAITING:
-        new_state = new_state.model_copy(
-            update={
-                "active_turn": new_state.active_turn.model_copy(
-                    update={"status": TurnStatus.RUNNING}
-                ),
-                "conversation": new_state.conversation.model_copy(
-                    update={"status": ConversationStatus.RUNNING, "updated_at": ts}
-                ),
-            }
-        )
+    new_state = state.model_copy(update={"answers": answers, "interactions": interactions})
+    new_state = _maybe_resume_after_interactions(new_state, now=ts)
 
     new_state, events = append_events(
         new_state,
@@ -743,11 +825,73 @@ def submit_interaction_answer(
                 turn_id=interaction.turn_id,
                 decision=submitted.decision,
                 answers=submitted.answers,
+                automatic=automatic,
+            )
+        ],
+    )
+    return TransitionResult(state=new_state, events=events)
+
+
+def cancel_open_interactions(
+    state: ConversationState,
+    *,
+    now: datetime,
+) -> TransitionResult:
+    """Cancel every still-open interaction and emit resolution events."""
+    open_items = _open_interactions(state)
+    if not open_items:
+        return TransitionResult(state=state, events=())
+
+    current = state
+    events: list[ConversationEvent] = []
+    for interaction in sorted(open_items, key=lambda i: (i.created_at, i.id)):
+        result = cancel_interaction(current, interaction_id=interaction.id, now=now)
+        current = result.state
+        events.extend(result.events)
+    return TransitionResult(state=current, events=tuple(events))
+
+
+def cancel_interaction(
+    state: ConversationState,
+    *,
+    interaction_id: UUID,
+    now: datetime,
+) -> TransitionResult:
+    """Cancel one open interaction regardless of its request kind."""
+    interaction = state.interactions.get(interaction_id)
+    if interaction is None or interaction.status not in {
+        InteractionStatus.PENDING,
+        InteractionStatus.DRAFT,
+    }:
+        return TransitionResult(state=state, events=())
+    ts = _now(now)
+    interactions = dict(state.interactions)
+    interactions[interaction_id] = interaction.model_copy(
+        update={"status": InteractionStatus.CANCELLED}
+    )
+    answers = dict(state.answers)
+    answers[interaction_id] = InteractionAnswer(
+        interaction_id=interaction_id,
+        decision=ApprovalDecision.CANCEL,
+        is_draft=False,
+        submitted_at=ts,
+    )
+    new_state = state.model_copy(update={"interactions": interactions, "answers": answers})
+    new_state = _maybe_resume_after_interactions(new_state, now=ts)
+    new_state, events = append_events(
+        new_state,
+        ts,
+        [
+            InteractionResolvedPayload(
+                interaction_id=interaction_id,
+                turn_id=interaction.turn_id,
+                decision=ApprovalDecision.CANCEL,
+                answers=None,
                 automatic=False,
             )
         ],
     )
-    return TransitionResult(state=new_state, events=events, command=command)
+    return TransitionResult(state=new_state, events=events)
 
 
 def _metadata_busy(state: ConversationState) -> bool:
@@ -873,6 +1017,11 @@ def interrupt_turn(
             f"cannot interrupt turn in status {state.active_turn.status}",
         )
 
+    cancelled = cancel_open_interactions(state, now=now)
+    state = cancelled.state
+    prefix = cancelled.events
+    assert state.active_turn is not None
+
     ts = _now(now)
     turn = state.active_turn.model_copy(
         update={
@@ -903,7 +1052,7 @@ def interrupt_turn(
         [TurnInterruptedPayload(turn_id=turn.id, reason=reason)],
     )
     new_state = _recompute_status(new_state, ts)
-    return TransitionResult(state=new_state, events=events)
+    return TransitionResult(state=new_state, events=prefix + events)
 
 
 def fail_turn(
@@ -915,6 +1064,11 @@ def fail_turn(
 ) -> TransitionResult:
     if state.active_turn is None:
         raise DomainError(ErrorCode.NO_ACTIVE_TURN, "no active turn to fail")
+
+    cancelled = cancel_open_interactions(state, now=now)
+    state = cancelled.state
+    prefix = cancelled.events
+    assert state.active_turn is not None
 
     ts = _now(now)
     turn = state.active_turn.model_copy(
@@ -946,7 +1100,7 @@ def fail_turn(
         [TurnFailedPayload(turn_id=turn.id, error_code=error_code, message=message)],
     )
     new_state = _recompute_status(new_state, ts)
-    return TransitionResult(state=new_state, events=events)
+    return TransitionResult(state=new_state, events=prefix + events)
 
 
 def mark_outcome_unknown(
@@ -958,6 +1112,11 @@ def mark_outcome_unknown(
 ) -> TransitionResult:
     if state.active_turn is None:
         raise DomainError(ErrorCode.NO_ACTIVE_TURN, "no active turn for outcome_unknown")
+
+    cancelled = cancel_open_interactions(state, now=now)
+    state = cancelled.state
+    prefix = cancelled.events
+    assert state.active_turn is not None
 
     ts = _now(now)
     turn = state.active_turn.model_copy(
@@ -999,7 +1158,7 @@ def mark_outcome_unknown(
         ],
     )
     new_state = _recompute_status(new_state, ts)
-    return TransitionResult(state=new_state, events=events)
+    return TransitionResult(state=new_state, events=prefix + events)
 
 
 def change_mode(
@@ -1363,6 +1522,7 @@ __all__ = [
     "reap_session",
     "register_activity",
     "remember_native_ids",
+    "cancel_open_interactions",
     "request_interaction",
     "resume_session",
     "rotate_session",

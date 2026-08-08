@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Sequence
 from datetime import datetime
-from typing import TypeVar
+from typing import TypeVar, cast
 from uuid import UUID
 
 from asgiref.sync import sync_to_async
@@ -13,11 +13,30 @@ from django.db import connection, models, transaction
 from pydantic import BaseModel
 
 from talktoharnesses.application.cursors import clamp_page_limit, encode_cursor
-from talktoharnesses.domain.enums import CommandStatus, ErrorCode, InteractionStatus
+from talktoharnesses.domain.approval_matching import (
+    InteractionMatchContext,
+    rule_matches_request,
+    select_matching_rule,
+)
+from talktoharnesses.domain.enums import (
+    ApprovalDecision,
+    ApprovalRuleDecision,
+    CommandStatus,
+    ErrorCode,
+    HarnessKind,
+    InteractionKind,
+    InteractionStatus,
+)
 from talktoharnesses.domain.errors import DomainError
 from talktoharnesses.domain.events import ConversationEvent
 from talktoharnesses.domain.models import (
     ActivityProjection,
+    ApprovalAction,
+    ApprovalMatcher,
+    ApprovalRequestPayload,
+    ApprovalRule,
+    ApprovalRuleProjection,
+    ApprovalRuleScope,
     Command,
     ConversationDetail,
     ConversationShell,
@@ -27,7 +46,9 @@ from talktoharnesses.domain.models import (
     HarnessProbeProjection,
     HarnessProjection,
     InteractionAnswer,
+    InteractionAuditProjection,
     InteractionProjection,
+    InteractionResolutionResult,
     LaunchSnapshot,
     MessageProjection,
     Page,
@@ -36,15 +57,17 @@ from talktoharnesses.domain.models import (
     ToolProjection,
     TurnProjection,
 )
-from talktoharnesses.domain.transitions import ConversationState
+from talktoharnesses.domain.transitions import ConversationState, submit_interaction_answer
 
 from .models import (
     ActivityRecord,
+    ApprovalRuleRecord,
     CommandRecord,
     ConversationAggregate,
     ConversationEventRecord,
     HarnessRecord,
     InteractionAnswerRecord,
+    InteractionAuditRecord,
     InteractionRecord,
     LaunchHistory,
     MessageRecord,
@@ -91,6 +114,102 @@ def _conflict(expected: int, actual: int) -> DomainError:
         "optimistic concurrency conflict",
         details={"expected": expected, "actual": actual},
     )
+
+
+def _rule_projection(rule: ApprovalRule) -> ApprovalRuleProjection:
+    return ApprovalRuleProjection(
+        id=rule.id,
+        principal_id=rule.principal_id,
+        decision=rule.decision,
+        scope=rule.scope,
+        matcher=rule.matcher,
+        created_at=rule.created_at,
+        updated_at=rule.updated_at,
+    )
+
+
+def _rule_from_row(row: ApprovalRuleRecord) -> ApprovalRuleProjection:
+    return _rule_projection(_rule_domain_from_row(row))
+
+
+def _rule_domain_from_row(row: ApprovalRuleRecord) -> ApprovalRule:
+    from pydantic import TypeAdapter
+
+    scope = cast(
+        ApprovalRuleScope,
+        TypeAdapter(ApprovalRuleScope).validate_json(json.dumps(row.scope)),
+    )
+    matcher = cast(
+        ApprovalMatcher,
+        TypeAdapter(ApprovalMatcher).validate_json(json.dumps(row.matcher)),
+    )
+    return ApprovalRule(
+        id=row.rule_id,
+        principal_id=row.principal_id,
+        decision=ApprovalRuleDecision(row.decision),
+        scope=scope,
+        matcher=matcher,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
+def _audit_from_row(row: InteractionAuditRecord) -> InteractionAuditProjection:
+    from pydantic import TypeAdapter
+
+    scope = (
+        cast(
+            ApprovalRuleScope,
+            TypeAdapter(ApprovalRuleScope).validate_json(json.dumps(row.rule_scope)),
+        )
+        if row.rule_scope is not None
+        else None
+    )
+    matcher = (
+        cast(
+            ApprovalMatcher,
+            TypeAdapter(ApprovalMatcher).validate_json(json.dumps(row.rule_matcher)),
+        )
+        if row.rule_matcher is not None
+        else None
+    )
+    action = (
+        cast(
+            ApprovalAction,
+            TypeAdapter(ApprovalAction).validate_json(json.dumps(row.request_action)),
+        )
+        if row.request_action is not None
+        else None
+    )
+    return InteractionAuditProjection(
+        id=row.audit_id,
+        principal_id=row.principal_id,
+        interaction_id=row.interaction_id,
+        conversation_id=row.conversation_id,
+        turn_id=row.turn_id,
+        kind=InteractionKind(row.kind),
+        decision=ApprovalDecision(row.decision) if row.decision else None,
+        answers=row.answers,
+        automatic=row.automatic,
+        created_at=row.created_at,
+        provider_kind=HarnessKind(row.provider_kind) if row.provider_kind else None,
+        provider_request_ids={str(k): str(v) for k, v in (row.provider_request_ids or {}).items()},
+        deciding_rule_id=row.deciding_rule_id_copy,
+        rule_decision=ApprovalRuleDecision(row.rule_decision) if row.rule_decision else None,
+        rule_scope=scope,
+        rule_matcher=matcher,
+        request_action=action,
+    )
+
+
+def _request_action(interaction: object) -> ApprovalAction | None:
+    from talktoharnesses.domain.models import ApprovalRequestPayload, PendingInteraction
+
+    if not isinstance(interaction, PendingInteraction):
+        return None
+    if isinstance(interaction.request, ApprovalRequestPayload):
+        return interaction.request.action
+    return None
 
 
 class DjangoPersistence:
@@ -433,26 +552,705 @@ class DjangoPersistence:
             size += encoded_size
         return tuple(events)
 
-    async def resolve_interaction(
+    async def commit_interaction_request(
         self,
+        conversation_id: UUID,
+        expected_version: int,
+        state: ConversationState,
+        events: Sequence[ConversationEvent],
+        *,
         interaction_id: UUID,
-        answer: InteractionAnswer,
-    ) -> InteractionAnswer:
-        return await sync_to_async(self._resolve_interaction, thread_sensitive=True)(
-            interaction_id, answer
+        provider_correlation: dict[str, str] | None = None,
+        request_event_sequence: int,
+    ) -> Sequence[ConversationEvent]:
+        return await sync_to_async(self._commit_interaction_request, thread_sensitive=True)(
+            conversation_id,
+            expected_version,
+            state,
+            tuple(events),
+            interaction_id,
+            provider_correlation,
+            request_event_sequence,
         )
 
     @transaction.atomic
-    def _resolve_interaction(
+    def _commit_interaction_request(
+        self,
+        conversation_id: UUID,
+        expected_version: int,
+        state: ConversationState,
+        events: tuple[ConversationEvent, ...],
+        interaction_id: UUID,
+        provider_correlation: dict[str, str] | None,
+        request_event_sequence: int,
+    ) -> tuple[ConversationEvent, ...]:
+        committed = self._commit_turn_batch_sync(
+            conversation_id, expected_version, state, events, ()
+        )
+        InteractionRecord.objects.filter(interaction_id=interaction_id).update(
+            provider_correlation=provider_correlation or {},
+            request_event_sequence=request_event_sequence,
+        )
+        return committed
+
+    async def commit_interaction_resolution(
+        self,
+        conversation_id: UUID,
+        owner_id: str,
+        expected_version: int,
+        state: ConversationState,
+        events: Sequence[ConversationEvent],
+        answer: InteractionAnswer,
+        *,
+        automatic: bool = False,
+        create_rule: ApprovalRule | None = None,
+        deciding_rule: ApprovalRule | None = None,
+        provider_kind: str | None = None,
+        provider_request_ids: dict[str, str] | None = None,
+        resolution_event_sequence: int,
+        mark_policy_evaluated: bool = False,
+        interaction_id: UUID | None = None,
+        suppress_answer_command: bool = False,
+    ) -> InteractionResolutionResult:
+        return await sync_to_async(self._commit_interaction_resolution, thread_sensitive=True)(
+            conversation_id,
+            owner_id,
+            expected_version,
+            state,
+            tuple(events),
+            answer,
+            automatic,
+            create_rule,
+            deciding_rule,
+            provider_kind,
+            provider_request_ids,
+            resolution_event_sequence,
+            mark_policy_evaluated,
+            interaction_id,
+            suppress_answer_command,
+        )
+
+    @transaction.atomic
+    def _commit_interaction_resolution(
+        self,
+        conversation_id: UUID,
+        owner_id: str,
+        expected_version: int,
+        state: ConversationState,
+        events: tuple[ConversationEvent, ...],
+        answer: InteractionAnswer,
+        automatic: bool,
+        create_rule: ApprovalRule | None,
+        deciding_rule: ApprovalRule | None,
+        provider_kind: str | None,
+        provider_request_ids: dict[str, str] | None,
+        resolution_event_sequence: int,
+        mark_policy_evaluated: bool,
+        interaction_id: UUID | None,
+        suppress_answer_command: bool,
+    ) -> InteractionResolutionResult:
+        iid = interaction_id or answer.interaction_id
+        existing = InteractionAnswerRecord.objects.filter(interaction_id=iid).first()
+        if existing is not None:
+            stored = _load(InteractionAnswer, existing.data)
+            return InteractionResolutionResult(
+                answer=stored,
+                command=None,
+                was_first_write=False,
+                audit=None,
+            )
+
+        row = (
+            ConversationAggregate.objects.select_for_update()
+            .filter(conversation_id=conversation_id, owner_id=owner_id)
+            .first()
+        )
+        if row is None:
+            raise not_found("conversation")
+        existing = InteractionAnswerRecord.objects.filter(interaction_id=iid).first()
+        if existing is not None:
+            stored = _load(InteractionAnswer, existing.data)
+            return InteractionResolutionResult(
+                answer=stored,
+                command=None,
+                was_first_write=False,
+                audit=None,
+            )
+
+        current_state = _load(ConversationState, row.state)
+        interaction_row = (
+            InteractionRecord.objects.select_for_update().filter(interaction_id=iid).first()
+        )
+        if interaction_row is None:
+            raise not_found("interaction")
+
+        if automatic:
+            interaction = current_state.interactions.get(iid)
+            action = _request_action(interaction)
+            rules = [
+                _rule_domain_from_row(rule_row)
+                for rule_row in ApprovalRuleRecord.objects.select_for_update().filter(
+                    principal_id=owner_id
+                )
+            ]
+            working_directory = (
+                current_state.binding.launch_snapshot.working_directory
+                if current_state.binding and current_state.binding.launch_snapshot
+                else None
+            )
+            match = select_matching_rule(
+                rules,
+                action=action,
+                ctx=InteractionMatchContext(
+                    principal_id=owner_id,
+                    conversation_id=conversation_id,
+                    owner_id=owner_id,
+                    binding=current_state.binding,
+                    working_directory=working_directory,
+                ),
+            )
+            immediate = None
+            if match.decision is ApprovalRuleDecision.ALLOW:
+                immediate = ApprovalDecision.ALLOW_ONCE
+            elif match.decision is ApprovalRuleDecision.DENY:
+                immediate = ApprovalDecision.DENY
+            available = (
+                interaction.request.available_decisions
+                if interaction is not None
+                and isinstance(interaction.request, ApprovalRequestPayload)
+                else ()
+            )
+            if immediate is None or immediate not in available or match.rule is None:
+                interaction_row.policy_evaluated_at = current_state.conversation.updated_at
+                interaction_row.save(update_fields=("policy_evaluated_at",))
+                return InteractionResolutionResult(
+                    answer=answer,
+                    command=None,
+                    was_first_write=False,
+                    audit=None,
+                )
+            automatic_result = submit_interaction_answer(
+                current_state,
+                InteractionAnswer(interaction_id=iid, decision=immediate),
+                now=answer.submitted_at or state.conversation.updated_at,
+                automatic=True,
+            )
+            state = automatic_result.state
+            events = automatic_result.events
+            answer = state.answers[iid]
+            resolution_event_sequence = events[-1].sequence
+            deciding_rule = match.rule
+            expected_version = current_state.conversation.version
+
+        if row.version != expected_version:
+            raise _conflict(expected_version, row.version)
+
+        live_rule: ApprovalRule | None = deciding_rule
+        if create_rule is not None:
+            ApprovalRuleRecord.objects.create(
+                rule_id=create_rule.id,
+                principal_id=create_rule.principal_id,
+                decision=create_rule.decision.value,
+                scope_kind=create_rule.scope.kind,
+                scope=_json(create_rule.scope),
+                matcher_kind=create_rule.matcher.kind,
+                matcher=_json(create_rule.matcher),
+                created_at=create_rule.created_at,
+                updated_at=create_rule.updated_at,
+            )
+            live_rule = create_rule
+        elif deciding_rule is not None:
+            rule_row = (
+                ApprovalRuleRecord.objects.select_for_update()
+                .filter(rule_id=deciding_rule.id, principal_id=owner_id)
+                .first()
+            )
+            if rule_row is None:
+                raise not_found("approval rule")
+            live_rule = _rule_domain_from_row(rule_row)
+
+        locked_interaction = state.interactions.get(iid)
+        if create_rule is not None:
+            ctx = InteractionMatchContext(
+                principal_id=owner_id,
+                conversation_id=conversation_id,
+                owner_id=owner_id,
+                binding=state.binding,
+                working_directory=(
+                    state.binding.launch_snapshot.working_directory
+                    if state.binding and state.binding.launch_snapshot
+                    else None
+                ),
+            )
+            if (
+                create_rule.decision is not ApprovalRuleDecision.ALLOW
+                or answer.decision is not ApprovalDecision.ALLOW_ONCE
+                or not rule_matches_request(
+                    create_rule,
+                    action=_request_action(locked_interaction),
+                    ctx=ctx,
+                )
+            ):
+                raise DomainError(
+                    ErrorCode.INVALID_STATE,
+                    "create-and-allow rule does not match the locked interaction",
+                )
+
+        if events:
+            self._commit_turn_batch_sync(conversation_id, expected_version, state, events, ())
+        elif mark_policy_evaluated:
+            InteractionRecord.objects.filter(interaction_id=iid).update(
+                policy_evaluated_at=state.conversation.updated_at
+            )
+            return InteractionResolutionResult(
+                answer=answer,
+                command=None,
+                was_first_write=False,
+                audit=None,
+            )
+
+        interaction = state.interactions.get(iid)
+        correlation = {
+            str(key): str(value)
+            for key, value in (interaction_row.provider_correlation or {}).items()
+        }
+        if provider_request_ids:
+            correlation.update(provider_request_ids)
+        resolved_provider_kind = provider_kind
+        if resolved_provider_kind is None and state.binding is not None:
+            resolved_provider_kind = state.binding.kind.value
+        from uuid import uuid4
+
+        audit_id = uuid4()
+        audit = InteractionAuditProjection(
+            id=audit_id,
+            principal_id=owner_id,
+            interaction_id=iid,
+            conversation_id=conversation_id,
+            turn_id=interaction.turn_id if interaction else uuid4(),
+            kind=interaction.kind if interaction else InteractionKind.APPROVAL,
+            decision=answer.decision,
+            answers=answer.answers,
+            automatic=automatic,
+            created_at=answer.submitted_at or state.conversation.updated_at,
+            provider_kind=(HarnessKind(resolved_provider_kind) if resolved_provider_kind else None),
+            provider_request_ids=correlation,
+            deciding_rule_id=live_rule.id if live_rule else None,
+            rule_decision=live_rule.decision if live_rule else None,
+            rule_scope=live_rule.scope if live_rule else None,
+            rule_matcher=live_rule.matcher if live_rule else None,
+            request_action=_request_action(interaction),
+        )
+        InteractionAnswerRecord.objects.create(
+            interaction_id=iid,
+            conversation_id=conversation_id,
+            data=_json(answer),
+            submitted_at=answer.submitted_at,
+            resolution_event_sequence=resolution_event_sequence,
+            released_at=None,
+            answer_command_suppressed=suppress_answer_command,
+        )
+        InteractionAuditRecord.objects.create(
+            audit_id=audit.id,
+            principal_id=audit.principal_id,
+            interaction_id=audit.interaction_id,
+            conversation_id=audit.conversation_id,
+            turn_id=audit.turn_id,
+            kind=audit.kind.value,
+            decision=audit.decision.value if audit.decision else None,
+            answers=audit.answers,
+            automatic=audit.automatic,
+            created_at=audit.created_at,
+            provider_kind=audit.provider_kind.value if audit.provider_kind else None,
+            provider_request_ids=audit.provider_request_ids,
+            deciding_rule_id=live_rule.id if live_rule else None,
+            deciding_rule_id_copy=live_rule.id if live_rule else None,
+            rule_decision=live_rule.decision.value if live_rule else None,
+            rule_scope=_json(live_rule.scope) if live_rule else None,
+            rule_matcher=_json(live_rule.matcher) if live_rule else None,
+            request_action=_json(audit.request_action) if audit.request_action else None,
+        )
+        if mark_policy_evaluated or automatic:
+            InteractionRecord.objects.filter(interaction_id=iid).update(
+                policy_evaluated_at=answer.submitted_at or state.conversation.updated_at
+            )
+        return InteractionResolutionResult(
+            answer=answer,
+            command=None,
+            was_first_write=True,
+            audit=audit,
+        )
+
+    async def release_interaction_answer(
+        self,
+        conversation_id: UUID,
+        owner_id: str,
+        interaction_id: UUID,
+        command: Command,
+        *,
+        expected_version: int,
+        state: ConversationState,
+    ) -> Command:
+        return await sync_to_async(self._release_interaction_answer, thread_sensitive=True)(
+            conversation_id, owner_id, interaction_id, command, expected_version, state
+        )
+
+    @transaction.atomic
+    def _release_interaction_answer(
+        self,
+        conversation_id: UUID,
+        owner_id: str,
+        interaction_id: UUID,
+        command: Command,
+        expected_version: int,
+        state: ConversationState,
+    ) -> Command:
+        answer_row = (
+            InteractionAnswerRecord.objects.select_for_update()
+            .filter(interaction_id=interaction_id)
+            .first()
+        )
+        if answer_row is None:
+            raise DomainError(ErrorCode.INVALID_STATE, "interaction answer missing for release")
+        if answer_row.command is not None:
+            return _load(Command, answer_row.command.data)
+        row = (
+            ConversationAggregate.objects.select_for_update()
+            .filter(conversation_id=conversation_id, owner_id=owner_id)
+            .first()
+        )
+        if row is None:
+            raise not_found("conversation")
+        current_state = _load(ConversationState, row.state)
+        command_row, _ = CommandRecord.objects.update_or_create(
+            command_id=command.id,
+            defaults={
+                "conversation_id": conversation_id,
+                "idempotency_key": command.idempotency_key,
+                **self._command_values(command),
+            },
+        )
+        answer_row.command = command_row
+        answer_row.released_at = command.created_at
+        answer_row.save(update_fields=["command", "released_at"])
+        commands = dict(current_state.commands)
+        commands[command.id] = command
+        self._store_aggregate(row, current_state.model_copy(update={"commands": commands}))
+        return command
+
+    async def get_interaction_resolution_event(
+        self,
+        conversation_id: UUID,
+        interaction_id: UUID,
+    ) -> ConversationEvent:
+        return await sync_to_async(self._get_interaction_resolution_event, thread_sensitive=True)(
+            conversation_id,
+            interaction_id,
+        )
+
+    def _get_interaction_resolution_event(
+        self,
+        conversation_id: UUID,
+        interaction_id: UUID,
+    ) -> ConversationEvent:
+        answer = InteractionAnswerRecord.objects.filter(
+            interaction_id=interaction_id,
+            conversation_id=conversation_id,
+        ).first()
+        if answer is None or answer.resolution_event_sequence is None:
+            raise DomainError(ErrorCode.INVALID_STATE, "interaction resolution event missing")
+        row = ConversationEventRecord.objects.filter(
+            conversation_id=conversation_id,
+            sequence=answer.resolution_event_sequence,
+        ).first()
+        if row is None:
+            raise DomainError(ErrorCode.INVALID_STATE, "interaction resolution event missing")
+        event = _load(ConversationEvent, row.payload)
+        if (
+            event.type != "interaction_resolved"
+            or getattr(event.payload, "interaction_id", None) != interaction_id
+        ):
+            raise DomainError(ErrorCode.INVALID_STATE, "recorded resolution event mismatch")
+        return event
+
+    async def get_interaction_request_event(
+        self,
+        conversation_id: UUID,
+        interaction_id: UUID,
+    ) -> ConversationEvent:
+        return await sync_to_async(self._get_interaction_request_event, thread_sensitive=True)(
+            conversation_id,
+            interaction_id,
+        )
+
+    def _get_interaction_request_event(
+        self,
+        conversation_id: UUID,
+        interaction_id: UUID,
+    ) -> ConversationEvent:
+        interaction = InteractionRecord.objects.filter(
+            interaction_id=interaction_id,
+            conversation_id=conversation_id,
+        ).first()
+        if interaction is None or interaction.request_event_sequence is None:
+            raise DomainError(ErrorCode.INVALID_STATE, "interaction request event missing")
+        row = ConversationEventRecord.objects.filter(
+            conversation_id=conversation_id,
+            sequence=interaction.request_event_sequence,
+        ).first()
+        if row is None:
+            raise DomainError(ErrorCode.INVALID_STATE, "interaction request event missing")
+        event = _load(ConversationEvent, row.payload)
+        if (
+            event.type != "interaction_requested"
+            or getattr(event.payload, "interaction_id", None) != interaction_id
+        ):
+            raise DomainError(ErrorCode.INVALID_STATE, "recorded request event mismatch")
+        return event
+
+    async def complete_suppressed_interaction_resolution(
         self,
         interaction_id: UUID,
-        answer: InteractionAnswer,
-    ) -> InteractionAnswer:
-        row, created = InteractionAnswerRecord.objects.get_or_create(
-            interaction_id=interaction_id,
-            defaults={"data": _json(answer), "submitted_at": answer.submitted_at},
+        published_at: datetime,
+    ) -> bool:
+        return await sync_to_async(
+            self._complete_suppressed_interaction_resolution,
+            thread_sensitive=True,
+        )(interaction_id, published_at)
+
+    @transaction.atomic
+    def _complete_suppressed_interaction_resolution(
+        self,
+        interaction_id: UUID,
+        published_at: datetime,
+    ) -> bool:
+        row = (
+            InteractionAnswerRecord.objects.select_for_update()
+            .filter(interaction_id=interaction_id)
+            .first()
         )
-        return answer if created else _load(InteractionAnswer, row.data)
+        if row is None:
+            raise DomainError(ErrorCode.INVALID_STATE, "interaction answer missing")
+        if not row.answer_command_suppressed:
+            return False
+        if row.released_at is None:
+            row.released_at = published_at
+            row.save(update_fields=("released_at",))
+        return True
+
+    async def mark_interaction_policy_evaluated(
+        self,
+        interaction_id: UUID,
+        evaluated_at: datetime,
+    ) -> None:
+        await sync_to_async(self._mark_policy_evaluated, thread_sensitive=True)(
+            interaction_id, evaluated_at
+        )
+
+    def _mark_policy_evaluated(self, interaction_id: UUID, evaluated_at: datetime) -> None:
+        InteractionRecord.objects.filter(interaction_id=interaction_id).update(
+            policy_evaluated_at=evaluated_at
+        )
+
+    async def list_unevaluated_open_interactions(self) -> Sequence[tuple[UUID, UUID]]:
+        return await sync_to_async(self._list_unevaluated, thread_sensitive=True)()
+
+    def _list_unevaluated(self) -> tuple[tuple[UUID, UUID], ...]:
+        rows = InteractionRecord.objects.filter(
+            status__in=[InteractionStatus.PENDING.value, InteractionStatus.DRAFT.value],
+            policy_evaluated_at__isnull=True,
+        ).values_list("conversation_id", "interaction_id")
+        return tuple((cid, iid) for cid, iid in rows)
+
+    async def list_unreleased_resolutions(self) -> Sequence[tuple[UUID, UUID]]:
+        return await sync_to_async(self._list_unreleased, thread_sensitive=True)()
+
+    def _list_unreleased(self) -> tuple[tuple[UUID, UUID], ...]:
+        rows = InteractionAnswerRecord.objects.filter(released_at__isnull=True).values_list(
+            "conversation_id", "interaction_id"
+        )
+        return tuple((cid, iid) for cid, iid in rows if cid is not None)
+
+    async def create_approval_rule(self, rule: ApprovalRule) -> ApprovalRuleProjection:
+        return await sync_to_async(self._create_rule, thread_sensitive=True)(rule)
+
+    def _create_rule(self, rule: ApprovalRule) -> ApprovalRuleProjection:
+        ApprovalRuleRecord.objects.create(
+            rule_id=rule.id,
+            principal_id=rule.principal_id,
+            decision=rule.decision.value,
+            scope_kind=rule.scope.kind,
+            scope=_json(rule.scope),
+            matcher_kind=rule.matcher.kind,
+            matcher=_json(rule.matcher),
+            created_at=rule.created_at,
+            updated_at=rule.updated_at,
+        )
+        return _rule_projection(rule)
+
+    async def get_approval_rule(self, rule_id: UUID, principal_id: str) -> ApprovalRuleProjection:
+        return await sync_to_async(self._get_rule, thread_sensitive=True)(rule_id, principal_id)
+
+    def _get_rule(self, rule_id: UUID, principal_id: str) -> ApprovalRuleProjection:
+        row = ApprovalRuleRecord.objects.filter(rule_id=rule_id, principal_id=principal_id).first()
+        if row is None:
+            raise not_found("approval rule")
+        return _rule_from_row(row)
+
+    async def replace_approval_rule(self, rule: ApprovalRule) -> ApprovalRuleProjection:
+        return await sync_to_async(self._replace_rule, thread_sensitive=True)(rule)
+
+    def _replace_rule(self, rule: ApprovalRule) -> ApprovalRuleProjection:
+        updated = ApprovalRuleRecord.objects.filter(
+            rule_id=rule.id, principal_id=rule.principal_id
+        ).update(
+            decision=rule.decision.value,
+            scope_kind=rule.scope.kind,
+            scope=_json(rule.scope),
+            matcher_kind=rule.matcher.kind,
+            matcher=_json(rule.matcher),
+            updated_at=rule.updated_at,
+        )
+        if not updated:
+            raise not_found("approval rule")
+        return _rule_projection(rule)
+
+    async def delete_approval_rule(self, rule_id: UUID, principal_id: str) -> None:
+        await sync_to_async(self._delete_rule, thread_sensitive=True)(rule_id, principal_id)
+
+    def _delete_rule(self, rule_id: UUID, principal_id: str) -> None:
+        deleted, _ = ApprovalRuleRecord.objects.filter(
+            rule_id=rule_id, principal_id=principal_id
+        ).delete()
+        if not deleted:
+            raise not_found("approval rule")
+
+    async def page_approval_rules(
+        self,
+        principal_id: str,
+        *,
+        cursor: str | None = None,
+        limit: int = 50,
+    ) -> Page[ApprovalRuleProjection]:
+        return await sync_to_async(self._page_rules, thread_sensitive=True)(
+            principal_id, cursor, limit
+        )
+
+    def _page_rules(
+        self, principal_id: str, cursor: str | None, limit: int
+    ) -> Page[ApprovalRuleProjection]:
+        limit = clamp_page_limit(limit)
+        qs = ApprovalRuleRecord.objects.filter(principal_id=principal_id).order_by(
+            "-created_at", "-rule_id"
+        )
+        qs = apply_desc_datetime_cursor(qs, cursor, "created_at", "rule_id")
+        rows = list(qs[: limit + 1])
+        items = [_rule_from_row(r) for r in rows[:limit]]
+        next_cursor = None
+        if len(rows) > limit:
+            last = rows[limit - 1]
+            next_cursor = encode_cursor(sort=last.created_at.isoformat(), id=last.rule_id)
+        return Page(items=tuple(items), next_cursor=next_cursor)
+
+    async def list_applicable_approval_rules(self, principal_id: str) -> Sequence[ApprovalRule]:
+        return await sync_to_async(self._list_rules, thread_sensitive=True)(principal_id)
+
+    def _list_rules(self, principal_id: str) -> tuple[ApprovalRule, ...]:
+        rows = ApprovalRuleRecord.objects.filter(principal_id=principal_id)
+        return tuple(_rule_domain_from_row(r) for r in rows)
+
+    async def get_interaction_audit(
+        self, audit_id: UUID, principal_id: str
+    ) -> InteractionAuditProjection:
+        return await sync_to_async(self._get_audit, thread_sensitive=True)(audit_id, principal_id)
+
+    def _get_audit(self, audit_id: UUID, principal_id: str) -> InteractionAuditProjection:
+        row = InteractionAuditRecord.objects.filter(
+            audit_id=audit_id, principal_id=principal_id
+        ).first()
+        if row is None:
+            raise not_found("interaction audit")
+        return _audit_from_row(row)
+
+    async def page_interaction_audits(
+        self,
+        principal_id: str,
+        *,
+        cursor: str | None = None,
+        limit: int = 50,
+    ) -> Page[InteractionAuditProjection]:
+        return await sync_to_async(self._page_audits, thread_sensitive=True)(
+            principal_id, cursor, limit
+        )
+
+    def _page_audits(
+        self, principal_id: str, cursor: str | None, limit: int
+    ) -> Page[InteractionAuditProjection]:
+        limit = clamp_page_limit(limit)
+        qs = InteractionAuditRecord.objects.filter(principal_id=principal_id).order_by(
+            "-created_at", "-audit_id"
+        )
+        qs = apply_desc_datetime_cursor(qs, cursor, "created_at", "audit_id")
+        rows = list(qs[: limit + 1])
+        items = [_audit_from_row(r) for r in rows[:limit]]
+        next_cursor = None
+        if len(rows) > limit:
+            last = rows[limit - 1]
+            next_cursor = encode_cursor(sort=last.created_at.isoformat(), id=last.audit_id)
+        return Page(items=tuple(items), next_cursor=next_cursor)
+
+    def _commit_turn_batch_sync(
+        self,
+        conversation_id: UUID,
+        expected_version: int,
+        state: ConversationState,
+        events: tuple[ConversationEvent, ...],
+        commands: tuple[Command, ...],
+    ) -> tuple[ConversationEvent, ...]:
+        """Synchronous body shared with commit_turn_batch (must be in a transaction)."""
+        row = (
+            ConversationAggregate.objects.select_for_update()
+            .filter(conversation_id=conversation_id)
+            .first()
+        )
+        if row is None:
+            raise DomainError(ErrorCode.NOT_FOUND, "conversation not found")
+        if row.version != expected_version:
+            raise _conflict(expected_version, row.version)
+        expected_sequence = row.next_event_sequence
+        for event in events:
+            if event.conversation_id != conversation_id or event.sequence != expected_sequence:
+                raise DomainError(ErrorCode.OPTIMISTIC_CONFLICT, "event sequence conflict")
+            expected_sequence += 1
+        if state.conversation.next_event_sequence != expected_sequence:
+            raise DomainError(ErrorCode.OPTIMISTIC_CONFLICT, "aggregate sequence conflict")
+        self._store_aggregate(row, state)
+        ConversationEventRecord.objects.bulk_create(
+            [
+                ConversationEventRecord(
+                    event_id=event.event_id,
+                    conversation_id=conversation_id,
+                    sequence=event.sequence,
+                    timestamp=event.timestamp,
+                    type=event.type,
+                    payload=_json(event),
+                )
+                for event in events
+            ]
+        )
+        for command in commands:
+            CommandRecord.objects.update_or_create(
+                command_id=command.id,
+                defaults={
+                    "conversation_id": conversation_id,
+                    "idempotency_key": command.idempotency_key,
+                    **self._command_values(command),
+                },
+            )
+        from talktoharnesses.django.materialize import materialize_projections
+
+        materialize_projections(state, events)
+        return events
 
     async def delete_expired_turn_aggregates(self, cutoff: datetime) -> int:
         return await sync_to_async(self._delete_expired, thread_sensitive=True)(cutoff)
@@ -725,9 +1523,11 @@ class DjangoPersistence:
         self,
         conversation_id: UUID,
         owner_id: str,
+        *,
+        include_deleted: bool = False,
     ) -> ConversationSnapshot:
         return await sync_to_async(self._get_conversation_snapshot, thread_sensitive=True)(
-            conversation_id, owner_id
+            conversation_id, owner_id, include_deleted
         )
 
     @transaction.atomic
@@ -735,16 +1535,15 @@ class DjangoPersistence:
         self,
         conversation_id: UUID,
         owner_id: str,
+        include_deleted: bool,
     ) -> ConversationSnapshot:
-        row = (
-            ConversationAggregate.objects.select_for_update()
-            .filter(
-                conversation_id=conversation_id,
-                owner_id=owner_id,
-                deleted_at__isnull=True,
-            )
-            .first()
+        query = ConversationAggregate.objects.select_for_update().filter(
+            conversation_id=conversation_id,
+            owner_id=owner_id,
         )
+        if not include_deleted:
+            query = query.filter(deleted_at__isnull=True)
+        row = query.first()
         if row is None:
             raise not_found("conversation")
         state = _load(ConversationState, row.state)
