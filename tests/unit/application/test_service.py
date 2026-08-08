@@ -408,9 +408,7 @@ async def test_rule_scopes_are_owner_scoped_before_create_and_replace() -> None:
     with pytest.raises(DomainError):
         await service.create_approval_rule(
             "owner",
-            base.model_copy(
-                update={"id": uuid4(), "scope": UserRuleScope(user_id="foreign")}
-            ),
+            base.model_copy(update={"id": uuid4(), "scope": UserRuleScope(user_id="foreign")}),
         )
 
     await service.create_approval_rule(

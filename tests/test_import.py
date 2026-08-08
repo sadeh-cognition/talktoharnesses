@@ -103,16 +103,38 @@ assert "django" not in sys.modules, sorted(sys.modules)
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+def test_phase7_provider_modules_import_without_django() -> None:
+    code = """
+import sys
+
+import talktoharnesses.providers.cursor
+import talktoharnesses.providers.codex
+import talktoharnesses.providers.claude
+import talktoharnesses.providers.opencode
+
+assert talktoharnesses.providers.cursor.CursorAdapter is not None
+assert talktoharnesses.providers.codex.CodexAdapter is not None
+assert talktoharnesses.providers.claude.ClaudeAdapter is not None
+assert talktoharnesses.providers.opencode.OpenCodeAdapter is not None
+assert "django" not in sys.modules, sorted(sys.modules)
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=os.environ.copy(),
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 def test_supported_harnesses_markdown_drift() -> None:
     from pathlib import Path
 
-    from talktoharnesses.providers.grok.compatibility import (
-        load_grok_compatibility,
-        render_supported_harnesses_markdown,
-    )
+    from talktoharnesses.providers.compatibility import render_supported_harnesses_markdown
 
     root = Path(__file__).resolve().parents[1]
     path = root / "SUPPORTED_HARNESSES.md"
     assert path.is_file()
-    expected = render_supported_harnesses_markdown(load_grok_compatibility())
+    expected = render_supported_harnesses_markdown()
     assert path.read_text(encoding="utf-8") == expected

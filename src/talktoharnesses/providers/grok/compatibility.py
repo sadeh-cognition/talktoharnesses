@@ -1,4 +1,4 @@
-"""Strict Grok compatibility source and SUPPORTED_HARNESSES rendering."""
+"""Strict Grok compatibility source."""
 
 from __future__ import annotations
 
@@ -14,18 +14,12 @@ from pydantic import BaseModel, ConfigDict, Field
 from talktoharnesses.domain.enums import ErrorCode, HarnessKind
 from talktoharnesses.domain.errors import DomainError
 from talktoharnesses.domain.models import HarnessCapabilities
+from talktoharnesses.providers.compatibility import ReleaseCapabilities, yes_no
 
 _COMPAT = ConfigDict(extra="forbid", frozen=True)
 
-
-class GrokReleaseCapabilities(BaseModel):
-    model_config = _COMPAT
-
-    supports_resume: bool = False
-    supports_interrupt: bool = True
-    supports_steer: bool = False
-    supports_multi_interaction: bool = False
-    supports_nested_activity: bool = False
+# Backward-compatible alias used by existing imports/tests.
+GrokReleaseCapabilities = ReleaseCapabilities
 
 
 class GrokReleaseRecord(BaseModel):
@@ -39,7 +33,7 @@ class GrokReleaseRecord(BaseModel):
     agent_name: str
     acp_protocol_version: int = 1
     platforms: list[str] = Field(default_factory=list)
-    capabilities: GrokReleaseCapabilities = Field(default_factory=GrokReleaseCapabilities)
+    capabilities: ReleaseCapabilities = Field(default_factory=ReleaseCapabilities)
     required_agent_methods: list[str] = Field(default_factory=list)
     allowlisted_extensions: list[str] = Field(default_factory=list)
     notes: str | None = None
@@ -170,64 +164,61 @@ def assert_matrix_membership(
         )
 
 
-def render_supported_harnesses_markdown(doc: GrokCompatibilityDoc | None = None) -> str:
-    """Generate the Grok section of SUPPORTED_HARNESSES.md from the same source."""
-    doc = doc or load_grok_compatibility()
-    lines = [
-        "# Supported Harnesses",
-        "",
-        "This document is generated from packaged compatibility data.",
-        "Do not edit the Grok section by hand; regenerate via",
-        "`python -m talktoharnesses.providers.grok.render_supported`.",
-        "",
-        "## Grok",
-        "",
-        f"- Adapter version: `{doc.adapter_version}`",
-        "",
-        "### Known releases (implementation targets)",
-        "",
-    ]
-    if not doc.releases:
-        lines.append("_No releases recorded._")
-        lines.append("")
-    else:
-        lines.extend(
-            [
-                "| Release ID | CLI version | Build | ACP | Platforms | Resume | Steer |",
-                "| --- | --- | --- | --- | --- | --- | --- |",
-            ]
-        )
+class GrokCompatibilitySection:
+    """CompatibilitySection adapter for the shared Markdown renderer."""
+
+    def __init__(self, doc: GrokCompatibilityDoc | None = None) -> None:
+        self._doc = doc or load_grok_compatibility()
+
+    @property
+    def kind(self) -> HarnessKind:
+        return HarnessKind.GROK
+
+    @property
+    def adapter_version(self) -> str:
+        return self._doc.adapter_version
+
+    @property
+    def create_matrix(self) -> list[str]:
+        return list(self._doc.create_matrix)
+
+    @property
+    def resume_matrix(self) -> list[str]:
+        return list(self._doc.resume_matrix)
+
+    def render_release_rows(self) -> list[str]:
+        doc = self._doc
+        if not doc.releases:
+            return []
+        lines = [
+            "| Release ID | CLI version | Build | ACP | Platforms | Resume | Steer |",
+            "| --- | --- | --- | --- | --- | --- | --- |",
+        ]
         for release in doc.releases:
             platforms = ", ".join(release.platforms) if release.platforms else "—"
             caps = release.capabilities
             lines.append(
                 f"| `{release.id}` | {release.cli_version} | `{release.cli_build}` | "
                 f"v{release.acp_protocol_version} | {platforms} | "
-                f"{'yes' if caps.supports_resume else 'no'} | "
-                f"{'yes' if caps.supports_steer else 'no'} |"
+                f"{yes_no(caps.supports_resume)} | "
+                f"{yes_no(caps.supports_steer)} |"
             )
-        lines.append("")
+        return lines
 
-    lines.append("### Published create matrix")
-    lines.append("")
-    if not doc.create_matrix:
-        lines.append(
-            "_No published create combinations yet. "
-            "Create rows are added only after the opt-in create suite passes._"
-        )
-    else:
-        for release_id in doc.create_matrix:
-            lines.append(f"- `{release_id}`")
-    lines.append("")
-    lines.append("### Published resume matrix")
-    lines.append("")
-    if not doc.resume_matrix:
-        lines.append(
-            "_No published resume combinations yet. "
-            "Resume rows are added only after the opt-in resume suite passes._"
-        )
-    else:
-        for release_id in doc.resume_matrix:
-            lines.append(f"- `{release_id}`")
-    lines.append("")
-    return "\n".join(lines)
+    def render_extra_notes(self) -> list[str]:
+        return []
+
+
+def grok_compatibility_section() -> GrokCompatibilitySection:
+    return GrokCompatibilitySection()
+
+
+def render_supported_harnesses_markdown(doc: GrokCompatibilityDoc | None = None) -> str:
+    """Backward-compatible Grok-only render; prefer shared renderer."""
+    from talktoharnesses.providers.compatibility import (
+        render_supported_harnesses_markdown as render_all,
+    )
+
+    if doc is None:
+        return render_all()
+    return render_all([GrokCompatibilitySection(doc)])

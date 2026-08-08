@@ -1,0 +1,22 @@
+{
+  "adapter_version": "2026.8.0.dev7",
+  "releases": [
+    {
+      "id": "codex-openai-codex-0.144.4",
+      "sdk_version": "0.144.4",
+      "runtime_package": "openai-codex-cli-bin",
+      "runtime_version": "0.144.4",
+      "platforms": ["linux", "darwin", "win32"],
+      "capabilities": {
+        "supports_resume": true,
+        "supports_interrupt": true,
+        "supports_steer": true,
+        "supports_multi_interaction": false,
+        "supports_nested_activity": false
+      },
+      "notes": "Public AsyncCodex lacks a deferred approval handler; create/resume matrices stay empty until a release exposes broker-compatible approvals without private client attributes."
+    }
+  ],
+  "create_matrix": [],
+  "resume_matrix": []
+}

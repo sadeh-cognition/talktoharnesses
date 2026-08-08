@@ -271,6 +271,9 @@ class CommandProcessor:
                 await self._fallback_failed_steer(started_cmd)
                 return
         elif command.kind == CommandKind.INTERRUPT:
+            batcher = self._batchers.get(command.conversation_id)
+            if batcher is not None:
+                await batcher.flush()
             if self._broker is not None:
                 await self._broker.cancel_open_for_interrupt(command.conversation_id)  # type: ignore[attr-defined]
             await adapter.interrupt(session)

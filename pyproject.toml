@@ -1,6 +1,6 @@
 [project]
 name = "talktoharnesses"
-version = "2026.8.0.dev6"
+version = "2026.8.0.dev7"
 description = "Unified coding-agent harness interface and optional Django app scaffold"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -23,8 +23,18 @@ postgres = [
     "psycopg[binary]>=3.2,<4",
 ]
 grok = []
+cursor = []
+codex = [
+    "openai-codex==0.144.4",
+]
+claude = [
+    "claude-agent-sdk==0.1.53",
+]
+opencode = [
+    "httpx>=0.28,<0.29",
+]
 all = [
-    "talktoharnesses[django,postgres,grok]",
+    "talktoharnesses[django,postgres,grok,cursor,codex,claude,opencode]",
 ]
 
 [dependency-groups]

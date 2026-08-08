@@ -34,7 +34,10 @@ from talktoharnesses.django.broker import DjangoCommittedEventBroker
 from talktoharnesses.django.persistence import DjangoPersistence
 from talktoharnesses.domain.enums import ErrorCode, HarnessKind
 from talktoharnesses.domain.errors import DomainError
+from talktoharnesses.providers.claude import ClaudeAdapter
+from talktoharnesses.providers.cursor import CursorAdapter
 from talktoharnesses.providers.grok import GrokAdapter
+from talktoharnesses.providers.opencode import OpenCodeAdapter
 from talktoharnesses.providers.registry import AdapterRegistry
 from talktoharnesses.runtime.manager import RuntimeManager
 
@@ -84,6 +87,9 @@ def _build_service() -> TalkToHarnessesService:
     persistence = DjangoPersistence()
     registry = AdapterRegistry()
     registry.register(HarnessKind.GROK, GrokAdapter)
+    registry.register(HarnessKind.CURSOR, CursorAdapter)
+    registry.register(HarnessKind.CLAUDE, ClaudeAdapter)
+    registry.register(HarnessKind.OPENCODE, OpenCodeAdapter)
     broker = DjangoCommittedEventBroker()
     runtime = RuntimeManager(persistence, registry, clock=_utc_clock)
     return TalkToHarnessesService(
