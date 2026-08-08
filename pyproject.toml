@@ -1,6 +1,6 @@
 [project]
 name = "talktoharnesses"
-version = "2026.8.0.dev0"
+version = "2026.8.0.dev3"
 description = "Unified coding-agent harness interface and optional Django app scaffold"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -9,6 +9,7 @@ license-files = ["LICENSE"]
 authors = [{ name = "talktoharnesses contributors" }]
 dependencies = [
     "pydantic>=2",
+    "pywin32==312; sys_platform == 'win32'",
 ]
 
 [project.optional-dependencies]
@@ -16,6 +17,9 @@ django = [
     "django>=5.2,<5.3",
     "django-ninja",
     "uvicorn",
+]
+postgres = [
+    "psycopg[binary]>=3.2,<4",
 ]
 
 [dependency-groups]
@@ -28,6 +32,7 @@ dev = [
     "hypothesis",
     "pytest-cov",
     "django-stubs",
+    "types-pywin32==312.*; sys_platform == 'win32'",
 ]
 
 [build-system]
@@ -56,5 +61,7 @@ include = ["src", "tests"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]
+DJANGO_SETTINGS_MODULE = "tests.django_settings"
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"

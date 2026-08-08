@@ -39,3 +39,44 @@ assert "django" not in sys.modules, sorted(sys.modules)
         env=os.environ.copy(),
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_domain_layer_import_does_not_load_django() -> None:
+    code = """
+import sys
+
+import talktoharnesses.domain
+import talktoharnesses.application
+import talktoharnesses.providers
+
+assert talktoharnesses.domain.ErrorCode.PERSISTENCE_REQUIRED.value == "persistence_required"
+assert "django" not in sys.modules, sorted(sys.modules)
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=os.environ.copy(),
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_runtime_package_import_does_not_load_django() -> None:
+    code = """
+import sys
+
+import talktoharnesses.runtime
+
+assert talktoharnesses.runtime.ProcessSupervisor is not None
+assert talktoharnesses.runtime.RuntimeManager is not None
+assert "django" not in sys.modules, sorted(sys.modules)
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=os.environ.copy(),
+    )
+    assert result.returncode == 0, result.stdout + result.stderr

@@ -1,8 +1,9 @@
 # talktoharnesses
 
 Unified coding-agent harness interface with an optional Django application
-scaffold. The current release is a pre-release packaging baseline: no public
-runtime API or executable entry point is provided yet.
+scaffold. Pre-release (`*.devN`): domain models, pure transitions, adapter
+contracts, and Django-free process/runtime supervision (`talktoharnesses.runtime`)
+are available; no harness adapters or execution facade yet.
 
 Accepted architectural decisions live under [`docs/adr/`](docs/adr/).
 
