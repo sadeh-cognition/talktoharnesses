@@ -25,6 +25,7 @@ from talktoharnesses.domain.events import (
     ActivityCompletedPayload,
     ActivityStartedPayload,
     ConversationEvent,
+    ConversationTitleUpdatedPayload,
     EventPayload,
     HarnessSwitchedPayload,
     HarnessSwitchFailedPayload,
@@ -81,6 +82,9 @@ class ConversationState(BaseModel):
     activities: dict[UUID, BackgroundActivity] = Field(default_factory=lambda: {})
     capabilities: HarnessCapabilities | None = None
     idle_reap_eligible: bool = True
+    # Native provider identity / stream-offset dedupe (Phase 4).
+    seen_native_ids: frozenset[str] = Field(default_factory=frozenset)
+    seen_stream_offsets: frozenset[str] = Field(default_factory=frozenset)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1128,6 +1132,46 @@ def fail_switch(
     return TransitionResult(state=new_state, events=events)
 
 
+def apply_native_title(
+    state: ConversationState,
+    *,
+    title_native: str,
+    now: datetime,
+) -> TransitionResult:
+    """Update conversation.title_native and emit conversation_title_updated."""
+    ts = _now(now)
+    new_state = state.model_copy(
+        update={
+            "conversation": state.conversation.model_copy(
+                update={"title_native": title_native, "updated_at": ts}
+            )
+        }
+    )
+    new_state, events = append_events(
+        new_state,
+        ts,
+        [ConversationTitleUpdatedPayload(title_native=title_native)],
+    )
+    return TransitionResult(state=new_state, events=events)
+
+
+def remember_native_ids(
+    state: ConversationState,
+    *,
+    native_ids: Sequence[str] = (),
+    stream_offsets: Sequence[str] = (),
+) -> ConversationState:
+    """Record native IDs / stream offsets for load-replay deduplication."""
+    if not native_ids and not stream_offsets:
+        return state
+    return state.model_copy(
+        update={
+            "seen_native_ids": state.seen_native_ids | frozenset(native_ids),
+            "seen_stream_offsets": state.seen_stream_offsets | frozenset(stream_offsets),
+        }
+    )
+
+
 def new_conversation_state(
     *,
     owner_id: str,
@@ -1158,6 +1202,7 @@ __all__ = [
     "ConversationState",
     "TransitionResult",
     "append_events",
+    "apply_native_title",
     "apply_steer",
     "cancel_queued_prompt",
     "change_mode",
@@ -1175,6 +1220,7 @@ __all__ = [
     "new_conversation_state",
     "reap_session",
     "register_activity",
+    "remember_native_ids",
     "request_interaction",
     "resume_session",
     "rotate_session",

@@ -6,7 +6,7 @@ from collections.abc import Sequence
 from datetime import datetime
 from uuid import UUID
 
-from talktoharnesses.domain.enums import ErrorCode
+from talktoharnesses.domain.enums import CommandStatus, ErrorCode
 from talktoharnesses.domain.errors import DomainError
 from talktoharnesses.domain.events import ConversationEvent
 from talktoharnesses.domain.models import Command, InteractionAnswer, LaunchSnapshot, ProcessRecord
@@ -21,6 +21,8 @@ class MemoryPersistence:
         self.processes: dict[UUID, ProcessRecord] = {}  # process_id -> record
         self.launch_history: dict[UUID, list[LaunchSnapshot]] = {}  # conversation
         self.events: dict[UUID, list[ConversationEvent]] = {}
+        self.commands: dict[UUID, Command] = {}
+        self.accepted_queue: list[UUID] = []
 
     def seed(self, state: ConversationState) -> None:
         self.states[state.conversation.id] = state
@@ -44,6 +46,16 @@ class MemoryPersistence:
             )
         return state
 
+    async def get_worker_snapshot(self, conversation_id: UUID) -> ConversationState:
+        try:
+            return self.states[conversation_id]
+        except KeyError as exc:
+            raise DomainError(
+                ErrorCode.INVALID_STATE,
+                "conversation not found",
+                details={"conversation_id": str(conversation_id)},
+            ) from exc
+
     async def save_snapshot(self, state: ConversationState) -> ConversationState:
         existing = self.states.get(state.conversation.id)
         if existing is not None and existing.conversation.version != state.conversation.version:
@@ -53,12 +65,75 @@ class MemoryPersistence:
         return state
 
     async def accept_command(self, command: Command) -> Command:
+        existing = self.commands.get(command.id)
+        if existing is not None:
+            return existing
+        for stored in self.commands.values():
+            if (
+                stored.conversation_id == command.conversation_id
+                and stored.idempotency_key == command.idempotency_key
+            ):
+                return stored
+        self.commands[command.id] = command
+        self.accepted_queue.append(command.id)
         return command
 
     async def claim_commands(self, worker_id: str, limit: int) -> Sequence[Command]:
-        return ()
+        from datetime import UTC, datetime, timedelta
+
+        claimed: list[Command] = []
+        still_pending: list[UUID] = []
+        now = datetime.now(UTC)
+        lease = now + timedelta(seconds=30)
+        candidates = list(self.accepted_queue)
+        candidates.extend(
+            command.id
+            for command in self.commands.values()
+            if command.status == CommandStatus.CLAIMED
+            and command.lease_expires_at is not None
+            and command.lease_expires_at < now
+            and command.id not in self.accepted_queue
+        )
+        for command_id in candidates:
+            if len(claimed) >= limit:
+                still_pending.append(command_id)
+                continue
+            command = self.commands.get(command_id)
+            if command is None or (
+                command.status != CommandStatus.ACCEPTED
+                and not (
+                    command.status == CommandStatus.CLAIMED
+                    and command.lease_expires_at is not None
+                    and command.lease_expires_at < now
+                )
+            ):
+                continue
+            updated = command.model_copy(
+                update={
+                    "status": CommandStatus.CLAIMED,
+                    "worker_id": worker_id,
+                    "attempts": command.attempts + 1,
+                    "lease_expires_at": lease,
+                }
+            )
+            self.commands[command_id] = updated
+            claimed.append(updated)
+        self.accepted_queue = still_pending
+        return tuple(claimed)
+
+    async def renew_command_lease(
+        self,
+        command_id: UUID,
+        worker_id: str,
+        expires_at: datetime,
+    ) -> None:
+        command = self.commands.get(command_id)
+        if command is None or command.worker_id != worker_id:
+            raise DomainError(ErrorCode.INVALID_STATE, "command lease not found for worker")
+        self.commands[command_id] = command.model_copy(update={"lease_expires_at": expires_at})
 
     async def update_command(self, command: Command) -> Command:
+        self.commands[command.id] = command
         return command
 
     async def commit_event_batch(
@@ -68,7 +143,23 @@ class MemoryPersistence:
         state: ConversationState,
         events: Sequence[ConversationEvent],
     ) -> Sequence[ConversationEvent]:
-        return await self.commit_runtime_lifecycle(
+        return await self.commit_turn_batch(
+            conversation_id,
+            expected_version,
+            state,
+            events,
+            (),
+        )
+
+    async def commit_turn_batch(
+        self,
+        conversation_id: UUID,
+        expected_version: int,
+        state: ConversationState,
+        events: Sequence[ConversationEvent],
+        commands: Sequence[Command] = (),
+    ) -> Sequence[ConversationEvent]:
+        committed = await self.commit_runtime_lifecycle(
             conversation_id,
             expected_version,
             state,
@@ -76,6 +167,9 @@ class MemoryPersistence:
             None,
             events,
         )
+        for command in commands:
+            self.commands[command.id] = command
+        return committed
 
     async def commit_runtime_lifecycle(
         self,

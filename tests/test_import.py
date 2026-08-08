@@ -80,3 +80,39 @@ assert "django" not in sys.modules, sorted(sys.modules)
         env=os.environ.copy(),
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_acp_and_grok_import_do_not_load_django() -> None:
+    code = """
+import sys
+
+import talktoharnesses.providers.acp
+import talktoharnesses.providers.grok
+
+assert talktoharnesses.providers.acp.AcpConnection is not None
+assert talktoharnesses.providers.grok.GrokAdapter is not None
+assert "django" not in sys.modules, sorted(sys.modules)
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=os.environ.copy(),
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_supported_harnesses_markdown_drift() -> None:
+    from pathlib import Path
+
+    from talktoharnesses.providers.grok.compatibility import (
+        load_grok_compatibility,
+        render_supported_harnesses_markdown,
+    )
+
+    root = Path(__file__).resolve().parents[1]
+    path = root / "SUPPORTED_HARNESSES.md"
+    assert path.is_file()
+    expected = render_supported_harnesses_markdown(load_grok_compatibility())
+    assert path.read_text(encoding="utf-8") == expected

@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
 
 from talktoharnesses.django.persistence import DjangoPersistence
 from talktoharnesses.domain import (
+    CommandKind,
+    CommandStatus,
     DomainError,
     ErrorCode,
     HarnessCapabilities,
@@ -21,7 +23,7 @@ from talktoharnesses.domain import (
     new_conversation_state,
 )
 from talktoharnesses.domain.events import ProcessExitedPayload
-from talktoharnesses.domain.models import ConversationHarnessBinding
+from talktoharnesses.domain.models import Command, ConversationHarnessBinding, SubmitTurnPayload
 
 
 @pytest.mark.django_db(transaction=True)
@@ -105,3 +107,30 @@ async def test_runtime_lifecycle_round_trip_and_conflict() -> None:
             (),
         )
     assert exc_info.value.code is ErrorCode.OPTIMISTIC_CONFLICT
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_claim_reclaims_only_expired_pre_delivery_command() -> None:
+    now = datetime.now(UTC)
+    state = new_conversation_state(owner_id="owner", now=now)
+    persistence = DjangoPersistence()
+    await persistence.save_snapshot(state)
+    command = Command(
+        conversation_id=state.conversation.id,
+        kind=CommandKind.SUBMIT_TURN,
+        status=CommandStatus.CLAIMED,
+        idempotency_key="expired",
+        worker_id="dead-worker",
+        lease_expires_at=now - timedelta(seconds=1),
+        attempts=1,
+        payload=SubmitTurnPayload(prompt="retry"),
+        created_at=now,
+    )
+    await persistence.accept_command(command)
+
+    claimed = await persistence.claim_commands("live-worker", 1)
+
+    assert len(claimed) == 1
+    assert claimed[0].worker_id == "live-worker"
+    assert claimed[0].attempts == 2

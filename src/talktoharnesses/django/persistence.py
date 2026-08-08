@@ -9,7 +9,7 @@ from typing import TypeVar
 from uuid import UUID
 
 from asgiref.sync import sync_to_async
-from django.db import connection, transaction
+from django.db import connection, models, transaction
 from pydantic import BaseModel
 
 from talktoharnesses.domain.enums import CommandStatus, ErrorCode
@@ -75,6 +75,22 @@ class DjangoPersistence:
             ) from exc
         return _load(ConversationState, row.state)
 
+    async def get_worker_snapshot(self, conversation_id: UUID) -> ConversationState:
+        return await sync_to_async(self._get_worker_snapshot, thread_sensitive=True)(
+            conversation_id
+        )
+
+    def _get_worker_snapshot(self, conversation_id: UUID) -> ConversationState:
+        try:
+            row = ConversationAggregate.objects.get(conversation_id=conversation_id)
+        except ConversationAggregate.DoesNotExist as exc:
+            raise DomainError(
+                ErrorCode.INVALID_STATE,
+                "conversation not found",
+                details={"conversation_id": str(conversation_id)},
+            ) from exc
+        return _load(ConversationState, row.state)
+
     async def save_snapshot(self, state: ConversationState) -> ConversationState:
         return await sync_to_async(self._save_snapshot, thread_sensitive=True)(state)
 
@@ -110,9 +126,17 @@ class DjangoPersistence:
 
     @transaction.atomic
     def _claim_commands(self, worker_id: str, limit: int) -> tuple[Command, ...]:
-        query = CommandRecord.objects.filter(status=CommandStatus.ACCEPTED.value).order_by(
-            "command_id"
-        )
+        from datetime import UTC, datetime, timedelta
+
+        now = datetime.now(UTC)
+        lease_expires = now + timedelta(seconds=30)
+        query = CommandRecord.objects.filter(
+            models.Q(status=CommandStatus.ACCEPTED.value)
+            | models.Q(
+                status=CommandStatus.CLAIMED.value,
+                lease_expires_at__lt=now,
+            )
+        ).order_by("command_id")
         if connection.vendor == "postgresql":
             query = query.select_for_update(skip_locked=True)
         else:
@@ -125,14 +149,40 @@ class DjangoPersistence:
                     "status": CommandStatus.CLAIMED,
                     "worker_id": worker_id,
                     "attempts": stored.attempts + 1,
+                    "lease_expires_at": lease_expires,
                 }
             )
             row.status = command.status.value
             row.worker_id = worker_id
+            row.lease_expires_at = lease_expires
             row.data = _json(command)
-            row.save(update_fields=("status", "worker_id", "data"))
+            row.save(update_fields=("status", "worker_id", "lease_expires_at", "data"))
             claimed.append(command)
         return tuple(claimed)
+
+    async def renew_command_lease(
+        self,
+        command_id: UUID,
+        worker_id: str,
+        expires_at: datetime,
+    ) -> None:
+        await sync_to_async(self._renew_command_lease, thread_sensitive=True)(
+            command_id, worker_id, expires_at
+        )
+
+    def _renew_command_lease(
+        self,
+        command_id: UUID,
+        worker_id: str,
+        expires_at: datetime,
+    ) -> None:
+        row = CommandRecord.objects.filter(command_id=command_id, worker_id=worker_id).first()
+        if row is None:
+            raise DomainError(ErrorCode.INVALID_STATE, "command lease not found for worker")
+        command = _load(Command, row.data).model_copy(update={"lease_expires_at": expires_at})
+        row.lease_expires_at = expires_at
+        row.data = _json(command)
+        row.save(update_fields=("lease_expires_at", "data"))
 
     async def update_command(self, command: Command) -> Command:
         return await sync_to_async(self._update_command, thread_sensitive=True)(command)
@@ -152,7 +202,40 @@ class DjangoPersistence:
         state: ConversationState,
         events: Sequence[ConversationEvent],
     ) -> Sequence[ConversationEvent]:
-        return await self.commit_runtime_lifecycle(
+        return await self.commit_turn_batch(
+            conversation_id,
+            expected_version,
+            state,
+            events,
+            (),
+        )
+
+    async def commit_turn_batch(
+        self,
+        conversation_id: UUID,
+        expected_version: int,
+        state: ConversationState,
+        events: Sequence[ConversationEvent],
+        commands: Sequence[Command] = (),
+    ) -> Sequence[ConversationEvent]:
+        return await sync_to_async(self._commit_turn_batch, thread_sensitive=True)(
+            conversation_id,
+            expected_version,
+            state,
+            tuple(events),
+            tuple(commands),
+        )
+
+    @transaction.atomic
+    def _commit_turn_batch(
+        self,
+        conversation_id: UUID,
+        expected_version: int,
+        state: ConversationState,
+        events: tuple[ConversationEvent, ...],
+        commands: tuple[Command, ...],
+    ) -> tuple[ConversationEvent, ...]:
+        committed = self._commit_runtime_lifecycle(
             conversation_id,
             expected_version,
             state,
@@ -160,6 +243,17 @@ class DjangoPersistence:
             None,
             events,
         )
+        for command in commands:
+            updated = CommandRecord.objects.filter(command_id=command.id).update(
+                **self._command_values(command)
+            )
+            if not updated:
+                raise DomainError(
+                    ErrorCode.INVALID_STATE,
+                    "command not found",
+                    details={"command_id": str(command.id)},
+                )
+        return committed
 
     async def commit_runtime_lifecycle(
         self,

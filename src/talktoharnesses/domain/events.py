@@ -401,6 +401,13 @@ class FileChangeAppliedPayload(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+class ConversationTitleUpdatedPayload(BaseModel):
+    model_config = FROZEN
+
+    type: Literal["conversation_title_updated"] = "conversation_title_updated"
+    title_native: str
+
+
 class InteractionRequestedPayload(BaseModel):
     model_config = FROZEN
 
@@ -536,6 +543,7 @@ EventPayload = Annotated[
     | CommandExitedPayload
     | FileChangeProposedPayload
     | FileChangeAppliedPayload
+    | ConversationTitleUpdatedPayload
     | InteractionRequestedPayload
     | InteractionDraftUpdatedPayload
     | InteractionResolvedPayload

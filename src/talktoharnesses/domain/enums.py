@@ -110,6 +110,8 @@ class ErrorCode(StrEnum):
     CONVERSATION_BUSY = "conversation_busy"
     MODE_CHANGE_WHILE_ACTIVE = "mode_change_while_active"
     UNSUPPORTED_NATIVE_EVENT = "unsupported_native_event"
+    PROTOCOL_ERROR = "protocol_error"
+    PROVIDER_INCOMPATIBLE = "provider_incompatible"
     WORKING_DIRECTORY_NOT_FOUND = "working_directory_not_found"
     WORKSPACE_ROOT_NOT_FOUND = "workspace_root_not_found"
     INVALID_EXECUTABLE = "invalid_executable"
