@@ -6,7 +6,7 @@ Do not edit the Grok section by hand; regenerate via
 
 ## Grok
 
-- Adapter version: `2026.8.0.dev4`
+- Adapter version: `2026.8.0.dev5`
 
 ### Known releases (implementation targets)
 

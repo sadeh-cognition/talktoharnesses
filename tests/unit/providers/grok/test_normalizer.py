@@ -110,6 +110,36 @@ def test_permission_decision_selects_an_advertised_option_id() -> None:
     }
 
 
+def test_tool_output_delta_sequences_increment() -> None:
+    from talktoharnesses.domain.events import ToolOutputDeltaPayload
+
+    n = GrokNormalizer()
+    n.set_session("s")
+    n.begin_turn(uuid4())
+    first = n.on_session_update(
+        {
+            "sessionId": "s",
+            "update": {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "t1",
+                "content": "hello",
+            },
+        }
+    )
+    second = n.on_session_update(
+        {
+            "sessionId": "s",
+            "update": {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "t1",
+                "content": " world",
+            },
+        }
+    )
+    deltas = [e for e in (*first, *second) if isinstance(e, ToolOutputDeltaPayload)]
+    assert [d.sequence for d in deltas] == [1, 2]
+
+
 def test_delivered_protocol_fault_is_outcome_unknown() -> None:
     n = GrokNormalizer()
     n.set_session("s")

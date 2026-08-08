@@ -14,7 +14,11 @@ from talktoharnesses.domain import (
     conversation_event_adapter,
     event_payload_adapter,
 )
-from talktoharnesses.domain.events import TurnCompletedPayload, TurnStartedPayload
+from talktoharnesses.domain.events import (
+    ConversationMetadataChangedPayload,
+    TurnCompletedPayload,
+    TurnStartedPayload,
+)
 
 
 def test_payload_rejects_unknown_type() -> None:
@@ -79,6 +83,18 @@ def test_interaction_request_rejects_unknown_nested_payload() -> None:
                 "request": {"kind": "unknown", "unexpected": True},
             }
         )
+
+
+def test_metadata_changed_payload_round_trip() -> None:
+    payload = ConversationMetadataChangedPayload(
+        archived_at=datetime.now(UTC),
+        pinned_at=None,
+        snoozed_until=None,
+        deleted_at=None,
+    )
+    parsed = event_payload_adapter.validate_json(payload.model_dump_json())
+    assert isinstance(parsed, ConversationMetadataChangedPayload)
+    assert parsed.archived_at is not None
 
 
 def test_envelope_rejects_sequence_below_one() -> None:

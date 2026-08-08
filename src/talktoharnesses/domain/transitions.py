@@ -25,6 +25,7 @@ from talktoharnesses.domain.events import (
     ActivityCompletedPayload,
     ActivityStartedPayload,
     ConversationEvent,
+    ConversationMetadataChangedPayload,
     ConversationTitleUpdatedPayload,
     EventPayload,
     HarnessSwitchedPayload,
@@ -49,6 +50,7 @@ from talktoharnesses.domain.events import (
     TurnWaitingPayload,
 )
 from talktoharnesses.domain.models import (
+    AnswerInteractionPayload,
     BackgroundActivity,
     Command,
     Conversation,
@@ -438,6 +440,13 @@ def apply_steer(
 
     if not supports_steer or not steer_succeeded:
         # Automatic queue fallback; keep command identity, retarget to queued turn.
+        # Queued work is always submitted as a turn, even when it began as steer.
+        command = command.model_copy(
+            update={
+                "kind": CommandKind.SUBMIT_TURN,
+                "payload": SubmitTurnPayload(prompt=prompt),
+            }
+        )
         return _queue_prompt(state, prompt=prompt, command=command, now=ts, coalesce=True)
 
     command = command.model_copy(
@@ -663,8 +672,14 @@ def submit_interaction_answer(
     answer: InteractionAnswer,
     *,
     now: datetime,
+    idempotency_key: str | None = None,
+    command_id: UUID | None = None,
 ) -> TransitionResult:
-    """First-write-wins submission of an interaction answer."""
+    """First-write-wins submission of an interaction answer.
+
+    On the winning write, emits ``interaction_resolved`` and accepts an executable
+    ``answer_interaction`` command for the Phase 4 worker.
+    """
     interaction_id = answer.interaction_id
     if interaction_id not in state.interactions:
         raise DomainError(ErrorCode.INVALID_STATE, f"unknown interaction {interaction_id}")
@@ -689,7 +704,23 @@ def submit_interaction_answer(
         update={"status": InteractionStatus.RESOLVED}
     )
 
-    new_state = state.model_copy(update={"answers": answers, "interactions": interactions})
+    key = idempotency_key or f"answer-interaction:{interaction_id}"
+    command = Command(
+        id=command_id or uuid4(),
+        conversation_id=state.conversation.id,
+        kind=CommandKind.ANSWER_INTERACTION,
+        status=CommandStatus.ACCEPTED,
+        idempotency_key=key,
+        target_turn_id=interaction.turn_id,
+        payload=AnswerInteractionPayload(interaction_id=interaction_id),
+        created_at=ts,
+    )
+    commands = dict(state.commands)
+    commands[command.id] = command
+
+    new_state = state.model_copy(
+        update={"answers": answers, "interactions": interactions, "commands": commands}
+    )
     # Resume running if this was the waiting turn.
     if new_state.active_turn is not None and new_state.active_turn.status == TurnStatus.WAITING:
         new_state = new_state.model_copy(
@@ -716,7 +747,116 @@ def submit_interaction_answer(
             )
         ],
     )
+    return TransitionResult(state=new_state, events=events, command=command)
+
+
+def _metadata_busy(state: ConversationState) -> bool:
+    if state.active_turn is not None and state.active_turn.status in {
+        TurnStatus.RUNNING,
+        TurnStatus.WAITING,
+        TurnStatus.QUEUED,
+    }:
+        return True
+    if state.queued_turn is not None:
+        return True
+    return bool(_running_activities(state))
+
+
+def _metadata_event(conversation: Conversation) -> ConversationMetadataChangedPayload:
+    return ConversationMetadataChangedPayload(
+        archived_at=conversation.archived_at,
+        pinned_at=conversation.pinned_at,
+        snoozed_until=conversation.snoozed_until,
+        deleted_at=conversation.deleted_at,
+    )
+
+
+def _apply_metadata(
+    state: ConversationState,
+    *,
+    now: datetime,
+    **fields: Any,
+) -> TransitionResult:
+    ts = _now(now)
+    updates = dict(fields)
+    updates["updated_at"] = ts
+    new_state = _replace_conversation(state, **updates)
+    new_state, events = append_events(
+        new_state,
+        ts,
+        [_metadata_event(new_state.conversation)],
+    )
     return TransitionResult(state=new_state, events=events)
+
+
+def archive_conversation(state: ConversationState, *, now: datetime) -> TransitionResult:
+    if state.conversation.deleted_at is not None:
+        raise DomainError(ErrorCode.NOT_FOUND, "conversation not found")
+    if _metadata_busy(state):
+        raise DomainError(ErrorCode.CONVERSATION_BUSY, "conversation is busy")
+    ts = _now(now)
+    return _apply_metadata(
+        state,
+        now=ts,
+        archived_at=ts,
+        status=ConversationStatus.ARCHIVED,
+    )
+
+
+def unarchive_conversation(state: ConversationState, *, now: datetime) -> TransitionResult:
+    if state.conversation.deleted_at is not None:
+        raise DomainError(ErrorCode.NOT_FOUND, "conversation not found")
+    if state.conversation.status == ConversationStatus.ARCHIVED:
+        # Restore execution status from turns/activities after clearing archive flag.
+        new_state = _replace_conversation(state, archived_at=None, status=ConversationStatus.IDLE)
+        new_state = _recompute_status(new_state, now)
+    else:
+        new_state = _replace_conversation(state, archived_at=None)
+    ts = _now(now)
+    new_state = _replace_conversation(new_state, updated_at=ts)
+    new_state, events = append_events(
+        new_state,
+        ts,
+        [_metadata_event(new_state.conversation)],
+    )
+    return TransitionResult(state=new_state, events=events)
+
+
+def pin_conversation(state: ConversationState, *, now: datetime) -> TransitionResult:
+    if state.conversation.deleted_at is not None:
+        raise DomainError(ErrorCode.NOT_FOUND, "conversation not found")
+    return _apply_metadata(state, now=now, pinned_at=_now(now))
+
+
+def unpin_conversation(state: ConversationState, *, now: datetime) -> TransitionResult:
+    if state.conversation.deleted_at is not None:
+        raise DomainError(ErrorCode.NOT_FOUND, "conversation not found")
+    return _apply_metadata(state, now=now, pinned_at=None)
+
+
+def snooze_conversation(
+    state: ConversationState,
+    *,
+    now: datetime,
+    until: datetime,
+) -> TransitionResult:
+    if state.conversation.deleted_at is not None:
+        raise DomainError(ErrorCode.NOT_FOUND, "conversation not found")
+    return _apply_metadata(state, now=now, snoozed_until=_now(until))
+
+
+def unsnooze_conversation(state: ConversationState, *, now: datetime) -> TransitionResult:
+    if state.conversation.deleted_at is not None:
+        raise DomainError(ErrorCode.NOT_FOUND, "conversation not found")
+    return _apply_metadata(state, now=now, snoozed_until=None)
+
+
+def soft_delete_conversation(state: ConversationState, *, now: datetime) -> TransitionResult:
+    if state.conversation.deleted_at is not None:
+        raise DomainError(ErrorCode.NOT_FOUND, "conversation not found")
+    if _metadata_busy(state):
+        raise DomainError(ErrorCode.CONVERSATION_BUSY, "conversation is busy")
+    return _apply_metadata(state, now=now, deleted_at=_now(now))
 
 
 def interrupt_turn(
@@ -1204,6 +1344,7 @@ __all__ = [
     "append_events",
     "apply_native_title",
     "apply_steer",
+    "archive_conversation",
     "cancel_queued_prompt",
     "change_mode",
     "close_session",
@@ -1218,16 +1359,22 @@ __all__ = [
     "mark_outcome_unknown",
     "mark_requires_recreation",
     "new_conversation_state",
+    "pin_conversation",
     "reap_session",
     "register_activity",
     "remember_native_ids",
     "request_interaction",
     "resume_session",
     "rotate_session",
+    "snooze_conversation",
+    "soft_delete_conversation",
     "start_session",
     "start_turn",
     "submit_interaction_answer",
     "submit_turn",
+    "unarchive_conversation",
+    "unpin_conversation",
+    "unsnooze_conversation",
     "update_interaction_draft",
 ]
 
