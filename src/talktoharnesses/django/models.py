@@ -286,6 +286,16 @@ class InteractionRecord(models.Model):
         null=True, blank=True
     )
     created_at: models.DateTimeField[datetime, datetime] = models.DateTimeField()
+    # Private broker metadata (never exposed on public projections / SSE).
+    provider_correlation: models.JSONField[dict[str, object] | None, dict[str, object] | None] = (
+        models.JSONField(null=True, blank=True)
+    )
+    request_event_sequence: models.PositiveBigIntegerField[int | None, int | None] = (
+        models.PositiveBigIntegerField(null=True, blank=True)
+    )
+    policy_evaluated_at: models.DateTimeField[datetime | None, datetime | None] = (
+        models.DateTimeField(null=True, blank=True)
+    )
 
     class Meta:
         db_table = "talktoharnesses_interaction"
@@ -293,6 +303,10 @@ class InteractionRecord(models.Model):
             models.Index(
                 fields=["conversation", "created_at", "interaction_id"],
                 name="tth_interaction_page_idx",
+            ),
+            models.Index(
+                fields=["status", "policy_evaluated_at"],
+                name="tth_interaction_policy_idx",
             ),
         ]
 
@@ -419,13 +433,123 @@ class InteractionAnswerRecord(models.Model):
     interaction_id: models.UUIDField[UUID, UUID] = models.UUIDField(
         primary_key=True, editable=False
     )
+    conversation: models.ForeignKey[ConversationAggregate | None, ConversationAggregate | None] = (
+        models.ForeignKey(
+            ConversationAggregate,
+            on_delete=models.CASCADE,
+            null=True,
+            blank=True,
+            related_name="interaction_answers",
+        )
+    )
     data: models.JSONField[dict[str, object], dict[str, object]] = models.JSONField()
     submitted_at: models.DateTimeField[datetime | None, datetime | None] = models.DateTimeField(
         null=True, blank=True
     )
+    command: models.OneToOneField[CommandRecord | None, CommandRecord | None] = (
+        models.OneToOneField(
+            "CommandRecord",
+            on_delete=models.SET_NULL,
+            null=True,
+            blank=True,
+            related_name="interaction_answer",
+        )
+    )
+    resolution_event_sequence: models.PositiveBigIntegerField[int | None, int | None] = (
+        models.PositiveBigIntegerField(null=True, blank=True)
+    )
+    released_at: models.DateTimeField[datetime | None, datetime | None] = models.DateTimeField(
+        null=True, blank=True
+    )
+    answer_command_suppressed: models.BooleanField[bool, bool] = models.BooleanField(default=False)
 
     class Meta:
         db_table = "talktoharnesses_interaction_answer"
+
+
+class ApprovalRuleRecord(models.Model):
+    rule_id: models.UUIDField[UUID, UUID] = models.UUIDField(primary_key=True, editable=False)
+    principal_id: models.CharField[str, str] = models.CharField(max_length=255)
+    decision: models.CharField[str, str] = models.CharField(max_length=16)
+    scope_kind: models.CharField[str, str] = models.CharField(max_length=32)
+    scope: models.JSONField[dict[str, object], dict[str, object]] = models.JSONField()
+    matcher_kind: models.CharField[str, str] = models.CharField(max_length=32)
+    matcher: models.JSONField[dict[str, object], dict[str, object]] = models.JSONField()
+    created_at: models.DateTimeField[datetime, datetime] = models.DateTimeField()
+    updated_at: models.DateTimeField[datetime, datetime] = models.DateTimeField()
+
+    class Meta:
+        db_table = "talktoharnesses_approval_rule"
+        indexes = [
+            models.Index(
+                fields=["principal_id", "scope_kind"],
+                name="tth_rule_principal_scope_idx",
+            ),
+            models.Index(
+                fields=["principal_id", "-created_at", "-rule_id"],
+                name="tth_rule_page_idx",
+            ),
+        ]
+
+
+class InteractionAuditRecord(models.Model):
+    audit_id: models.UUIDField[UUID, UUID] = models.UUIDField(primary_key=True, editable=False)
+    principal_id: models.CharField[str, str] = models.CharField(max_length=255)
+    interaction_id: models.UUIDField[UUID, UUID] = models.UUIDField()
+    conversation_id: models.UUIDField[UUID, UUID] = models.UUIDField()
+    turn_id: models.UUIDField[UUID, UUID] = models.UUIDField()
+    kind: models.CharField[str, str] = models.CharField(max_length=32)
+    decision: models.CharField[str | None, str | None] = models.CharField(
+        max_length=32, null=True, blank=True
+    )
+    answers: models.JSONField[dict[str, object] | None, dict[str, object] | None] = (
+        models.JSONField(null=True, blank=True)
+    )
+    automatic: models.BooleanField[bool, bool] = models.BooleanField(default=False)
+    created_at: models.DateTimeField[datetime, datetime] = models.DateTimeField()
+    provider_kind: models.CharField[str | None, str | None] = models.CharField(
+        max_length=32, null=True, blank=True
+    )
+    provider_request_ids: models.JSONField[dict[str, object], dict[str, object]] = models.JSONField(
+        default=dict
+    )
+    deciding_rule: models.ForeignKey[ApprovalRuleRecord | None, ApprovalRuleRecord | None] = (
+        models.ForeignKey(
+            ApprovalRuleRecord,
+            on_delete=models.SET_NULL,
+            null=True,
+            blank=True,
+            related_name="audits",
+        )
+    )
+    deciding_rule_id_copy: models.UUIDField[UUID | None, UUID | None] = models.UUIDField(
+        null=True, blank=True
+    )
+    rule_decision: models.CharField[str | None, str | None] = models.CharField(
+        max_length=16, null=True, blank=True
+    )
+    rule_scope: models.JSONField[dict[str, object] | None, dict[str, object] | None] = (
+        models.JSONField(null=True, blank=True)
+    )
+    rule_matcher: models.JSONField[dict[str, object] | None, dict[str, object] | None] = (
+        models.JSONField(null=True, blank=True)
+    )
+    request_action: models.JSONField[dict[str, object] | None, dict[str, object] | None] = (
+        models.JSONField(null=True, blank=True)
+    )
+
+    class Meta:
+        db_table = "talktoharnesses_interaction_audit"
+        indexes = [
+            models.Index(
+                fields=["principal_id", "-created_at", "-audit_id"],
+                name="tth_audit_page_idx",
+            ),
+            models.Index(
+                fields=["interaction_id"],
+                name="tth_audit_interaction_idx",
+            ),
+        ]
 
 
 # Silence unused typing import for JSONField generics under older type checkers.

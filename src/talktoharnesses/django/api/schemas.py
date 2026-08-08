@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator
 
-from talktoharnesses.domain.enums import ApprovalDecision, HarnessKind
-from talktoharnesses.domain.models import HarnessConfiguration
+from talktoharnesses.domain.enums import ApprovalDecision, ApprovalRuleDecision, HarnessKind
+from talktoharnesses.domain.models import (
+    ApprovalMatcher,
+    ApprovalRuleScope,
+    HarnessConfiguration,
+)
 
 # Request models are non-strict so JSON strings coerce to enums.
 _REQUEST = ConfigDict(extra="forbid", strict=False)
@@ -83,8 +88,37 @@ class InteractionDraftBody(BaseModel):
     draft: dict[str, Any] = Field(default_factory=dict)
 
 
+class ApprovalRuleBody(BaseModel):
+    """Create/replace rule payload using the public discriminated unions."""
+
+    model_config = _REQUEST
+
+    decision: ApprovalRuleDecision
+    scope: ApprovalRuleScope
+    matcher: ApprovalMatcher
+
+    @field_validator("scope", mode="before")
+    @classmethod
+    def _scope(cls, value: object) -> ApprovalRuleScope:
+        encoded = value.model_dump_json() if isinstance(value, BaseModel) else json.dumps(value)
+        return cast(
+            ApprovalRuleScope,
+            TypeAdapter(ApprovalRuleScope).validate_json(encoded),
+        )
+
+    @field_validator("matcher", mode="before")
+    @classmethod
+    def _matcher(cls, value: object) -> ApprovalMatcher:
+        encoded = value.model_dump_json() if isinstance(value, BaseModel) else json.dumps(value)
+        return cast(
+            ApprovalMatcher,
+            TypeAdapter(ApprovalMatcher).validate_json(encoded),
+        )
+
+
 class ResolveInteractionBody(BaseModel):
     model_config = _REQUEST
 
     decision: ApprovalDecision | None = None
     answers: dict[str, Any] | None = None
+    create_rule: ApprovalRuleBody | None = None

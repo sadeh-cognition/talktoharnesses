@@ -8,6 +8,7 @@ from talktoharnesses.providers.acp.schemas.base import (
     ALLOWED_SESSION_UPDATE_KINDS,
     GROK_CONTROL_NOTIFICATIONS,
     is_allowlisted_method,
+    is_allowlisted_permission_request,
     is_allowlisted_session_update,
 )
 
@@ -17,5 +18,6 @@ __all__ = [
     "ALLOWED_SESSION_UPDATE_KINDS",
     "GROK_CONTROL_NOTIFICATIONS",
     "is_allowlisted_method",
+    "is_allowlisted_permission_request",
     "is_allowlisted_session_update",
 ]

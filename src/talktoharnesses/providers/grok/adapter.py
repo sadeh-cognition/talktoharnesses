@@ -11,7 +11,7 @@ from uuid import UUID, uuid4
 
 from talktoharnesses.domain.enums import ErrorCode, HarnessKind
 from talktoharnesses.domain.errors import DomainError
-from talktoharnesses.domain.events import HarnessEvent
+from talktoharnesses.domain.events import HarnessEvent, InteractionRequestedPayload
 from talktoharnesses.domain.models import (
     HarnessCapabilities,
     HarnessConfiguration,
@@ -21,6 +21,7 @@ from talktoharnesses.providers.acp.connection import AcpConnection
 from talktoharnesses.providers.acp.jsonrpc import JsonRpcRemoteError, ProtocolCloseError
 from talktoharnesses.providers.acp.schemas.base import ALLOWED_OUTBOUND_METHODS
 from talktoharnesses.providers.adapter import (
+    HarnessInteractionRequest,
     HarnessSession,
     ResumeSessionRequest,
     StartSessionRequest,
@@ -58,7 +59,9 @@ class GrokAdapter:
         self._release: GrokReleaseRecord | None = None
         self._capabilities: HarnessCapabilities | None = None
         self._session: HarnessSession | None = None
-        self._event_q: asyncio.Queue[HarnessEvent | None] = asyncio.Queue()
+        self._event_q: asyncio.Queue[HarnessEvent | HarnessInteractionRequest | None] = (
+            asyncio.Queue()
+        )
         self._prompt_task: asyncio.Task[None] | None = None
         self._pending_interactions: dict[UUID, tuple[str | int, list[dict[str, Any]]]] = {}
         self._closed = False
@@ -190,7 +193,7 @@ class GrokAdapter:
     ) -> None:
         self._require_session(session)
         assert self._connection is not None
-        pending = self._pending_interactions.pop(answer.interaction_id, None)
+        pending = self._pending_interactions.get(answer.interaction_id)
         if pending is None:
             raise DomainError(
                 ErrorCode.INVALID_STATE,
@@ -199,12 +202,29 @@ class GrokAdapter:
             )
         rpc_id, options = pending
         result = self._normalizer.map_approval_decision(answer.decision, options)
+        outcome = result.get("outcome")
+        outcome_map = _map_dict(outcome)
+        # Reject unmapped decisions before popping the native waiter.
+        if (
+            answer.decision is not None
+            and outcome_map.get("outcome") == "cancelled"
+            and answer.decision.value != "cancel"
+        ):
+            raise DomainError(
+                ErrorCode.INVALID_STATE,
+                f"decision {answer.decision.value} not available on native request",
+                details={"interaction_id": str(answer.interaction_id)},
+            )
+        del self._pending_interactions[answer.interaction_id]
         await self._connection.respond(rpc_id, result)
 
-    def events(self, session: HarnessSession) -> AsyncIterator[HarnessEvent]:
+    def events(
+        self,
+        session: HarnessSession,
+    ) -> AsyncIterator[HarnessEvent | HarnessInteractionRequest]:
         self._require_session(session)
 
-        async def _gen() -> AsyncIterator[HarnessEvent]:
+        async def _gen() -> AsyncIterator[HarnessEvent | HarnessInteractionRequest]:
             while True:
                 item = await self._event_q.get()
                 if item is None:
@@ -378,7 +398,24 @@ class GrokAdapter:
             params,
             interaction_id=interaction_id,
         )
-        await self._emit_many(events)
+        correlation = {"json_rpc_request_id": str(request.id)}
+        tool_call = _map_dict(params.get("toolCall"))
+        tool_call_id = tool_call.get("toolCallId")
+        if isinstance(tool_call_id, str):
+            correlation["tool_call_id"] = tool_call_id
+        session_id = params.get("sessionId")
+        if isinstance(session_id, str):
+            correlation["native_session_id"] = session_id
+        for event in events:
+            if isinstance(event, InteractionRequestedPayload):
+                await self._event_q.put(
+                    HarnessInteractionRequest(
+                        payload=event,
+                        provider_correlation=correlation,
+                    )
+                )
+            else:
+                await self._event_q.put(event)
         # Respond later via answer_interaction.
         return None
 

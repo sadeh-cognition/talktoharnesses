@@ -65,10 +65,27 @@ class InteractionStatus(StrEnum):
 
 
 class ApprovalDecision(StrEnum):
+    """Immediate provider answer for one interaction request."""
+
     ALLOW_ONCE = "allow_once"
     ALLOW_SESSION = "allow_session"
     DENY = "deny"
     CANCEL = "cancel"
+
+
+class ApprovalRuleDecision(StrEnum):
+    """Persistent rule outcome (distinct from immediate ApprovalDecision)."""
+
+    ALLOW = "allow"
+    DENY = "deny"
+
+
+class ApprovalRuleScopeKind(StrEnum):
+    CONVERSATION = "conversation"
+    HARNESS_INSTANCE = "harness_instance"
+    EXECUTABLE = "executable"
+    USER = "user"
+    PRINCIPAL_GLOBAL = "principal_global"
 
 
 class MessageRole(StrEnum):

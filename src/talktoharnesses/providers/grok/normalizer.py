@@ -474,9 +474,37 @@ class GrokNormalizer:
         if tool_call is not None:
             tool_name = _as_str(tool_call.get("title") or tool_call.get("kind"), "tool")
         summary_raw = params.get("description") or params.get("summary") or ""
+        options_obj = params.get("options")
+        options: list[dict[str, Any]] = []
+        if isinstance(options_obj, list):
+            for item in cast(list[object], options_obj):
+                mapped = _as_dict(item)
+                if mapped:
+                    options.append(mapped)
+        available = self._available_decisions(options)
+        action = self._normalize_approval_action(params, tool_call)
+        command_args: tuple[str, ...] | None = None
+        path: str | None = None
+        operation = None
+        if action is not None:
+            from talktoharnesses.domain.models import (
+                CommandApprovalAction,
+                FileApprovalAction,
+            )
+
+            if isinstance(action, CommandApprovalAction):
+                command_args = action.argv
+            elif isinstance(action, FileApprovalAction):
+                path = action.path
+                operation = action.operation
         request = ApprovalRequestPayload(
             tool_name=tool_name,
+            command_args=command_args,
+            path=path,
+            operation=operation,
             summary=_as_str(summary_raw) or None,
+            action=action,
+            available_decisions=available,
         )
         return [
             InteractionRequestedPayload(
@@ -486,6 +514,58 @@ class GrokNormalizer:
                 request=request,
             )
         ]
+
+    def _available_decisions(
+        self, options: Sequence[dict[str, Any]]
+    ) -> tuple[ApprovalDecision, ...]:
+        found: list[ApprovalDecision] = []
+        for decision in ApprovalDecision:
+            mapped = self.map_approval_decision(decision, options)
+            outcome = mapped.get("outcome")
+            outcome_map = _as_dict(outcome)
+            if outcome_map is not None and outcome_map.get("outcome") == "selected":
+                found.append(decision)
+        found.append(ApprovalDecision.CANCEL)
+        return tuple(found)
+
+    def _normalize_approval_action(
+        self,
+        params: dict[str, Any],
+        tool_call: dict[str, Any] | None,
+    ) -> Any:
+        """Extract typed action only from structured fields — never parse summaries."""
+        from talktoharnesses.domain.enums import FileOperation
+        from talktoharnesses.domain.models import (
+            CommandApprovalAction,
+            FileApprovalAction,
+            NetworkApprovalAction,
+        )
+
+        if params.get("networkAccess") is True or params.get("network") is True:
+            return NetworkApprovalAction()
+
+        if tool_call is not None:
+            raw_input = tool_call.get("rawInput")
+            input_map = _as_dict(raw_input) if raw_input is not None else None
+            if input_map is not None:
+                if input_map.get("network") is True:
+                    return NetworkApprovalAction()
+                cmd = input_map.get("command")
+                if isinstance(cmd, list):
+                    raw_cmd = cast(list[object], cmd)
+                    if raw_cmd and all(isinstance(item, str) for item in raw_cmd):
+                        return CommandApprovalAction(argv=tuple(cast(list[str], raw_cmd)))
+                path = input_map.get("path")
+                op_raw = input_map.get("operation")
+                if isinstance(path, str) and isinstance(op_raw, str):
+                    try:
+                        op = FileOperation(op_raw.lower())
+                    except ValueError:
+                        op = None
+                    if op is not None:
+                        return FileApprovalAction(path=path, operation=op)
+
+        return None
 
     def on_prompt_terminal(
         self,

@@ -8,7 +8,7 @@ from uuid import UUID
 import pytest
 
 from talktoharnesses.domain import (
-    CommandKind,
+    ApprovalDecision,
     ConversationStatus,
     DomainError,
     ErrorCode,
@@ -32,7 +32,6 @@ from talktoharnesses.domain import (
 )
 from talktoharnesses.domain.events import ConversationMetadataChangedPayload
 from talktoharnesses.domain.models import (
-    AnswerInteractionPayload,
     ApprovalRequestPayload,
     ConversationHarnessBinding,
     InteractionAnswer,
@@ -118,7 +117,8 @@ def test_soft_delete() -> None:
     assert exc.value.code is ErrorCode.NOT_FOUND
 
 
-def test_resolve_interaction_creates_answer_command() -> None:
+def test_resolve_interaction_emits_resolution_without_command() -> None:
+    """Phase 6: pure transition no longer creates answer_interaction command."""
     state = _idle()
     r = submit_turn(state, prompt="x", idempotency_key="a", now=_now())
     r = start_turn(r.state, now=_now())
@@ -128,7 +128,7 @@ def test_resolve_interaction_creates_answer_command() -> None:
         conversation_id=r.state.conversation.id,
         turn_id=turn_id,
         kind=InteractionKind.APPROVAL,
-        request=ApprovalRequestPayload(summary="ok"),
+        request=ApprovalRequestPayload(summary="ok", available_decisions=tuple(ApprovalDecision)),
         created_at=_now(),
     )
     r = request_interaction(r.state, interaction, now=_now())
@@ -136,11 +136,11 @@ def test_resolve_interaction_creates_answer_command() -> None:
     assert r.state.active_turn.status is TurnStatus.WAITING
     r = submit_interaction_answer(
         r.state,
-        InteractionAnswer(interaction_id=interaction.id, decision=None),
+        InteractionAnswer(interaction_id=interaction.id, decision=ApprovalDecision.ALLOW_ONCE),
         now=_now(),
     )
-    assert r.command is not None
-    assert r.command.kind is CommandKind.ANSWER_INTERACTION
-    assert isinstance(r.command.payload, AnswerInteractionPayload)
-    assert r.command.payload.interaction_id == interaction.id
-    assert r.command.id in r.state.commands
+    assert r.command is None
+    assert r.events[-1].type == "interaction_resolved"
+    assert interaction.id in r.state.answers
+    assert r.state.active_turn is not None
+    assert r.state.active_turn.status is TurnStatus.RUNNING

@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 
 from talktoharnesses.domain._base import FROZEN
 from talktoharnesses.domain.enums import HarnessKind
-from talktoharnesses.domain.events import HarnessEvent
+from talktoharnesses.domain.events import HarnessEvent, InteractionRequestedPayload
 from talktoharnesses.domain.models import (
     HarnessCapabilities,
     HarnessConfiguration,
@@ -69,6 +69,15 @@ class HarnessSession(BaseModel):
     metadata: dict[str, str] = Field(default_factory=dict)
 
 
+class HarnessInteractionRequest(BaseModel):
+    """Private adapter envelope for canonical requests and native correlation."""
+
+    model_config = FROZEN
+
+    payload: InteractionRequestedPayload
+    provider_correlation: dict[str, str] = Field(default_factory=dict)
+
+
 class HarnessAdapter(Protocol):
     """Asynchronous provider adapter. Methods are fixed for all harnesses."""
 
@@ -92,7 +101,10 @@ class HarnessAdapter(Protocol):
         answer: InteractionAnswer,
     ) -> None: ...
 
-    def events(self, session: HarnessSession) -> AsyncIterator[HarnessEvent]:
+    def events(
+        self,
+        session: HarnessSession,
+    ) -> AsyncIterator[HarnessEvent | HarnessInteractionRequest]:
         """Stream normalized harness events until the session ends."""
         ...
 

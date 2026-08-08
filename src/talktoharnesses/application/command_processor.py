@@ -21,16 +21,27 @@ from talktoharnesses.application.persistence import Persistence
 from talktoharnesses.application.publisher import CommittedEventPublisher
 from talktoharnesses.domain.enums import CommandKind, CommandStatus, ErrorCode
 from talktoharnesses.domain.errors import DomainError
-from talktoharnesses.domain.events import ConversationEvent, HarnessEvent
+from talktoharnesses.domain.events import (
+    ConversationEvent,
+    HarnessEvent,
+    InteractionRequestedPayload,
+)
 from talktoharnesses.domain.models import (
     AnswerInteractionPayload,
     Command,
     InteractionAnswer,
+    PendingInteraction,
     SteerPayload,
     SubmitTurnPayload,
 )
 from talktoharnesses.domain.transitions import ConversationState, apply_steer, start_turn
-from talktoharnesses.providers.adapter import SteerRequest, TurnRequest
+from talktoharnesses.providers.adapter import (
+    HarnessAdapter,
+    HarnessInteractionRequest,
+    HarnessSession,
+    SteerRequest,
+    TurnRequest,
+)
 from talktoharnesses.runtime.manager import RuntimeManager
 
 logger = logging.getLogger(__name__)
@@ -64,6 +75,7 @@ class CommandProcessor:
         lease_seconds: float = 30.0,
         poll_interval: float = 0.05,
         clock: Callable[[], datetime] | None = None,
+        interaction_broker: object | None = None,
     ) -> None:
         self._persistence = persistence
         self._publisher = publisher
@@ -72,6 +84,7 @@ class CommandProcessor:
         self._lease_seconds = lease_seconds
         self._poll_interval = poll_interval
         self._clock = clock or (lambda: datetime.now(UTC))
+        self._broker = interaction_broker
 
         self._worker_id: str | None = None
         self._running = False
@@ -211,10 +224,16 @@ class CommandProcessor:
         now = self._clock()
         state, started_cmd = mark_command_delivery_started(state, command.id, now=now)
         await self._persistence.update_command(started_cmd)
-        await self._renew_lease(started_cmd)
 
         adapter = managed.adapter
         session = managed.session
+
+        if command.kind == CommandKind.ANSWER_INTERACTION:
+            await self._execute_answer_delivery(started_cmd, state, adapter, session)
+            self._ensure_pump(command.conversation_id)
+            return
+
+        await self._renew_lease(started_cmd)
 
         if command.kind == CommandKind.SUBMIT_TURN:
             assert isinstance(command.payload, SubmitTurnPayload)
@@ -252,16 +271,9 @@ class CommandProcessor:
                 await self._fallback_failed_steer(started_cmd)
                 return
         elif command.kind == CommandKind.INTERRUPT:
+            if self._broker is not None:
+                await self._broker.cancel_open_for_interrupt(command.conversation_id)  # type: ignore[attr-defined]
             await adapter.interrupt(session)
-        elif command.kind == CommandKind.ANSWER_INTERACTION:
-            assert isinstance(command.payload, AnswerInteractionPayload)
-            answer = state.answers.get(command.payload.interaction_id)
-            if answer is None:
-                answer = InteractionAnswer(
-                    interaction_id=command.payload.interaction_id,
-                    submitted_at=now,
-                )
-            await adapter.answer_interaction(session, answer)
         else:
             logger.warning("command kind %s not executable by worker", command.kind)
             settled = started_cmd.model_copy(
@@ -286,6 +298,82 @@ class CommandProcessor:
         await self._persistence.update_command(delivered_cmd)
 
         self._ensure_pump(command.conversation_id)
+
+    async def _execute_answer_delivery(
+        self,
+        command: Command,
+        state: ConversationState,
+        adapter: HarnessAdapter,
+        session: HarnessSession,
+    ) -> None:
+        assert isinstance(command.payload, AnswerInteractionPayload)
+        try:
+            await self._renew_lease(command)
+            answer = state.answers.get(command.payload.interaction_id)
+            if answer is None:
+                answer = InteractionAnswer(
+                    interaction_id=command.payload.interaction_id,
+                    submitted_at=self._clock(),
+                )
+            await adapter.answer_interaction(session, answer)
+
+            now = self._clock()
+            latest = await self._persistence.get_worker_snapshot(command.conversation_id)
+            if command.id in latest.commands:
+                _, delivered = mark_command_delivered(latest, command.id, now=now)
+            else:
+                delivered = command.model_copy(
+                    update={"status": CommandStatus.DELIVERED, "delivered_at": now}
+                )
+            settled = delivered.model_copy(
+                update={
+                    "status": CommandStatus.SETTLED,
+                    "settled_at": now,
+                    "worker_id": None,
+                    "lease_expires_at": None,
+                }
+            )
+            commands = dict(latest.commands)
+            commands[settled.id] = settled
+            settled_state = latest.model_copy(update={"commands": commands})
+            await self._persistence.commit_turn_batch(
+                command.conversation_id,
+                latest.conversation.version,
+                settled_state,
+                (),
+                (settled,),
+            )
+        except BaseException as exc:
+            await asyncio.shield(self._mark_answer_outcome_unknown(command, exc))
+            raise
+
+    async def _mark_answer_outcome_unknown(
+        self,
+        command: Command,
+        exc: BaseException,
+    ) -> None:
+        state = await self._persistence.get_worker_snapshot(command.conversation_id)
+        current = state.commands.get(command.id, command)
+        if current.status in {CommandStatus.SETTLED, CommandStatus.OUTCOME_UNKNOWN}:
+            return
+        failed = current.model_copy(
+            update={
+                "status": CommandStatus.OUTCOME_UNKNOWN,
+                "recovery_result": str(exc) or type(exc).__name__,
+                "worker_id": None,
+                "lease_expires_at": None,
+            }
+        )
+        commands = dict(state.commands)
+        commands[failed.id] = failed
+        failed_state = state.model_copy(update={"commands": commands})
+        await self._persistence.commit_turn_batch(
+            command.conversation_id,
+            state.conversation.version,
+            failed_state,
+            (),
+            (failed,),
+        )
 
     async def _fallback_failed_steer(self, command: Command) -> None:
         """Queue the steer prompt and release the command for later submit."""
@@ -400,10 +488,38 @@ class CommandProcessor:
     async def _on_harness_event(
         self,
         conversation_id: UUID,
-        event: HarnessEvent,
+        event: HarnessEvent | HarnessInteractionRequest,
         batcher: DeltaBatcher,
     ) -> None:
         async with self._lock_for(conversation_id):
+            # Interaction requests force-flush through the broker (not the 50ms window).
+            if isinstance(event, (HarnessInteractionRequest, InteractionRequestedPayload)):
+                if self._broker is None:
+                    raise DomainError(
+                        ErrorCode.PERSISTENCE_REQUIRED,
+                        "interaction broker is required",
+                    )
+                await batcher.flush()
+                payload = event.payload if isinstance(event, HarnessInteractionRequest) else event
+                pending = PendingInteraction(
+                    id=payload.interaction_id,
+                    conversation_id=conversation_id,
+                    turn_id=payload.turn_id,
+                    kind=payload.kind,
+                    request=payload.request,
+                    created_at=self._clock(),
+                )
+                await self._broker.accept_request(  # type: ignore[attr-defined]
+                    conversation_id,
+                    pending,
+                    provider_correlation=(
+                        event.provider_correlation
+                        if isinstance(event, HarnessInteractionRequest)
+                        else None
+                    ),
+                )
+                return
+
             # Chain from pending batcher state when present so version stays coherent.
             state = batcher.state
             if state is None:
@@ -487,7 +603,16 @@ class CommandProcessor:
                 "lease_expires_at": None,
             }
         )
-        await self._persistence.update_command(released)
+        commands = dict(state.commands)
+        commands[released.id] = released
+        next_state = state.model_copy(update={"commands": commands})
+        await self._persistence.commit_turn_batch(
+            conversation_id,
+            state.conversation.version,
+            next_state,
+            (),
+            (released,),
+        )
 
     async def _renew_lease(self, command: Command) -> None:
         if self._worker_id is None:

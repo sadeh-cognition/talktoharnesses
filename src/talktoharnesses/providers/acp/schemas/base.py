@@ -66,6 +66,16 @@ def is_allowlisted_session_update(params: dict[str, Any] | None) -> bool:
     return True
 
 
+def is_allowlisted_permission_request(params: dict[str, Any] | None) -> bool:
+    if params is None:
+        return False
+    try:
+        PermissionRequestParams.model_validate(params)
+    except ValueError:
+        return False
+    return True
+
+
 class _TextUpdate(_Strict):
     sessionUpdate: Literal["agent_message_chunk", "agent_thought_chunk"]
     content: str | dict[str, Any] | None = None
@@ -143,3 +153,48 @@ class SessionPromptParams(_Strict):
 
 class SessionCancelParams(_Strict):
     sessionId: str
+
+
+class PermissionOption(_Strict):
+    optionId: str
+    kind: str
+    name: str | None = None
+
+
+class PermissionCommandInput(_Strict):
+    command: list[str]
+
+
+class PermissionFileInput(_Strict):
+    path: str
+    operation: Literal["read", "create", "modify", "delete"]
+
+
+class PermissionNetworkInput(_Strict):
+    """Explicit network-access marker for blanket network rules."""
+
+    network: Literal[True] = True
+
+
+PermissionToolInput = PermissionCommandInput | PermissionFileInput | PermissionNetworkInput
+
+
+class PermissionToolCall(_Strict):
+    toolCallId: str | None = None
+    title: str | None = None
+    kind: str | None = None
+    rawInput: PermissionToolInput | None = None
+
+
+def _permission_options() -> list[PermissionOption]:
+    return []
+
+
+class PermissionRequestParams(_Strict):
+    sessionId: str | None = None
+    toolCall: PermissionToolCall | None = None
+    options: list[PermissionOption] = Field(default_factory=_permission_options)
+    description: str | None = None
+    summary: str | None = None
+    # Explicit top-level network intent (fixture-proven field).
+    networkAccess: bool | None = None

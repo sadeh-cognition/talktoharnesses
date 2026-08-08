@@ -10,6 +10,7 @@ from django.http import HttpRequest, StreamingHttpResponse
 from ninja import Router
 
 from talktoharnesses.django.api.schemas import (
+    ApprovalRuleBody,
     CreateConversationBody,
     CreateHarnessBody,
     EditQueuedPromptBody,
@@ -24,6 +25,8 @@ from talktoharnesses.django.asgi import get_service
 from talktoharnesses.django.auth import owner_id_for_user, revoke_token, rotate_token
 from talktoharnesses.domain.models import (
     ActivityProjection,
+    ApprovalRule,
+    ApprovalRuleProjection,
     CommandProjection,
     ConversationShell,
     ConversationSnapshot,
@@ -32,6 +35,7 @@ from talktoharnesses.domain.models import (
     HarnessModelInfo,
     HarnessProbeProjection,
     HarnessProjection,
+    InteractionAuditProjection,
     InteractionProjection,
     MessageProjection,
     Page,
@@ -421,14 +425,103 @@ async def resolve_interaction(
     interaction_id: UUID,
     body: ResolveInteractionBody,
 ) -> tuple[int, CommandProjection]:
+    owner = _owner(request)
+    create_rule = None
+    if body.create_rule is not None:
+        create_rule = _rule_from_body(owner, body.create_rule)
     cmd = await get_service().resolve_interaction(
-        _owner(request),
+        owner,
         conversation_id,
         interaction_id,
         decision=body.decision,
         answers=body.answers,
+        create_rule=create_rule,
     )
     return 202, cmd
+
+
+# ---------------------------------------------------------------------------
+# Approval rules and interaction audits
+# ---------------------------------------------------------------------------
+
+
+def _rule_from_body(
+    principal_id: str,
+    body: ApprovalRuleBody,
+    *,
+    rule_id: UUID | None = None,
+) -> ApprovalRule:
+    from datetime import UTC, datetime
+    from uuid import uuid4
+
+    now = datetime.now(UTC)
+    return ApprovalRule(
+        id=rule_id or uuid4(),
+        principal_id=principal_id,
+        decision=body.decision,
+        scope=body.scope,
+        matcher=body.matcher,
+        created_at=now,
+        updated_at=now,
+    )
+
+
+@router.get("/approval-rules", response=Page[ApprovalRuleProjection])
+async def list_approval_rules(
+    request: HttpRequest,
+    cursor: str | None = None,
+    limit: int = 50,
+) -> Page[ApprovalRuleProjection]:
+    return await get_service().list_approval_rules(_owner(request), cursor=cursor, limit=limit)
+
+
+@router.post("/approval-rules", response={201: ApprovalRuleProjection})
+async def create_approval_rule(
+    request: HttpRequest,
+    body: ApprovalRuleBody,
+) -> tuple[int, ApprovalRuleProjection]:
+    owner = _owner(request)
+    rule = _rule_from_body(owner, body)
+    created = await get_service().create_approval_rule(owner, rule)
+    return 201, created
+
+
+@router.get("/approval-rules/{rule_id}", response=ApprovalRuleProjection)
+async def get_approval_rule(request: HttpRequest, rule_id: UUID) -> ApprovalRuleProjection:
+    return await get_service().get_approval_rule(_owner(request), rule_id)
+
+
+@router.put("/approval-rules/{rule_id}", response=ApprovalRuleProjection)
+async def replace_approval_rule(
+    request: HttpRequest,
+    rule_id: UUID,
+    body: ApprovalRuleBody,
+) -> ApprovalRuleProjection:
+    owner = _owner(request)
+    existing = await get_service().get_approval_rule(owner, rule_id)
+    rule = _rule_from_body(owner, body, rule_id=rule_id)
+    rule = rule.model_copy(update={"created_at": existing.created_at})
+    return await get_service().replace_approval_rule(owner, rule)
+
+
+@router.delete("/approval-rules/{rule_id}", response={204: None})
+async def delete_approval_rule(request: HttpRequest, rule_id: UUID) -> tuple[int, None]:
+    await get_service().delete_approval_rule(_owner(request), rule_id)
+    return 204, None
+
+
+@router.get("/interaction-audits", response=Page[InteractionAuditProjection])
+async def list_interaction_audits(
+    request: HttpRequest,
+    cursor: str | None = None,
+    limit: int = 50,
+) -> Page[InteractionAuditProjection]:
+    return await get_service().list_interaction_audits(_owner(request), cursor=cursor, limit=limit)
+
+
+@router.get("/interaction-audits/{audit_id}", response=InteractionAuditProjection)
+async def get_interaction_audit(request: HttpRequest, audit_id: UUID) -> InteractionAuditProjection:
+    return await get_service().get_interaction_audit(_owner(request), audit_id)
 
 
 # ---------------------------------------------------------------------------

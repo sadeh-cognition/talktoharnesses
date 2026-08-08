@@ -12,6 +12,7 @@ from talktoharnesses.domain._base import FROZEN, UtcDateTime
 from talktoharnesses.domain.enums import (
     ActivityStatus,
     ApprovalDecision,
+    ApprovalRuleDecision,
     CommandKind,
     CommandStatus,
     ConversationStatus,
@@ -136,6 +137,9 @@ class ConversationHarnessBinding(BaseModel):
     conversation_id: UUID
     kind: HarnessKind
     configuration: HarnessConfiguration
+    # Immutable source harness for harness_instance rule scope. None on legacy
+    # bindings that cannot match harness-instance rules.
+    harness_instance_id: UUID | None = None
     native_session_id: str | None = None
     launch_snapshot: LaunchSnapshot | None = None
     requires_session_recreation: bool = False
@@ -359,6 +363,33 @@ class Command(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+class CommandApprovalAction(BaseModel):
+    model_config = FROZEN
+
+    kind: Literal["command"] = "command"
+    argv: tuple[str, ...] = Field(min_length=1)
+
+
+class FileApprovalAction(BaseModel):
+    model_config = FROZEN
+
+    kind: Literal["file"] = "file"
+    path: str = Field(min_length=1)
+    operation: FileOperation
+
+
+class NetworkApprovalAction(BaseModel):
+    model_config = FROZEN
+
+    kind: Literal["network"] = "network"
+
+
+ApprovalAction = Annotated[
+    CommandApprovalAction | FileApprovalAction | NetworkApprovalAction,
+    Field(discriminator="kind"),
+]
+
+
 class ApprovalRequestPayload(BaseModel):
     model_config = FROZEN
 
@@ -368,6 +399,9 @@ class ApprovalRequestPayload(BaseModel):
     path: str | None = None
     operation: FileOperation | None = None
     summary: str | None = None
+    # Normalized action for automatic rule matching. Absent → manual-only.
+    action: ApprovalAction | None = None
+    available_decisions: tuple[ApprovalDecision, ...] = ()
 
 
 class StructuredQuestionPayload(BaseModel):
@@ -404,6 +438,138 @@ class InteractionAnswer(BaseModel):
     answers: dict[str, Any] | None = None
     is_draft: bool = False
     submitted_at: UtcDateTime | None = None
+
+
+# ---------------------------------------------------------------------------
+# Persistent approval rules and audits
+# ---------------------------------------------------------------------------
+
+
+class ConversationRuleScope(BaseModel):
+    model_config = FROZEN
+
+    kind: Literal["conversation"] = "conversation"
+    conversation_id: UUID
+
+
+class HarnessInstanceRuleScope(BaseModel):
+    model_config = FROZEN
+
+    kind: Literal["harness_instance"] = "harness_instance"
+    harness_instance_id: UUID
+
+
+class ExecutableRuleScope(BaseModel):
+    model_config = FROZEN
+
+    kind: Literal["executable"] = "executable"
+    resolved_executable: str = Field(min_length=1)
+
+
+class UserRuleScope(BaseModel):
+    model_config = FROZEN
+
+    kind: Literal["user"] = "user"
+    user_id: str = Field(min_length=1)
+
+
+class PrincipalGlobalRuleScope(BaseModel):
+    model_config = FROZEN
+
+    kind: Literal["principal_global"] = "principal_global"
+
+
+ApprovalRuleScope = Annotated[
+    ConversationRuleScope
+    | HarnessInstanceRuleScope
+    | ExecutableRuleScope
+    | UserRuleScope
+    | PrincipalGlobalRuleScope,
+    Field(discriminator="kind"),
+]
+
+
+class ExactArgvMatcher(BaseModel):
+    model_config = FROZEN
+
+    kind: Literal["exact_argv"] = "exact_argv"
+    argv: tuple[str, ...] = Field(min_length=1)
+
+
+class ExactPathMatcher(BaseModel):
+    model_config = FROZEN
+
+    kind: Literal["exact_path"] = "exact_path"
+    path: str = Field(min_length=1)
+    operation: FileOperation
+
+
+class RecursiveDirectoryMatcher(BaseModel):
+    model_config = FROZEN
+
+    kind: Literal["recursive_directory"] = "recursive_directory"
+    directory: str = Field(min_length=1)
+    operation: FileOperation
+
+
+class BlanketNetworkMatcher(BaseModel):
+    model_config = FROZEN
+
+    kind: Literal["blanket_network"] = "blanket_network"
+
+
+ApprovalMatcher = Annotated[
+    ExactArgvMatcher | ExactPathMatcher | RecursiveDirectoryMatcher | BlanketNetworkMatcher,
+    Field(discriminator="kind"),
+]
+
+
+class ApprovalRule(BaseModel):
+    model_config = FROZEN
+
+    id: UUID = Field(default_factory=uuid4)
+    principal_id: str
+    decision: ApprovalRuleDecision
+    scope: ApprovalRuleScope
+    matcher: ApprovalMatcher
+    created_at: UtcDateTime
+    updated_at: UtcDateTime
+
+
+class ApprovalRuleProjection(BaseModel):
+    model_config = FROZEN
+
+    id: UUID
+    principal_id: str
+    decision: ApprovalRuleDecision
+    scope: ApprovalRuleScope
+    matcher: ApprovalMatcher
+    created_at: UtcDateTime
+    updated_at: UtcDateTime
+
+
+class InteractionAuditProjection(BaseModel):
+    """Immutable outcome snapshot for approvals and structured questions."""
+
+    model_config = FROZEN
+
+    id: UUID
+    principal_id: str
+    interaction_id: UUID
+    conversation_id: UUID
+    turn_id: UUID
+    kind: InteractionKind
+    decision: ApprovalDecision | None = None
+    answers: dict[str, Any] | None = None
+    automatic: bool = False
+    created_at: UtcDateTime
+    provider_kind: HarnessKind | None = None
+    provider_request_ids: dict[str, str] = Field(default_factory=dict)
+    deciding_rule_id: UUID | None = None
+    rule_decision: ApprovalRuleDecision | None = None
+    rule_scope: ApprovalRuleScope | None = None
+    rule_matcher: ApprovalMatcher | None = None
+    request_action: ApprovalAction | None = None
 
 
 class BackgroundActivity(BaseModel):
@@ -574,6 +740,17 @@ class CommandProjection(BaseModel):
     target_turn_id: UUID | None = None
     idempotency_key: str
     created_at: UtcDateTime
+
+
+class InteractionResolutionResult(BaseModel):
+    """First-write-wins resolution outcome returned to facade/broker callers."""
+
+    model_config = FROZEN
+
+    answer: InteractionAnswer
+    command: CommandProjection | None = None
+    was_first_write: bool
+    audit: InteractionAuditProjection | None = None
 
 
 class InteractionProjection(BaseModel):

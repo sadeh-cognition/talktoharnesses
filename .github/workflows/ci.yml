@@ -46,3 +46,55 @@ jobs:
 
       - name: Build distributions
         run: uv build --no-sources
+
+  postgres:
+    name: Ubuntu / PostgreSQL
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: talktoharnesses
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Sync dependencies (locked + django + postgres)
+        run: uv sync --locked --extra django --extra postgres
+
+      - name: Pytest persistence/interaction contracts on PostgreSQL
+        env:
+          DJANGO_SETTINGS_MODULE: tests.django_settings_postgres
+          POSTGRES_HOST: 127.0.0.1
+          POSTGRES_PORT: "5432"
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: talktoharnesses
+        run: >
+          uv run pytest
+          tests/test_django_persistence.py
+          tests/e2e/test_phase6_approvals_gate.py
+          tests/unit/django/test_approval_api.py
+          tests/unit/application/test_interaction_broker.py
+          tests/unit/application/test_command_processor_interactions.py
+          tests/unit/domain/test_interaction_answers.py
+          tests/unit/domain/test_approval_matching.py
+          tests/unit/providers/grok/test_permission_fixtures.py
+          -q --tb=short

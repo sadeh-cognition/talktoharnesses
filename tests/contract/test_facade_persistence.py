@@ -175,6 +175,12 @@ async def test_memory_search_and_soft_delete() -> None:
     with pytest.raises(DomainError) as exc:
         await p.get_conversation_snapshot(a.conversation.id, "owner-a")
     assert exc.value.code is ErrorCode.NOT_FOUND
+    deleted = await p.get_conversation_snapshot(
+        a.conversation.id,
+        "owner-a",
+        include_deleted=True,
+    )
+    assert deleted.detail.conversation.deleted_at is not None
 
 
 @pytest.mark.asyncio
@@ -326,6 +332,23 @@ async def test_django_list_search_owner_isolation_and_cursors() -> None:
     assert still.items == ()
     with_arch = await p.list_conversations("owner-a", include_archived=True)
     assert len(with_arch.items) == 1
+
+    deleted = soft_delete_conversation(archived.state, now=_now())
+    await p.commit_facade_mutation(
+        a.conversation.id,
+        "owner-a",
+        archived.state.conversation.version,
+        deleted.state,
+        deleted.events,
+    )
+    with pytest.raises(DomainError):
+        await p.get_conversation_snapshot(a.conversation.id, "owner-a")
+    stream_snapshot = await p.get_conversation_snapshot(
+        a.conversation.id,
+        "owner-a",
+        include_deleted=True,
+    )
+    assert stream_snapshot.detail.conversation.deleted_at is not None
 
 
 @pytest.mark.django_db(transaction=True)
