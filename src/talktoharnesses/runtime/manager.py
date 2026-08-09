@@ -17,10 +17,15 @@ from talktoharnesses.domain.errors import DomainError
 from talktoharnesses.domain.events import (
     ConversationEvent,
     EventPayload,
+    InteractionRequestedPayload,
     ProcessExitedPayload,
     ProcessForcedTerminationPayload,
     ProcessStderrTruncatedPayload,
     ProviderWarningPayload,
+    TurnCompletedPayload,
+    TurnFailedPayload,
+    TurnInterruptedPayload,
+    TurnOutcomeUnknownPayload,
 )
 from talktoharnesses.domain.models import (
     HarnessCapabilities,
@@ -40,9 +45,11 @@ from talktoharnesses.domain.transitions import (
 from talktoharnesses.providers._sdk_managed import SdkManagedAdapter
 from talktoharnesses.providers.adapter import (
     HarnessAdapter,
+    HarnessInteractionRequest,
     HarnessSession,
     ResumeSessionRequest,
     StartSessionRequest,
+    TurnRequest,
 )
 from talktoharnesses.providers.registry import AdapterRegistry
 from talktoharnesses.runtime.events import (
@@ -71,6 +78,16 @@ def _empty_tasks() -> list[asyncio.Task[None]]:
 
 def _is_sdk_managed(adapter: HarnessAdapter) -> bool:
     return isinstance(adapter, SdkManagedAdapter) or getattr(adapter, "sdk_managed", False) is True
+
+
+@dataclass(frozen=True)
+class _LaunchPlan:
+    """Adapter and resolved spawn inputs shared by live and candidate starts."""
+
+    adapter: HarnessAdapter
+    sdk_managed: bool
+    executable_path: str | None
+    argv: tuple[str, ...]
 
 
 @dataclass
@@ -115,6 +132,8 @@ class RuntimeManager:
         self._redaction_patterns = redaction_patterns
 
         self._runtimes: dict[UUID, ManagedRuntime] = {}
+        # Transient candidates keyed by their prospective binding ID.
+        self._candidates: dict[UUID, ManagedRuntime] = {}
         self._locks: dict[UUID, asyncio.Lock] = {}
         self._global_lock = asyncio.Lock()
         self._shutting_down = False
@@ -189,6 +208,8 @@ class RuntimeManager:
         async with self._global_lock:
             if self._shutting_down:
                 raise DomainError(ErrorCode.INVALID_STATE, "runtime manager is shutting down")
+            if conversation_id not in self._runtimes:
+                self._require_capacity()
             self._startup_tasks.add(task)
         try:
             async with self._lock_for(conversation_id):
@@ -229,32 +250,13 @@ class RuntimeManager:
             raise DomainError(ErrorCode.INVALID_STATE, "conversation has no binding")
 
         binding = state.binding
-        adapter = self._registry.create(configuration.kind)
-        set_redaction_patterns = getattr(adapter, "set_redaction_patterns", None)
-        if callable(set_redaction_patterns):
-            set_redaction_patterns(self._redaction_patterns)
-        sdk_managed = _is_sdk_managed(adapter)
-        exe = executable_path or configuration.executable_path
-        if not sdk_managed and not exe:
-            raise DomainError(
-                ErrorCode.INVALID_EXECUTABLE,
-                "configuration has no executable_path",
-            )
-
-        # Process-bound adapters may construct argv when the caller passes empty.
-        effective_argv: tuple[str, ...] = argv
-        build_argv = getattr(adapter, "build_argv", None)
-        if callable(build_argv) and not effective_argv:
-            built_obj = build_argv(configuration)
-            if isinstance(built_obj, tuple):
-                effective_argv = tuple(str(part) for part in cast(tuple[object, ...], built_obj))
-            elif isinstance(built_obj, list):
-                effective_argv = tuple(str(part) for part in cast(list[object], built_obj))
-            else:
-                raise DomainError(
-                    ErrorCode.INVALID_STATE,
-                    "build_argv must return a sequence of strings",
-                )
+        plan = self._plan_launch(
+            configuration=configuration,
+            argv=argv,
+            executable_path=executable_path,
+        )
+        adapter = plan.adapter
+        sdk_managed = plan.sdk_managed
 
         process_id = uuid4()
         process_record = ProcessRecord(
@@ -279,47 +281,19 @@ class RuntimeManager:
         handle: ProcessHandle | None = None
         launch: LaunchSnapshot | None = None
         try:
-            caps = await asyncio.wait_for(
-                adapter.probe(configuration),
-                timeout=self._policy.start_resume_timeout,
+            launch = await self._probe_and_build_launch(
+                plan,
+                configuration=configuration,
+                adapter_version=adapter_version,
             )
-            if sdk_managed:
-                launch = self._build_sdk_launch_snapshot(
-                    executable_path=exe,
-                    working_directory=configuration.working_directory,
-                    workspace_roots=configuration.workspace_roots,
-                    capabilities=caps,
-                    model=configuration.model,
-                    mode=configuration.mode,
-                    adapter_version=adapter_version,
-                )
-            else:
-                assert exe is not None
-                launch = self._supervisor.build_launch_snapshot(
-                    executable_path=exe,
-                    working_directory=configuration.working_directory,
-                    workspace_roots=configuration.workspace_roots,
-                    capabilities=caps,
-                    model=configuration.model,
-                    mode=configuration.mode,
-                    adapter_version=adapter_version,
-                )
-                spec = ProcessSpec(
+            if not sdk_managed:
+                handle = await self._spawn_process(
+                    plan,
                     conversation_id=conversation_id,
                     binding_id=binding.id,
                     process_id=process_id,
                     launch=launch,
-                    argv=effective_argv,
                 )
-
-                handle = await self._supervisor.spawn(
-                    spec,
-                    redaction_patterns=self._redaction_patterns,
-                )
-
-                bind_process = getattr(adapter, "bind_process", None)
-                if callable(bind_process):
-                    bind_process(handle)
 
             process_record = process_record.model_copy(
                 update={
@@ -411,19 +385,14 @@ class RuntimeManager:
                     state = await self._persistence.get_snapshot(conversation_id, owner_id)
                     retry_argv = tuple(str(part) for part in retry_argv_obj)
                     handle = None
-                    handle = await self._supervisor.spawn(
-                        ProcessSpec(
-                            conversation_id=conversation_id,
-                            binding_id=binding.id,
-                            process_id=process_id,
-                            launch=launch,
-                            argv=retry_argv,
-                        ),
-                        redaction_patterns=self._redaction_patterns,
+                    handle = await self._spawn_process(
+                        plan,
+                        conversation_id=conversation_id,
+                        binding_id=binding.id,
+                        process_id=process_id,
+                        launch=launch,
+                        argv=retry_argv,
                     )
-                    bind_process = getattr(adapter, "bind_process", None)
-                    if callable(bind_process):
-                        bind_process(handle)
                     process_record = process_record.model_copy(
                         update={
                             "status": ProcessStatus.RUNNING,
@@ -660,6 +629,392 @@ class RuntimeManager:
             events,
         )
 
+    def _plan_launch(
+        self,
+        *,
+        configuration: HarnessConfiguration,
+        argv: tuple[str, ...],
+        executable_path: str | None,
+    ) -> _LaunchPlan:
+        """Create the adapter and resolve the executable/argv it will launch with."""
+        adapter = self._registry.create(configuration.kind)
+        set_redaction_patterns = getattr(adapter, "set_redaction_patterns", None)
+        if callable(set_redaction_patterns):
+            set_redaction_patterns(self._redaction_patterns)
+        sdk_managed = _is_sdk_managed(adapter)
+        exe = executable_path or configuration.executable_path
+        if not sdk_managed and not exe:
+            raise DomainError(
+                ErrorCode.INVALID_EXECUTABLE,
+                "configuration has no executable_path",
+            )
+
+        # Process-bound adapters may construct argv when the caller passes empty.
+        effective_argv: tuple[str, ...] = argv
+        build_argv = getattr(adapter, "build_argv", None)
+        if callable(build_argv) and not effective_argv:
+            built_obj = build_argv(configuration)
+            if isinstance(built_obj, tuple):
+                effective_argv = tuple(str(part) for part in cast(tuple[object, ...], built_obj))
+            elif isinstance(built_obj, list):
+                effective_argv = tuple(str(part) for part in cast(list[object], built_obj))
+            else:
+                raise DomainError(
+                    ErrorCode.INVALID_STATE,
+                    "build_argv must return a sequence of strings",
+                )
+        return _LaunchPlan(
+            adapter=adapter,
+            sdk_managed=sdk_managed,
+            executable_path=exe,
+            argv=effective_argv,
+        )
+
+    async def _probe_and_build_launch(
+        self,
+        plan: _LaunchPlan,
+        *,
+        configuration: HarnessConfiguration,
+        adapter_version: str,
+    ) -> LaunchSnapshot:
+        caps = await asyncio.wait_for(
+            plan.adapter.probe(configuration),
+            timeout=self._policy.start_resume_timeout,
+        )
+        if plan.sdk_managed:
+            return self._build_sdk_launch_snapshot(
+                executable_path=plan.executable_path,
+                working_directory=configuration.working_directory,
+                workspace_roots=configuration.workspace_roots,
+                capabilities=caps,
+                model=configuration.model,
+                mode=configuration.mode,
+                adapter_version=adapter_version,
+            )
+        assert plan.executable_path is not None
+        return self._supervisor.build_launch_snapshot(
+            executable_path=plan.executable_path,
+            working_directory=configuration.working_directory,
+            workspace_roots=configuration.workspace_roots,
+            capabilities=caps,
+            model=configuration.model,
+            mode=configuration.mode,
+            adapter_version=adapter_version,
+        )
+
+    async def _spawn_process(
+        self,
+        plan: _LaunchPlan,
+        *,
+        conversation_id: UUID,
+        binding_id: UUID,
+        process_id: UUID,
+        launch: LaunchSnapshot,
+        argv: tuple[str, ...] | None = None,
+    ) -> ProcessHandle:
+        handle = await self._supervisor.spawn(
+            ProcessSpec(
+                conversation_id=conversation_id,
+                binding_id=binding_id,
+                process_id=process_id,
+                launch=launch,
+                argv=plan.argv if argv is None else argv,
+            ),
+            redaction_patterns=self._redaction_patterns,
+        )
+        bind_process = getattr(plan.adapter, "bind_process", None)
+        if callable(bind_process):
+            bind_process(handle)
+        return handle
+
+    # ------------------------------------------------------------------
+    # Candidate runtimes (durable switching and post-retention rotation)
+    # ------------------------------------------------------------------
+
+    def get_candidate(self, binding_id: UUID) -> ManagedRuntime | None:
+        return self._candidates.get(binding_id)
+
+    async def start_candidate(
+        self,
+        *,
+        conversation_id: UUID,
+        owner_id: str,
+        binding_id: UUID,
+        configuration: HarnessConfiguration,
+        argv: tuple[str, ...] = (),
+        adapter_version: str = "0",
+        executable_path: str | None = None,
+    ) -> ManagedRuntime:
+        """Start a transient runtime with a new native session for ``binding_id``.
+
+        The candidate is never inserted into the live conversation map and
+        writes no lifecycle rows: the current binding stays authoritative until
+        the caller commits the switch and calls :meth:`promote_candidate`.
+        """
+        async with self._global_lock:
+            if self._shutting_down:
+                raise DomainError(ErrorCode.INVALID_STATE, "runtime manager is shutting down")
+            if binding_id in self._candidates:
+                raise DomainError(
+                    ErrorCode.CONVERSATION_BUSY,
+                    "binding already has a candidate runtime",
+                    details={"binding_id": str(binding_id)},
+                )
+            self._require_capacity()
+
+        plan = self._plan_launch(
+            configuration=configuration,
+            argv=argv,
+            executable_path=executable_path,
+        )
+        process_id = uuid4()
+        handle: ProcessHandle | None = None
+        try:
+            launch = await self._probe_and_build_launch(
+                plan,
+                configuration=configuration,
+                adapter_version=adapter_version,
+            )
+            if not plan.sdk_managed:
+                handle = await self._spawn_process(
+                    plan,
+                    conversation_id=conversation_id,
+                    binding_id=binding_id,
+                    process_id=process_id,
+                    launch=launch,
+                )
+            # Candidates always create a new native session; never resume.
+            session = await asyncio.wait_for(
+                plan.adapter.start(
+                    StartSessionRequest(
+                        conversation_id=conversation_id,
+                        binding_id=binding_id,
+                        configuration=configuration,
+                        launch=launch,
+                    )
+                ),
+                timeout=self._policy.start_resume_timeout,
+            )
+        except TimeoutError as exc:
+            await self._abort_candidate_startup(
+                plan,
+                handle,
+                conversation_id=conversation_id,
+                binding_id=binding_id,
+                configuration=configuration,
+            )
+            raise DomainError(
+                ErrorCode.RUNTIME_TIMEOUT,
+                "candidate session start timed out",
+                details={"conversation_id": str(conversation_id)},
+            ) from exc
+        except BaseException:
+            await asyncio.shield(
+                self._abort_candidate_startup(
+                    plan,
+                    handle,
+                    conversation_id=conversation_id,
+                    binding_id=binding_id,
+                    configuration=configuration,
+                )
+            )
+            raise
+
+        managed = ManagedRuntime(
+            conversation_id=conversation_id,
+            owner_id=owner_id,
+            adapter=plan.adapter,
+            session=session,
+            process=handle,
+            process_record=ProcessRecord(
+                id=process_id,
+                conversation_id=conversation_id,
+                binding_id=binding_id,
+                status=ProcessStatus.RUNNING,
+                pid=handle.pid if handle is not None else None,
+                started_at=self._clock(),
+            ),
+            launch=launch,
+        )
+        self._candidates[binding_id] = managed
+        return managed
+
+    async def seed_candidate(
+        self,
+        managed: ManagedRuntime,
+        handoff_text: str,
+        *,
+        timeout: float | None = None,
+    ) -> None:
+        """Submit the retained handoff as one synthetic turn and drain its terminal.
+
+        Candidate content events are discarded: nothing seeded here is
+        materialized or published. Any interaction request, non-successful
+        terminal, foreign turn, timeout, or stream end rejects the candidate.
+        """
+        if not handoff_text:
+            return
+        budget = self._policy.start_resume_timeout if timeout is None else timeout
+        turn_id = uuid4()
+        try:
+            await asyncio.wait_for(
+                self._drain_seed(managed, handoff_text, turn_id=turn_id),
+                timeout=budget,
+            )
+        except TimeoutError as exc:
+            raise DomainError(
+                ErrorCode.RUNTIME_TIMEOUT,
+                "candidate handoff seeding timed out",
+                details={"conversation_id": str(managed.conversation_id)},
+            ) from exc
+
+    async def _drain_seed(
+        self,
+        managed: ManagedRuntime,
+        handoff_text: str,
+        *,
+        turn_id: UUID,
+    ) -> None:
+        await managed.adapter.submit(
+            managed.session,
+            TurnRequest(turn_id=turn_id, command_id=uuid4(), prompt=handoff_text),
+        )
+        async for event in managed.adapter.events(managed.session):
+            if isinstance(event, (HarnessInteractionRequest, InteractionRequestedPayload)):
+                raise DomainError(
+                    ErrorCode.PROTOCOL_ERROR,
+                    "candidate requested an interaction while seeding the handoff",
+                )
+            event_turn = getattr(event, "turn_id", None)
+            if isinstance(event_turn, UUID) and event_turn != turn_id:
+                raise DomainError(
+                    ErrorCode.PROTOCOL_ERROR,
+                    "candidate emitted an event for an unexpected turn",
+                )
+            if isinstance(event, TurnCompletedPayload):
+                return
+            if isinstance(
+                event,
+                (TurnFailedPayload, TurnInterruptedPayload, TurnOutcomeUnknownPayload),
+            ):
+                raise DomainError(
+                    ErrorCode.PROTOCOL_ERROR,
+                    f"candidate handoff turn ended as {event.type}",
+                )
+        raise DomainError(
+            ErrorCode.PROTOCOL_ERROR,
+            "candidate event stream ended before the handoff turn terminated",
+        )
+
+    async def promote_candidate(self, conversation_id: UUID, binding_id: UUID) -> ManagedRuntime:
+        """Install a committed candidate as the conversation's live runtime."""
+        async with self._lock_for(conversation_id):
+            managed = self._candidates.pop(binding_id, None)
+            if managed is None:
+                raise DomainError(
+                    ErrorCode.INVALID_STATE,
+                    "no candidate runtime for binding",
+                    details={"binding_id": str(binding_id)},
+                )
+            self._runtimes[conversation_id] = managed
+            if managed.process is not None:
+                managed.tasks.append(
+                    asyncio.create_task(
+                        self._lifecycle_pump(managed),
+                        name=f"lifecycle-{conversation_id}",
+                    )
+                )
+            self._arm_idle_timer(conversation_id)
+            return managed
+
+    async def close_candidate(self, binding_id: UUID) -> None:
+        """Shut a rejected candidate down; it owns no durable rows to settle."""
+        managed = self._candidates.pop(binding_id, None)
+        if managed is None:
+            return
+        managed.closed = True
+        try:
+            await asyncio.wait_for(
+                managed.adapter.close(managed.session),
+                timeout=self._policy.graceful_close_timeout,
+            )
+        except Exception:  # noqa: BLE001
+            if managed.process is not None:
+                with contextlib.suppress(Exception):
+                    await managed.process.force_terminate(reason="candidate_rejected")
+        else:
+            if managed.process is not None:
+                with contextlib.suppress(Exception):
+                    await managed.process.close()
+
+    async def close_replaced_runtime(
+        self,
+        managed: ManagedRuntime,
+        *,
+        reason: str = "harness_switch",
+    ) -> None:
+        """Close a runtime already replaced by a promoted candidate.
+
+        Only the process incarnation is settled: the session-close transition
+        would otherwise attribute the close to the new active binding.
+        """
+        async with self._lock_for(managed.conversation_id):
+            await self._close_managed(managed, reason=reason, session_action=None)
+
+    async def ensure_binding_current(
+        self,
+        conversation_id: UUID,
+        state: ConversationState,
+    ) -> ManagedRuntime | None:
+        """Return the live runtime only when its session matches ``state.binding``.
+
+        A separately scheduled cleanup can invalidate a native session while an
+        idle runtime still holds it, so a mismatch or pending recreation closes
+        the runtime and forces a fresh start.
+        """
+        managed = self._runtimes.get(conversation_id)
+        if managed is None:
+            return None
+        binding = state.binding
+        if (
+            binding is not None
+            and managed.session.binding_id == binding.id
+            and managed.session.native_session_id == binding.native_session_id
+            and not binding.requires_session_recreation
+        ):
+            return managed
+        logger.info("closing stale runtime for conversation %s", conversation_id)
+        await self.close_replaced_runtime(managed, reason="stale_binding")
+        return None
+
+    def _require_capacity(self) -> None:
+        if len(self._runtimes) + len(self._candidates) >= self._policy.max_runtimes:
+            raise DomainError(
+                ErrorCode.CONVERSATION_BUSY,
+                "runtime capacity reached",
+                details={"max_runtimes": str(self._policy.max_runtimes)},
+            )
+
+    async def _abort_candidate_startup(
+        self,
+        plan: _LaunchPlan,
+        handle: ProcessHandle | None,
+        *,
+        conversation_id: UUID,
+        binding_id: UUID,
+        configuration: HarnessConfiguration,
+    ) -> None:
+        if plan.sdk_managed:
+            await self._rollback_sdk_startup(
+                plan.adapter,
+                conversation_id=conversation_id,
+                binding_id=binding_id,
+                configuration=configuration,
+            )
+        if handle is not None:
+            with contextlib.suppress(Exception):
+                await handle.force_terminate(reason="candidate_startup_failure")
+
     def _build_sdk_launch_snapshot(
         self,
         *,
@@ -716,7 +1071,7 @@ class RuntimeManager:
         if managed.closed:
             return
         async with self._lock_for(managed.conversation_id):
-            if managed.closed or managed.conversation_id not in self._runtimes:
+            if managed.closed or self._runtimes.get(managed.conversation_id) is not managed:
                 return
             await self._persist_process_event(managed, event)
 
@@ -875,6 +1230,7 @@ class RuntimeManager:
         managed: ManagedRuntime,
         *,
         reason: str | None,
+        session_action: str | None = "close",
     ) -> None:
         if managed.closed:
             return
@@ -890,7 +1246,7 @@ class RuntimeManager:
             if managed.process is not None:
                 await managed.process.close()
         # Persist terminal status for both process-bound and SDK-managed runtimes.
-        await self._persist_terminal(managed, session_action="close", reason=reason)
+        await self._persist_terminal(managed, session_action=session_action, reason=reason)
         await self._teardown_runtime(managed, close_adapter=False)
 
     async def reap_if_eligible(self, conversation_id: UUID) -> bool:
@@ -1016,9 +1372,11 @@ class RuntimeManager:
         if managed.closed:
             return
         managed.closed = True
-        idle = self._idle_tasks.pop(managed.conversation_id, None)
-        if idle is not None:
-            idle.cancel()
+        replaced = self._runtimes.get(managed.conversation_id) is not managed
+        if not replaced:
+            idle = self._idle_tasks.pop(managed.conversation_id, None)
+            if idle is not None:
+                idle.cancel()
         current = asyncio.current_task()
         others = [t for t in managed.tasks if t is not current]
         for task in others:
@@ -1038,7 +1396,8 @@ class RuntimeManager:
                     await managed.process.force_terminate(reason="teardown")
                 else:
                     await managed.process.close()
-        self._runtimes.pop(managed.conversation_id, None)
+        if not replaced:
+            self._runtimes.pop(managed.conversation_id, None)
 
     async def shutdown(self) -> None:
         """Idempotent shutdown: reject new runtimes, interrupt, then force-kill."""
@@ -1099,6 +1458,10 @@ class RuntimeManager:
         await self._force_all(deadline)
 
     async def _force_all(self, deadline: float) -> None:
+        for binding_id in list(self._candidates):
+            with contextlib.suppress(Exception):
+                await self.close_candidate(binding_id)
+
         async def _force_one(managed: ManagedRuntime) -> None:
             async with self._lock_for(managed.conversation_id):
                 if managed.closed:

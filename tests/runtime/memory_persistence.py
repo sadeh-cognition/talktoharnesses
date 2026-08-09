@@ -3,27 +3,54 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import cast
 from uuid import UUID
 
 from talktoharnesses.application.cursors import clamp_page_limit, decode_cursor, encode_cursor
-from talktoharnesses.application.search_documents import build_search_document_from_parts
+from talktoharnesses.application.handoff import (
+    HandoffDocument,
+    HandoffMessage,
+    HandoffTool,
+    handoff_sort_key,
+)
+from talktoharnesses.application.persistence import PruneResult, SwitchPreparation
+from talktoharnesses.application.search_documents import (
+    build_search_document_from_parts,
+    normalize_search_terms,
+)
 from talktoharnesses.domain.approval_matching import (
     InteractionMatchContext,
     select_matching_rule,
 )
 from talktoharnesses.domain.enums import (
+    ActivityStatus,
     ApprovalDecision,
     ApprovalRuleDecision,
     CommandStatus,
     ErrorCode,
     InteractionKind,
     InteractionStatus,
+    MessageRole,
+    ToolOutcome,
     TurnStatus,
 )
 from talktoharnesses.domain.errors import DomainError
-from talktoharnesses.domain.events import ConversationEvent
+from talktoharnesses.domain.events import (
+    AssistantMessageCompletedPayload,
+    AssistantMessageStartedPayload,
+    ConversationEvent,
+    ToolCompletedPayload,
+    ToolRequestedPayload,
+    TurnCancelledPayload,
+    TurnCompletedPayload,
+    TurnFailedPayload,
+    TurnInterruptedPayload,
+    TurnOutcomeUnknownPayload,
+    TurnQueuedPayload,
+    TurnStartedPayload,
+    event_turn_id,
+)
 from talktoharnesses.domain.models import (
     ActivityProjection,
     ApprovalRequestPayload,
@@ -56,7 +83,20 @@ from talktoharnesses.domain.models import (
     Turn,
     TurnProjection,
 )
-from talktoharnesses.domain.transitions import ConversationState, submit_interaction_answer
+from talktoharnesses.domain.transitions import (
+    ConversationState,
+    interrupt_turn,
+    mark_requires_recreation,
+    rotate_session,
+    submit_interaction_answer,
+)
+
+_TERMINAL_TURN_STATUSES = (
+    TurnStatus.COMPLETED,
+    TurnStatus.INTERRUPTED,
+    TurnStatus.FAILED,
+    TurnStatus.OUTCOME_UNKNOWN,
+)
 
 
 def _not_found(resource: str = "conversation") -> DomainError:
@@ -214,7 +254,11 @@ class MemoryPersistence:
         expires_at: datetime,
     ) -> None:
         command = self.commands.get(command_id)
-        if command is None or command.worker_id != worker_id:
+        if (
+            command is None
+            or command.worker_id != worker_id
+            or command.status is not CommandStatus.CLAIMED
+        ):
             raise DomainError(ErrorCode.INVALID_STATE, "command lease not found for worker")
         self.commands[command_id] = command.model_copy(update={"lease_expires_at": expires_at})
 
@@ -327,6 +371,7 @@ class MemoryPersistence:
                 self.states[conversation_id] = state
 
         self._index_state_projections(self.states[conversation_id])
+        self._apply_events_to_projections(conversation_id, events)
         self._refresh_search(self.states[conversation_id])
         return tuple(events)
 
@@ -706,14 +751,282 @@ class MemoryPersistence:
             next_cursor = encode_cursor(sort=last.created_at.isoformat(), id=last.id)
         return Page(items=tuple(items), next_cursor=next_cursor)
 
-    async def delete_expired_turn_aggregates(self, cutoff: datetime) -> int:
-        return 0
+    async def read_retained_handoff(
+        self,
+        conversation_id: UUID,
+        *,
+        owner_id: str | None = None,
+    ) -> HandoffDocument:
+        if owner_id is not None:
+            await self._require_owned(conversation_id, owner_id)
+        turn_order = {
+            turn_id: index
+            for index, turn_id in enumerate(self.turn_order.get(conversation_id, []), start=1)
+        }
+        entries: list[HandoffMessage | HandoffTool] = []
+        for index, message in enumerate(self.messages.get(conversation_id, {}).values(), start=1):
+            entries.append(
+                HandoffMessage(
+                    id=message.id,
+                    turn_id=message.turn_id,
+                    role=message.role,
+                    text=message.text,
+                    interrupted=message.interrupted,
+                    turn_order_index=turn_order.get(message.turn_id, 0),
+                    order_index=index,
+                )
+            )
+        for index, tool in enumerate(self.tools.get(conversation_id, {}).values(), start=1):
+            entries.append(
+                HandoffTool(
+                    **tool.model_dump(exclude={"full_output"}),
+                    turn_order_index=turn_order.get(tool.turn_id, 0),
+                    order_index=index,
+                )
+            )
+        return HandoffDocument(entries=tuple(sorted(entries, key=handoff_sort_key)))
+
+    async def prepare_harness_switch(self, conversation_id: UUID) -> SwitchPreparation:
+        state = self.states.get(conversation_id)
+        if state is None:
+            raise _not_found()
+        return SwitchPreparation(
+            state=state,
+            handoff=await self.read_retained_handoff(conversation_id),
+        )
+
+    async def commit_harness_switch(
+        self,
+        conversation_id: UUID,
+        expected_version: int,
+        state: ConversationState,
+        events: Sequence[ConversationEvent],
+        *,
+        command: Command,
+        process: ProcessRecord | None = None,
+        launch_history_entry: LaunchSnapshot | None = None,
+    ) -> Sequence[ConversationEvent]:
+        committed = await self.commit_runtime_lifecycle(
+            conversation_id,
+            expected_version,
+            state,
+            process,
+            launch_history_entry,
+            events,
+        )
+        self.commands[command.id] = command
+        return committed
+
+    async def commit_harness_switch_failure(
+        self,
+        conversation_id: UUID,
+        expected_version: int,
+        state: ConversationState,
+        events: Sequence[ConversationEvent],
+        *,
+        command: Command,
+    ) -> Sequence[ConversationEvent]:
+        return await self.commit_turn_batch(
+            conversation_id, expected_version, state, events, (command,)
+        )
+
+    async def list_cleanup_conversation_ids(self) -> Sequence[UUID]:
+        return [cid for cid, state in self.states.items() if state.conversation.deleted_at is None]
+
+    async def prune_expired_history(
+        self,
+        conversation_id: UUID,
+        cutoff: datetime,
+    ) -> PruneResult | None:
+        state = self.states.get(conversation_id)
+        if state is None or state.binding is None:
+            return None
+        if any(a.status is ActivityStatus.RUNNING for a in state.activities.values()):
+            return None
+        active = state.active_turn
+        waiting_expired = (
+            active is not None
+            and active.status is TurnStatus.WAITING
+            and (active.started_at or active.created_at) <= cutoff
+        )
+        if active is not None and not waiting_expired:
+            return None
+
+        turns = self.turns.get(conversation_id, {})
+        expired = {
+            turn_id
+            for turn_id, turn in turns.items()
+            if turn.status in _TERMINAL_TURN_STATUSES
+            and turn.completed_at is not None
+            and turn.completed_at <= cutoff
+        }
+        if active is not None and waiting_expired:
+            expired.add(active.id)
+        if not expired:
+            return None
+
+        now = datetime.now(UTC)
+        events: tuple[ConversationEvent, ...] = ()
+        if waiting_expired:
+            interrupted = interrupt_turn(state, now=now, reason="retention")
+            state = interrupted.state
+            events += interrupted.events
+
+        removed_interactions = {
+            interaction_id
+            for interaction_id, interaction in self.interactions.get(conversation_id, {}).items()
+            if interaction.turn_id in expired
+        }
+        self.turns[conversation_id] = {
+            turn_id: turn for turn_id, turn in turns.items() if turn_id not in expired
+        }
+        self.turn_order[conversation_id] = [
+            turn_id
+            for turn_id in self.turn_order.get(conversation_id, [])
+            if turn_id not in expired
+        ]
+        self.messages[conversation_id] = {
+            message_id: message
+            for message_id, message in self.messages.get(conversation_id, {}).items()
+            if message.turn_id not in expired
+        }
+        self.tools[conversation_id] = {
+            tool_id: tool
+            for tool_id, tool in self.tools.get(conversation_id, {}).items()
+            if tool.turn_id not in expired
+        }
+        self.plans[conversation_id] = {
+            plan_id: plan
+            for plan_id, plan in self.plans.get(conversation_id, {}).items()
+            if plan.turn_id not in expired
+        }
+        self.activities[conversation_id] = {
+            activity_id: activity
+            for activity_id, activity in self.activities.get(conversation_id, {}).items()
+            if activity.parent_turn_id not in expired
+        }
+        self.interactions[conversation_id] = {
+            interaction_id: interaction
+            for interaction_id, interaction in self.interactions.get(conversation_id, {}).items()
+            if interaction_id not in removed_interactions
+        }
+        for interaction_id in removed_interactions:
+            self.interaction_answers.pop(interaction_id, None)
+            self.interaction_meta.pop(interaction_id, None)
+        for command_id in [
+            command_id
+            for command_id, command in self.commands.items()
+            if command.conversation_id == conversation_id and command.target_turn_id in expired
+        ]:
+            del self.commands[command_id]
+        interaction_turn_ids = {
+            interaction_id: interaction.turn_id
+            for interaction_id, interaction in state.interactions.items()
+        }
+        self.events[conversation_id] = [
+            event
+            for event in self.events.get(conversation_id, [])
+            if event_turn_id(event, interaction_turn_ids) not in expired
+        ]
+
+        state = state.model_copy(
+            update={
+                "commands": {
+                    command_id: command
+                    for command_id, command in state.commands.items()
+                    if command.target_turn_id not in expired
+                },
+                "interactions": {
+                    interaction_id: interaction
+                    for interaction_id, interaction in state.interactions.items()
+                    if interaction_id not in removed_interactions
+                },
+                "answers": {
+                    interaction_id: answer
+                    for interaction_id, answer in state.answers.items()
+                    if interaction_id not in removed_interactions
+                },
+                "activities": {
+                    activity_id: activity
+                    for activity_id, activity in state.activities.items()
+                    if activity.parent_turn_id not in expired
+                },
+            }
+        )
+        binding = state.binding
+        assert binding is not None
+        previous_native_session_id = binding.native_session_id
+        rotated = rotate_session(state, now=now)
+        state = rotated.state
+        events += rotated.events
+
+        self.states[conversation_id] = state
+        self.events[conversation_id].extend(
+            event for event in events if event_turn_id(event) not in expired
+        )
+        self._refresh_search(state)
+        return PruneResult(
+            conversation_id=conversation_id,
+            owner_id=state.conversation.owner_id,
+            binding_id=binding.id,
+            previous_native_session_id=previous_native_session_id,
+            configuration=binding.configuration,
+            handoff=await self.read_retained_handoff(conversation_id),
+            version=state.conversation.version,
+            session_rotated_events=events,
+            pruned_turn_count=len(expired),
+            cancelled_waiting_count=1 if waiting_expired else 0,
+        )
+
+    async def commit_session_rotation(
+        self,
+        conversation_id: UUID,
+        expected_version: int,
+        *,
+        native_session_id: str | None,
+        launch_snapshot: LaunchSnapshot | None,
+    ) -> None:
+        state = self._require_binding(conversation_id, expected_version)
+        assert state.binding is not None
+        binding = state.binding.model_copy(
+            update={
+                "native_session_id": native_session_id,
+                "launch_snapshot": launch_snapshot or state.binding.launch_snapshot,
+                "requires_session_recreation": False,
+            }
+        )
+        self.states[conversation_id] = state.model_copy(update={"binding": binding})
+
+    async def commit_rotation_requires_recreation(
+        self,
+        conversation_id: UUID,
+        expected_version: int,
+    ) -> None:
+        state = self._require_binding(conversation_id, expected_version)
+        self.states[conversation_id] = mark_requires_recreation(state, now=datetime.now(UTC)).state
+
+    def _require_binding(self, conversation_id: UUID, expected_version: int) -> ConversationState:
+        state = self.states.get(conversation_id)
+        if state is None:
+            raise _not_found("conversation")
+        if state.conversation.version != expected_version:
+            raise DomainError(
+                ErrorCode.OPTIMISTIC_CONFLICT,
+                "optimistic concurrency conflict",
+                details={
+                    "expected": expected_version,
+                    "actual": state.conversation.version,
+                },
+            )
+        if state.binding is None:
+            raise DomainError(ErrorCode.INVALID_STATE, "no binding to rotate")
+        return state
 
     async def purge_soft_deleted(self, cutoff: datetime) -> int:
         to_delete = [
             cid
             for cid, state in self.states.items()
-            if state.conversation.deleted_at is not None and state.conversation.deleted_at < cutoff
+            if state.conversation.deleted_at is not None and state.conversation.deleted_at <= cutoff
         ]
         for cid in to_delete:
             del self.states[cid]
@@ -831,8 +1144,8 @@ class MemoryPersistence:
         limit: int = 50,
     ) -> Page[ConversationShell]:
         page_size = clamp_page_limit(limit)
-        needle = " ".join(query.split()).casefold()
-        if not needle:
+        terms = normalize_search_terms(query)
+        if not terms:
             return Page(items=(), next_cursor=None)
         matches: list[ConversationShell] = []
         for cid, doc in self.search_docs.items():
@@ -841,7 +1154,7 @@ class MemoryPersistence:
                 continue
             if state.conversation.deleted_at is not None:
                 continue
-            if needle in doc:
+            if all(term in doc for term in terms):
                 matches.append(self._shell(state))
         matches.sort(key=lambda s: (s.updated_at, s.id), reverse=True)
         if cursor is not None:
@@ -1360,8 +1673,6 @@ class MemoryPersistence:
             ):
                 from uuid import uuid4
 
-                from talktoharnesses.domain.enums import MessageRole
-
                 msg_id = uuid4()
                 turn = turn.model_copy(update={"user_message_id": msg_id})
                 turns[turn.id] = turn
@@ -1376,6 +1687,163 @@ class MemoryPersistence:
             self.interactions.setdefault(cid, {})[interaction.id] = interaction
         for activity in state.activities.values():
             self.activities.setdefault(cid, {})[activity.id] = activity
+
+    def _apply_events_to_projections(
+        self,
+        conversation_id: UUID,
+        events: Sequence[ConversationEvent],
+    ) -> None:
+        """Retain terminal turns/messages/tools from the committed event stream.
+
+        ``_index_state_projections`` only sees the live active/queued turns, so a
+        single commit that queues, starts, and completes a turn would otherwise
+        leave no retained history for handoff/search/retention tests.
+        """
+        turns = self.turns.setdefault(conversation_id, {})
+        order = self.turn_order.setdefault(conversation_id, [])
+        messages = self.messages.setdefault(conversation_id, {})
+        tools = self.tools.setdefault(conversation_id, {})
+        for event in events:
+            payload = event.payload
+            if isinstance(payload, TurnQueuedPayload):
+                turn = turns.get(payload.turn_id) or Turn(
+                    id=payload.turn_id,
+                    conversation_id=conversation_id,
+                    status=TurnStatus.QUEUED,
+                    command_id=payload.command_id,
+                    created_at=event.timestamp,
+                )
+                turns[payload.turn_id] = turn
+                if payload.turn_id not in order:
+                    order.append(payload.turn_id)
+                if payload.prompt:
+                    from uuid import uuid4
+
+                    msg_id = turn.user_message_id or uuid4()
+                    turns[payload.turn_id] = turn.model_copy(update={"user_message_id": msg_id})
+                    messages[msg_id] = Message(
+                        id=msg_id,
+                        turn_id=payload.turn_id,
+                        role=MessageRole.USER,
+                        text=payload.prompt,
+                        created_at=event.timestamp,
+                    )
+            elif isinstance(payload, TurnStartedPayload):
+                existing = turns.get(payload.turn_id)
+                if existing is None:
+                    turns[payload.turn_id] = Turn(
+                        id=payload.turn_id,
+                        conversation_id=conversation_id,
+                        status=TurnStatus.RUNNING,
+                        command_id=payload.command_id,
+                        created_at=event.timestamp,
+                        started_at=event.timestamp,
+                    )
+                    if payload.turn_id not in order:
+                        order.append(payload.turn_id)
+                else:
+                    turns[payload.turn_id] = existing.model_copy(
+                        update={
+                            "status": TurnStatus.RUNNING,
+                            "started_at": existing.started_at or event.timestamp,
+                            "command_id": payload.command_id or existing.command_id,
+                        }
+                    )
+            elif isinstance(payload, TurnCompletedPayload):
+                existing = turns.get(payload.turn_id)
+                if existing is not None:
+                    turns[payload.turn_id] = existing.model_copy(
+                        update={
+                            "status": TurnStatus.COMPLETED,
+                            "completed_at": event.timestamp,
+                            "terminal_reason": payload.terminal_reason,
+                        }
+                    )
+            elif isinstance(payload, TurnInterruptedPayload):
+                existing = turns.get(payload.turn_id)
+                if existing is not None:
+                    turns[payload.turn_id] = existing.model_copy(
+                        update={
+                            "status": TurnStatus.INTERRUPTED,
+                            "completed_at": event.timestamp,
+                            "terminal_reason": payload.reason,
+                        }
+                    )
+            elif isinstance(payload, TurnFailedPayload):
+                existing = turns.get(payload.turn_id)
+                if existing is not None:
+                    turns[payload.turn_id] = existing.model_copy(
+                        update={
+                            "status": TurnStatus.FAILED,
+                            "completed_at": event.timestamp,
+                            "terminal_reason": payload.message,
+                        }
+                    )
+            elif isinstance(payload, TurnOutcomeUnknownPayload):
+                existing = turns.get(payload.turn_id)
+                if existing is not None:
+                    turns[payload.turn_id] = existing.model_copy(
+                        update={
+                            "status": TurnStatus.OUTCOME_UNKNOWN,
+                            "completed_at": event.timestamp,
+                            "terminal_reason": payload.message,
+                        }
+                    )
+            elif isinstance(payload, TurnCancelledPayload):
+                existing = turns.get(payload.turn_id)
+                if existing is not None:
+                    turns[payload.turn_id] = existing.model_copy(
+                        update={
+                            "status": TurnStatus.INTERRUPTED,
+                            "completed_at": event.timestamp,
+                            "terminal_reason": "cancelled",
+                        }
+                    )
+            elif isinstance(payload, AssistantMessageStartedPayload):
+                messages[payload.message_id] = Message(
+                    id=payload.message_id,
+                    turn_id=payload.turn_id,
+                    role=MessageRole.ASSISTANT,
+                    text="",
+                    created_at=event.timestamp,
+                )
+            elif isinstance(payload, AssistantMessageCompletedPayload):
+                existing = messages.get(payload.message_id)
+                if existing is not None:
+                    messages[payload.message_id] = existing.model_copy(
+                        update={"text": payload.text}
+                    )
+                else:
+                    messages[payload.message_id] = Message(
+                        id=payload.message_id,
+                        turn_id=payload.turn_id,
+                        role=MessageRole.ASSISTANT,
+                        text=payload.text,
+                        created_at=event.timestamp,
+                    )
+            elif isinstance(payload, ToolRequestedPayload):
+                tools[payload.tool_id] = CanonicalToolResult(
+                    id=payload.tool_id,
+                    turn_id=payload.turn_id,
+                    tool_name=payload.tool_name,
+                    arguments=dict(payload.arguments),
+                    outcome=ToolOutcome.UNKNOWN,
+                )
+            elif isinstance(payload, ToolCompletedPayload):
+                existing = tools.get(payload.tool_id)
+                base = existing or CanonicalToolResult(
+                    id=payload.tool_id,
+                    turn_id=payload.turn_id,
+                    tool_name=payload.tool_name,
+                )
+                tools[payload.tool_id] = base.model_copy(
+                    update={
+                        "tool_name": payload.tool_name,
+                        "outcome": payload.outcome,
+                        "exit_status": payload.exit_status,
+                        "output_tail": payload.output_tail,
+                    }
+                )
 
     def _refresh_search(self, state: ConversationState) -> None:
         cid = state.conversation.id

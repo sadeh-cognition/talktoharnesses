@@ -315,6 +315,9 @@ class SwitchHarnessPayload(BaseModel):
 
     kind: Literal["switch_harness"] = "switch_harness"
     configuration: HarnessConfiguration
+    # Resolved target harness instance ID, when the switch targets an owned
+    # HarnessRecord rather than an ad hoc configuration.
+    harness_instance_id: UUID | None = None
 
 
 CommandPayload = Annotated[

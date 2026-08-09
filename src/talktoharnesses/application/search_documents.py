@@ -10,8 +10,20 @@ from talktoharnesses.application.redaction import StreamingTextRedactor
 from talktoharnesses.domain.models import CanonicalToolResult, Message
 
 
+def normalize_search_terms(text: str) -> tuple[str, ...]:
+    """Case-fold, replace non-alphanumeric characters with spaces, and split.
+
+    Shared by both document building and query normalization so a PostgreSQL
+    or SQLite FTS backend can query the exact same term stream that built the
+    stored document (see ``docs/phase8.md`` Work Package 4).
+    """
+    folded = text.casefold()
+    stripped = "".join(char if char.isalnum() else " " for char in folded)
+    return tuple(stripped.split())
+
+
 def _normalize(text: str) -> str:
-    return " ".join(text.split()).casefold()
+    return " ".join(normalize_search_terms(text))
 
 
 def _redact(text: str, patterns: Sequence[str] = ()) -> str:

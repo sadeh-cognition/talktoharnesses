@@ -82,6 +82,12 @@ class SteerBody(BaseModel):
     prompt: str = Field(min_length=1)
 
 
+class SwitchHarnessBody(BaseModel):
+    model_config = _REQUEST
+
+    harness_id: UUID
+
+
 class InteractionDraftBody(BaseModel):
     model_config = _REQUEST
 

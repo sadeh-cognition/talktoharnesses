@@ -361,6 +361,15 @@ Each subphase adds one adapter, its feature extra, strict schemas, manifest entr
 - Verify all five adapters appear identically in the JSON and generated Markdown compatibility manifests.
 - Execute the definition-of-done journey through both the Python facade and authenticated HTTP/SSE API.
 
+## Phase 11 — Search, retention, and transcript product extensions
+
+Owns product topics explicitly excluded from Phases 8–10 (recovery and release readiness do not cover them):
+
+- **Search product:** ranking, snippets/highlighting, fuzzy search, stemming / per-language indexes, prefix/autocomplete, query operators, saved searches, or an external search service.
+- **Retention product:** user-configurable retention periods, per-conversation exemptions, dry-run/report APIs, in-process scheduler, workspace cleanup, provider-side session deletion, or approval-audit deletion.
+- **Transcript / handoff product:** public handoff or transcript import/export, exposing native session IDs, same-provider thread fork/clone, provider-native history import, LLM-generated summaries, handoff attachments, or reasoning/raw-event transfer.
+- **Surface / adapter product:** a second conversation-list projection, new metadata endpoints, adapter-specific binding tables, generic runtime strategies, dynamic plugins, public `HarnessAdapter` protocol changes, or additional provider capabilities beyond the Phase 7 five-adapter set.
+
 ## Assumptions and locked defaults
 
 - “Separately implementable” means sequential, independently reviewable merges, not independently deployable products or published releases.

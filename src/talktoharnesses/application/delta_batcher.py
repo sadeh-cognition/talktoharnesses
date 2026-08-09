@@ -92,6 +92,14 @@ class DeltaBatcher:
                 self._task.cancel()
             await self._do_flush()
 
+    async def discard(self) -> None:
+        """Close without committing a batch produced by an invalidated runtime."""
+        async with self._lock:
+            self._closed = True
+            if self._task is not None and not self._task.done():
+                self._task.cancel()
+            self._pending = _Pending()
+
     async def _delayed_flush(self) -> None:
         try:
             await asyncio.sleep(self._interval)

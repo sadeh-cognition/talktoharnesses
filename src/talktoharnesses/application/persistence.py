@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol
 from uuid import UUID
 
+from talktoharnesses.application.handoff import HandoffDocument
 from talktoharnesses.domain.events import ConversationEvent
 from talktoharnesses.domain.models import (
     ActivityProjection,
@@ -16,6 +18,7 @@ from talktoharnesses.domain.models import (
     ConversationShell,
     ConversationSnapshot,
     HarnessCapabilities,
+    HarnessConfiguration,
     HarnessInstance,
     HarnessProbeProjection,
     HarnessProjection,
@@ -32,6 +35,37 @@ from talktoharnesses.domain.models import (
     TurnProjection,
 )
 from talktoharnesses.domain.transitions import ConversationState
+
+
+@dataclass(frozen=True, slots=True)
+class PruneResult:
+    """Outcome of one conversation's history-pruning transaction.
+
+    Carries everything ``run_cleanup`` needs to attempt candidate-runtime
+    session rotation without a second read: the previous native session
+    identity, the active binding's configuration, the retained handoff to
+    seed a replacement session, and the state version/events already
+    committed by the prune itself.
+    """
+
+    conversation_id: UUID
+    owner_id: str
+    binding_id: UUID
+    previous_native_session_id: str | None
+    configuration: HarnessConfiguration
+    handoff: HandoffDocument
+    version: int
+    session_rotated_events: tuple[ConversationEvent, ...] = ()
+    pruned_turn_count: int = 0
+    cancelled_waiting_count: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class SwitchPreparation:
+    """Aggregate and retained handoff read from one committed version."""
+
+    state: ConversationState
+    handoff: HandoffDocument
 
 
 class Persistence(Protocol):
@@ -263,12 +297,118 @@ class Persistence(Protocol):
         """Keyset-page audits (created_at DESC, id DESC)."""
         ...
 
-    async def delete_expired_turn_aggregates(self, cutoff: datetime) -> int:
-        """Retention: delete complete expired turn aggregates. Returns count."""
+    async def read_retained_handoff(
+        self,
+        conversation_id: UUID,
+        *,
+        owner_id: str | None = None,
+    ) -> HandoffDocument:
+        """Read the ordered retained canonical handoff for one conversation.
+
+        Owner-scoped (cross-owner ≡ missing) when ``owner_id`` is given;
+        worker-scoped when omitted, for switch/rotation use from the command
+        processor. Merges rows by ``(turn.order_index, item.order_index,
+        id)``. Reasoning, plans, raw events, and full tool output are never
+        read here — see ``application.handoff``.
+        """
+        ...
+
+    async def prepare_harness_switch(self, conversation_id: UUID) -> SwitchPreparation:
+        """Lock and read the switch aggregate and handoff in one transaction."""
+        ...
+
+    async def commit_harness_switch(
+        self,
+        conversation_id: UUID,
+        expected_version: int,
+        state: ConversationState,
+        events: Sequence[ConversationEvent],
+        *,
+        command: Command,
+        process: ProcessRecord | None = None,
+        launch_history_entry: LaunchSnapshot | None = None,
+    ) -> Sequence[ConversationEvent]:
+        """Atomically commit a successful harness switch.
+
+        Closes the previous binding row, inserts the new active binding from
+        ``state.binding``, updates aggregate/shell/search projections,
+        persists the accepted candidate process/launch record, settles
+        ``command``, and inserts ``harness_switched``. The caller closes the
+        replaced runtime/session only after this commit succeeds.
+        """
+        ...
+
+    async def commit_harness_switch_failure(
+        self,
+        conversation_id: UUID,
+        expected_version: int,
+        state: ConversationState,
+        events: Sequence[ConversationEvent],
+        *,
+        command: Command,
+    ) -> Sequence[ConversationEvent]:
+        """Atomically commit a failed harness switch against the unchanged binding.
+
+        Settles ``command`` with its sanitized error/message and inserts only
+        ``harness_switch_failed``; the current binding and runtime are never
+        touched by a failed switch.
+        """
+        ...
+
+    async def list_cleanup_conversation_ids(self) -> Sequence[UUID]:
+        """Return every non-soft-deleted conversation ID for one retention pass."""
+        ...
+
+    async def prune_expired_history(
+        self,
+        conversation_id: UUID,
+        cutoff: datetime,
+    ) -> PruneResult | None:
+        """Delete one conversation's terminal-expired turn history in one transaction.
+
+        Returns ``None`` when a turn or background activity is running, or
+        when nothing is eligible. An expired ``WAITING`` turn's open
+        interactions are cancelled and settled before that turn is pruned.
+        Recomputes the derived title, shell fields, and search document, and
+        returns the retained handoff plus the previous native session
+        identity needed for rotation.
+        """
+        ...
+
+    async def commit_session_rotation(
+        self,
+        conversation_id: UUID,
+        expected_version: int,
+        *,
+        native_session_id: str | None,
+        launch_snapshot: LaunchSnapshot | None,
+    ) -> None:
+        """Commit successful post-prune rotation.
+
+        Records the new native session ID and launch snapshot on the active
+        binding and clears ``requires_session_recreation``.
+        """
+        ...
+
+    async def commit_rotation_requires_recreation(
+        self,
+        conversation_id: UUID,
+        expected_version: int,
+    ) -> None:
+        """Mark the active binding as requiring recreation after failed rotation.
+
+        History deletion already succeeded; only replacement-session creation
+        failed. The next command must create a fresh session.
+        """
         ...
 
     async def purge_soft_deleted(self, cutoff: datetime) -> int:
-        """Retention: permanently purge soft-deleted conversations. Returns count."""
+        """Retention: permanently purge soft-deleted conversations. Returns count.
+
+        Matches ``deleted_at <= cutoff`` (not strict ``<``) so a boundary row
+        is purged on the run whose cutoff equals it, and a rerun with the
+        same cutoff stays idempotent.
+        """
         ...
 
     # ------------------------------------------------------------------
@@ -331,7 +471,11 @@ class Persistence(Protocol):
         cursor: str | None = None,
         limit: int = 50,
     ) -> Page[ConversationShell]:
-        """Portable case-insensitive substring search over sanitized documents."""
+        """Portable substring search over sanitized documents.
+
+        Query terms are normalized with the same casefold/alphanumeric rule
+        used to build the document and joined with AND.
+        """
         ...
 
     async def get_conversation_snapshot(

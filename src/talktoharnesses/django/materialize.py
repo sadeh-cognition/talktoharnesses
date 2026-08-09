@@ -7,9 +7,11 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID, uuid4
 
+from talktoharnesses.application.titles import derive_title_from_user_message
 from talktoharnesses.django.models import (
     ActivityRecord,
     ConversationAggregate,
+    ConversationBindingRecord,
     InteractionRecord,
     MessageRecord,
     PlanRecord,
@@ -123,7 +125,8 @@ def materialize_projections(
     for event in events:
         _apply_event(cid, event)
 
-    _refresh_search_document(state)
+    sync_active_binding(state)
+    _refresh_search_document(_recompute_derived_title(state))
 
 
 def _next_order_index(conversation_id: UUID) -> int:
@@ -158,6 +161,16 @@ def _upsert_turn(conversation_id: UUID, turn: Turn) -> None:
             "order_index": order_index,
         },
     )
+
+
+def _message_order_index(message_id: UUID, event_sequence: int) -> int:
+    """Conversation-wide message order from the event that first created it."""
+    existing = (
+        MessageRecord.objects.filter(message_id=message_id)
+        .values_list("order_index", flat=True)
+        .first()
+    )
+    return int(existing) if existing else event_sequence
 
 
 def _ensure_turn(conversation_id: UUID, turn_id: UUID, *, at: datetime) -> None:
@@ -210,6 +223,7 @@ def _apply_event(conversation_id: UUID, event: ConversationEvent) -> None:
                     "text": payload.prompt,
                     "sequence": 0,
                     "created_at": ts,
+                    "order_index": _message_order_index(msg_id, event.sequence),
                 },
             )
             TurnRecord.objects.filter(turn_id=payload.turn_id).update(user_message_id=msg_id)
@@ -275,6 +289,7 @@ def _apply_event(conversation_id: UUID, event: ConversationEvent) -> None:
                 "text": "",
                 "sequence": 0,
                 "created_at": ts,
+                "order_index": _message_order_index(payload.message_id, event.sequence),
             },
         )
         return
@@ -461,6 +476,65 @@ def _apply_event(conversation_id: UUID, event: ConversationEvent) -> None:
             },
         )
         return
+
+
+def sync_active_binding(state: ConversationState) -> None:
+    """Mirror the aggregate's active binding into relational binding history.
+
+    The previous active row is closed before the new one is written so the
+    one-active-binding constraint never sees two active rows.
+    """
+    binding = state.binding
+    if binding is None:
+        return
+    cid = state.conversation.id
+    ConversationBindingRecord.objects.filter(conversation_id=cid, is_active=True).exclude(
+        binding_id=binding.id
+    ).update(is_active=False, closed_at=state.conversation.updated_at)
+    ConversationBindingRecord.objects.update_or_create(
+        binding_id=binding.id,
+        defaults={
+            "conversation_id": cid,
+            "kind": binding.kind.value,
+            "configuration": binding.configuration.model_dump(mode="json"),
+            "harness_instance_id": binding.harness_instance_id,
+            "native_session_id": binding.native_session_id,
+            "launch_snapshot": (
+                binding.launch_snapshot.model_dump(mode="json")
+                if binding.launch_snapshot is not None
+                else None
+            ),
+            "requires_session_recreation": binding.requires_session_recreation,
+            "is_active": binding.is_active,
+            "created_at": binding.created_at,
+            "closed_at": binding.closed_at,
+        },
+    )
+
+
+def _recompute_derived_title(state: ConversationState) -> ConversationState:
+    """Refresh ``title_derived`` from the earliest retained user message.
+
+    Writes the derived value back into aggregate JSON and copies
+    ``display_title`` to the shell column so list, detail, search, and SSE
+    observe one title. Native and manual titles are never rewritten.
+    """
+    cid = state.conversation.id
+    earliest = (
+        MessageRecord.objects.filter(conversation_id=cid, role=MessageRole.USER.value)
+        .order_by("turn__order_index", "order_index", "message_id")
+        .first()
+    )
+    derived = derive_title_from_user_message(earliest.text) if earliest is not None else None
+    if derived == state.conversation.title_derived:
+        return state
+    conversation = state.conversation.model_copy(update={"title_derived": derived})
+    updated = state.model_copy(update={"conversation": conversation})
+    ConversationAggregate.objects.filter(conversation_id=cid).update(
+        title=conversation.display_title,
+        state=updated.model_dump(mode="json"),
+    )
+    return updated
 
 
 def _refresh_search_document(state: ConversationState) -> None:

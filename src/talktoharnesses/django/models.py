@@ -134,6 +134,12 @@ class MessageRecord(models.Model):
     sequence: models.PositiveIntegerField[int, int] = models.PositiveIntegerField(default=0)
     interrupted: models.BooleanField[bool, bool] = models.BooleanField(default=False)
     created_at: models.DateTimeField[datetime, datetime] = models.DateTimeField()
+    # Conversation-wide canonical order (message.sequence is chunk order within
+    # the message, not conversation order). Populated from the first canonical
+    # event that created the message; default eases the additive migration.
+    order_index: models.PositiveBigIntegerField[int, int] = models.PositiveBigIntegerField(
+        default=0
+    )
 
     class Meta:
         db_table = "talktoharnesses_message"
@@ -311,8 +317,66 @@ class InteractionRecord(models.Model):
         ]
 
 
+class ConversationBindingRecord(models.Model):
+    """Private relational binding history (not a public model).
+
+    Mirrors ``domain.models.ConversationHarnessBinding``. The aggregate's
+    ``conversation.current_binding_id`` and active in-JSON binding remain the
+    domain source used by transitions; these rows provide the transactional
+    history and deletion/query integrity switching needs (one active binding
+    per conversation, atomic replacement, closing the previous binding).
+    """
+
+    binding_id: models.UUIDField[UUID, UUID] = models.UUIDField(primary_key=True, editable=False)
+    conversation: models.ForeignKey[ConversationAggregate, ConversationAggregate] = (
+        models.ForeignKey(ConversationAggregate, on_delete=models.CASCADE)
+    )
+    kind: models.CharField[str, str] = models.CharField(max_length=32)
+    configuration: models.JSONField[dict[str, object], dict[str, object]] = models.JSONField()
+    harness_instance_id: models.UUIDField[UUID | None, UUID | None] = models.UUIDField(
+        null=True, blank=True
+    )
+    native_session_id: models.CharField[str | None, str | None] = models.CharField(
+        max_length=255, null=True, blank=True
+    )
+    launch_snapshot: models.JSONField[dict[str, object] | None, dict[str, object] | None] = (
+        models.JSONField(null=True, blank=True)
+    )
+    requires_session_recreation: models.BooleanField[bool, bool] = models.BooleanField(
+        default=False
+    )
+    is_active: models.BooleanField[bool, bool] = models.BooleanField(default=True)
+    created_at: models.DateTimeField[datetime, datetime] = models.DateTimeField()
+    closed_at: models.DateTimeField[datetime | None, datetime | None] = models.DateTimeField(
+        null=True, blank=True
+    )
+
+    class Meta:
+        db_table = "talktoharnesses_binding"
+        constraints = [
+            models.UniqueConstraint(
+                fields=("conversation",),
+                condition=models.Q(is_active=True),
+                name="tth_one_active_binding",
+            )
+        ]
+        indexes = [
+            models.Index(
+                fields=["conversation", "-created_at"],
+                name="tth_binding_history_idx",
+            ),
+        ]
+
+
 class SearchDocument(models.Model):
-    """Sanitized normalized text used by portable Phase 5 substring search."""
+    """Sanitized normalized text used by portable substring/FTS search.
+
+    ``normalized_text`` is the shared knowledge source built by
+    ``application.search_documents``. PostgreSQL derives a stored
+    ``tsvector``/GIN index and SQLite derives an FTS5 virtual table from this
+    column; both remain private, vendor-specific derived indexes (see
+    ``docs/phase8.md`` Work Package 4).
+    """
 
     conversation: models.OneToOneField[ConversationAggregate, ConversationAggregate] = (
         models.OneToOneField(
@@ -392,6 +456,12 @@ class ConversationEventRecord(models.Model):
     timestamp: models.DateTimeField[datetime, datetime] = models.DateTimeField()
     type: models.CharField[str, str] = models.CharField(max_length=64)
     payload: models.JSONField[dict[str, object], dict[str, object]] = models.JSONField()
+    # Nullable: resolved from the validated event payload during backfill;
+    # interaction- and activity-only events resolve through their projection
+    # rows. Used for turn-owned retention deletion, not for replay ordering.
+    turn_id: models.UUIDField[UUID | None, UUID | None] = models.UUIDField(
+        null=True, blank=True, db_index=True
+    )
 
     class Meta:
         db_table = "talktoharnesses_event"
@@ -418,6 +488,11 @@ class CommandRecord(models.Model):
         null=True, blank=True
     )
     data: models.JSONField[dict[str, object], dict[str, object]] = models.JSONField()
+    # Nullable: resolved from the validated command payload during backfill.
+    # Used for turn-owned retention deletion (including coalesced commands).
+    target_turn_id: models.UUIDField[UUID | None, UUID | None] = models.UUIDField(
+        null=True, blank=True, db_index=True
+    )
 
     class Meta:
         db_table = "talktoharnesses_command"

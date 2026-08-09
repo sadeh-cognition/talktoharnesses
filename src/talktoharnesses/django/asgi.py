@@ -32,13 +32,9 @@ from talktoharnesses.application.service import TalkToHarnessesService
 from talktoharnesses.django.auth import validate_jwt_settings
 from talktoharnesses.django.broker import DjangoCommittedEventBroker
 from talktoharnesses.django.persistence import DjangoPersistence
-from talktoharnesses.domain.enums import ErrorCode, HarnessKind
+from talktoharnesses.domain.enums import ErrorCode
 from talktoharnesses.domain.errors import DomainError
-from talktoharnesses.providers.claude import ClaudeAdapter
-from talktoharnesses.providers.cursor import CursorAdapter
-from talktoharnesses.providers.grok import GrokAdapter
-from talktoharnesses.providers.opencode import OpenCodeAdapter
-from talktoharnesses.providers.registry import AdapterRegistry
+from talktoharnesses.providers.default_registry import build_default_adapter_registry
 from talktoharnesses.runtime.manager import RuntimeManager
 
 logger = logging.getLogger(__name__)
@@ -85,13 +81,7 @@ def _build_service() -> TalkToHarnessesService:
     validate_jwt_settings()
 
     persistence = DjangoPersistence()
-    registry = AdapterRegistry()
-    registry.register(HarnessKind.GROK, GrokAdapter)
-    registry.register(HarnessKind.CURSOR, CursorAdapter)
-    registry.register(HarnessKind.CLAUDE, ClaudeAdapter)
-    registry.register(HarnessKind.OPENCODE, OpenCodeAdapter)
-    # Codex is intentionally absent while its published compatibility matrices
-    # are empty: AsyncCodex 0.144.4 cannot defer and answer brokered approvals.
+    registry = build_default_adapter_registry()
     broker = DjangoCommittedEventBroker()
     runtime = RuntimeManager(persistence, registry, clock=_utc_clock)
     return TalkToHarnessesService(

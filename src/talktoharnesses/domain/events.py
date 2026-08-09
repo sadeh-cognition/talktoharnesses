@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Annotated, Any, Literal
 from uuid import UUID, uuid4
 
@@ -589,6 +590,29 @@ class ConversationEvent(BaseModel):
             msg = f"event type {self.type!r} does not match payload {self.payload.type!r}"
             raise ValueError(msg)
         return self
+
+
+def event_turn_id(
+    event: ConversationEvent,
+    interaction_turn_ids: Mapping[UUID, UUID] | None = None,
+) -> UUID | None:
+    """Return the turn an event belongs to, or ``None`` for conversation-level events.
+
+    Turn-owned retention deletion links each committed event to its turn.
+    Payloads usually name the turn as ``turn_id`` or ``parent_turn_id``.
+    Interaction-only payloads resolve through the optional durable interaction
+    mapping supplied by persistence.
+    """
+    payload = event.payload
+    turn_id = getattr(payload, "turn_id", None)
+    if turn_id is None:
+        turn_id = getattr(payload, "parent_turn_id", None)
+    if isinstance(turn_id, UUID):
+        return turn_id
+    interaction_id = getattr(payload, "interaction_id", None)
+    if isinstance(interaction_id, UUID) and interaction_turn_ids is not None:
+        return interaction_turn_ids.get(interaction_id)
+    return None
 
 
 # Adapter-facing normalized stream items reuse the same payload vocabulary.

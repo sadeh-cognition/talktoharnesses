@@ -1340,8 +1340,19 @@ def rotate_session(
         raise DomainError(ErrorCode.CONVERSATION_BUSY, "cannot rotate while turn is active")
 
     ts = _now(now)
-    binding = state.binding.model_copy(update={"native_session_id": None})
-    new_state = state.model_copy(update={"binding": binding})
+    binding = state.binding.model_copy(
+        update={
+            "native_session_id": None,
+            "requires_session_recreation": True,
+        }
+    )
+    new_state = state.model_copy(
+        update={
+            "binding": binding,
+            "seen_native_ids": frozenset(),
+            "seen_stream_offsets": frozenset(),
+        }
+    )
     new_state, events = append_events(
         new_state,
         ts,

@@ -19,6 +19,7 @@ from talktoharnesses.django.api.schemas import (
     SnoozeBody,
     SteerBody,
     SubmitTurnBody,
+    SwitchHarnessBody,
 )
 from talktoharnesses.django.api.sse import iter_sse, parse_last_event_id
 from talktoharnesses.django.asgi import get_service
@@ -366,6 +367,21 @@ async def steer(
         _owner(request),
         conversation_id,
         prompt=body.prompt,
+        idempotency_key=request.headers.get("Idempotency-Key") or "",
+    )
+    return 202, cmd
+
+
+@router.post("/conversations/{conversation_id}/switch", response={202: CommandProjection})
+async def switch_harness(
+    request: HttpRequest,
+    conversation_id: UUID,
+    body: SwitchHarnessBody,
+) -> tuple[int, CommandProjection]:
+    cmd = await get_service().switch_harness(
+        _owner(request),
+        conversation_id,
+        harness_id=body.harness_id,
         idempotency_key=request.headers.get("Idempotency-Key") or "",
     )
     return 202, cmd

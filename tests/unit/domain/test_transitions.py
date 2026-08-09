@@ -431,11 +431,21 @@ def test_mode_change_while_active_rejected() -> None:
 
 def test_session_reap_rotate_switch() -> None:
     state = _idle()
+    state = state.model_copy(
+        update={
+            "seen_native_ids": frozenset({"native-event"}),
+            "seen_stream_offsets": frozenset({"native-session:1"}),
+        }
+    )
     r = reap_session(state, now=_now())
     assert r.events[-1].payload.type == "session_reaped"
 
     r = rotate_session(r.state, now=_now())
     assert r.events[-1].payload.type == "session_rotated"
+    assert r.state.binding is not None
+    assert r.state.binding.requires_session_recreation is True
+    assert r.state.seen_native_ids == frozenset()
+    assert r.state.seen_stream_offsets == frozenset()
 
     new_binding = ConversationHarnessBinding(
         conversation_id=r.state.conversation.id,

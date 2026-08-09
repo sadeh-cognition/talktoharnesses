@@ -14,6 +14,7 @@ from talktoharnesses.application.persistence import Persistence
 from talktoharnesses.application.publisher import CommittedEventPublisher
 from talktoharnesses.domain.approval_matching import normalize_approval_rule
 from talktoharnesses.domain.enums import (
+    ActivityStatus,
     CommandKind,
     CommandStatus,
     ErrorCode,
@@ -45,6 +46,7 @@ from talktoharnesses.domain.models import (
     PlanProjection,
     SubmitTurnPayload,
     SubmitTurnResult,
+    SwitchHarnessPayload,
     ToolProjection,
     Turn,
     TurnProjection,
@@ -610,6 +612,116 @@ class TalkToHarnessesService:
         )
         await self._publish(events)
         return _command_projection(command)
+
+    # ------------------------------------------------------------------
+    # Harness switching
+    # ------------------------------------------------------------------
+
+    async def switch_harness(
+        self,
+        owner_id: str,
+        conversation_id: UUID,
+        *,
+        harness_id: UUID,
+        idempotency_key: str,
+    ) -> CommandProjection:
+        """Accept a durable switch to another owned harness on an idle conversation."""
+        if not idempotency_key or not idempotency_key.strip():
+            raise DomainError(ErrorCode.INVALID_STATE, "Idempotency-Key is required")
+        state = await self._persistence.get_snapshot(conversation_id, owner_id)
+
+        for existing in state.commands.values():
+            if existing.idempotency_key != idempotency_key:
+                continue
+            if (
+                not isinstance(existing.payload, SwitchHarnessPayload)
+                or existing.payload.harness_instance_id != harness_id
+            ):
+                raise DomainError(
+                    ErrorCode.IDEMPOTENCY_CONFLICT,
+                    "idempotency key reused with a different payload",
+                    details={"idempotency_key": idempotency_key},
+                )
+            return _command_projection(existing)
+
+        harness = await self._persistence.get_harness(harness_id, owner_id)
+        if (
+            state.active_turn is not None
+            or state.queued_turn is not None
+            or any(a.status is ActivityStatus.RUNNING for a in state.activities.values())
+        ):
+            raise DomainError(
+                ErrorCode.CONVERSATION_BUSY,
+                "conversation must be idle to switch harness",
+                details={"conversation_id": str(conversation_id)},
+            )
+        await self._validate_switch_target(owner_id, harness)
+
+        now = self._clock()
+        command = Command(
+            conversation_id=conversation_id,
+            kind=CommandKind.SWITCH_HARNESS,
+            status=CommandStatus.ACCEPTED,
+            idempotency_key=idempotency_key,
+            payload=SwitchHarnessPayload(
+                configuration=harness.configuration,
+                harness_instance_id=harness.id,
+            ),
+            created_at=now,
+        )
+        commands = dict(state.commands)
+        commands[command.id] = command
+        new_state = state.model_copy(
+            update={
+                "commands": commands,
+                "conversation": state.conversation.model_copy(
+                    update={"version": state.conversation.version + 1, "updated_at": now}
+                ),
+            }
+        )
+        events = await self._persistence.commit_facade_mutation(
+            conversation_id,
+            owner_id,
+            state.conversation.version,
+            new_state,
+            (),
+            commands=(command,),
+        )
+        await self._publish(events)
+        return _command_projection(command)
+
+    async def _validate_switch_target(self, owner_id: str, harness: HarnessProjection) -> None:
+        """Require a successful probe and a supported finite model/mode."""
+        try:
+            probe = await self._persistence.get_harness_probe(harness.id, owner_id)
+        except DomainError as exc:
+            raise DomainError(
+                ErrorCode.PROVIDER_INCOMPATIBLE,
+                "target harness has no successful probe",
+                details={"harness_id": str(harness.id)},
+            ) from exc
+        configuration = harness.configuration
+        capabilities = probe.capabilities
+        if (
+            configuration.model
+            and capabilities.models
+            and all(m.id != configuration.model for m in capabilities.models)
+        ):
+            raise DomainError(
+                ErrorCode.PROVIDER_INCOMPATIBLE,
+                "target harness does not support the requested model",
+                details={"model": configuration.model},
+            )
+        if (
+            configuration.mode
+            and capabilities.modes
+            and all(m.id != configuration.mode for m in capabilities.modes)
+        ):
+            raise DomainError(
+                ErrorCode.PROVIDER_INCOMPATIBLE,
+                "target harness does not support the requested mode",
+                details={"mode": configuration.mode},
+            )
 
     # ------------------------------------------------------------------
     # Interactions

@@ -23,7 +23,7 @@ from talktoharnesses.django.auth import (
     owner_id_for_user,
 )
 from talktoharnesses.django.persistence import DjangoPersistence
-from talktoharnesses.domain import HarnessConfiguration, HarnessKind
+from talktoharnesses.domain import HarnessCapabilities, HarnessConfiguration, HarnessKind
 from talktoharnesses.providers.registry import AdapterRegistry
 from talktoharnesses.runtime.manager import RuntimeManager
 
@@ -189,6 +189,57 @@ def test_submit_turn_requires_idempotency_key(
     assert ok.status_code == 202, ok.content
     body = ok.json()
     assert body["command"]["idempotency_key"] == "k1"
+
+
+@pytest.mark.django_db(transaction=True)
+def test_switch_harness_accepts_command(service: TalkToHarnessesService, auth_header: str) -> None:
+    client = Client()
+    user = authenticate_bearer_sync(auth_header)
+    owner = owner_id_for_user(user)
+
+    import asyncio
+
+    async def setup() -> tuple[UUID, UUID]:
+        source = await service.create_harness(
+            owner,
+            name="a",
+            configuration=HarnessConfiguration(kind=HarnessKind.GROK, working_directory="/tmp"),
+        )
+        target = await service.create_harness(
+            owner,
+            name="b",
+            configuration=HarnessConfiguration(kind=HarnessKind.CODEX, working_directory="/tmp"),
+        )
+        await DjangoPersistence().save_harness_probe(
+            target.id,
+            owner,
+            HarnessCapabilities(kind=HarnessKind.CODEX, version="1.0.0"),
+            probed_at=_now(),
+        )
+        snap = await service.create_conversation(owner, source.id)
+        return snap.detail.conversation.id, target.id
+
+    cid, target_id = asyncio.run(setup())
+
+    missing = _post_json(
+        client,
+        f"/api/v1/conversations/{cid}/switch",
+        {"harness_id": str(target_id)},
+        HTTP_AUTHORIZATION=auth_header,
+    )
+    assert missing.status_code == 422
+
+    ok = client.post(
+        f"/api/v1/conversations/{cid}/switch",
+        data=json.dumps({"harness_id": str(target_id)}),
+        content_type="application/json",
+        HTTP_AUTHORIZATION=auth_header,
+        HTTP_IDEMPOTENCY_KEY="switch-1",
+    )
+    assert ok.status_code == 202, ok.content
+    body = ok.json()
+    assert body["kind"] == "switch_harness"
+    assert body["status"] == "accepted"
 
 
 @pytest.mark.django_db(transaction=True)

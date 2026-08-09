@@ -123,19 +123,26 @@ class _InteractionAdapter:
 
 
 class _Runtime:
-    def __init__(self, adapter: _InteractionAdapter) -> None:
+    def __init__(self, adapter: _InteractionAdapter, persistence: MemoryPersistence) -> None:
         self.adapter = adapter
+        self.persistence = persistence
         self.managed: Any = None
 
     def get_runtime(self, conversation_id: UUID) -> Any:
         return self.managed
 
+    async def ensure_binding_current(self, conversation_id: UUID, state: Any) -> Any:
+        return self.managed
+
     async def start(self, **kwargs: Any) -> HarnessSession:
+        conversation_id = kwargs["conversation_id"]
+        state = await self.persistence.get_worker_snapshot(conversation_id)
+        assert state.binding is not None
         session = HarnessSession(
-            conversation_id=kwargs["conversation_id"],
-            binding_id=uuid4(),
+            conversation_id=conversation_id,
+            binding_id=state.binding.id,
             kind=HarnessKind.GROK,
-            native_session_id="s1",
+            native_session_id=state.binding.native_session_id,
         )
         self.managed = SimpleNamespace(adapter=self.adapter, session=session)
         return session
@@ -145,6 +152,10 @@ class _Runtime:
 
     async def close(self, conversation_id: UUID, *, reason: str) -> None:
         self.managed = None
+
+    async def close_replaced_runtime(self, managed: Any, *, reason: str) -> None:
+        if self.managed is managed:
+            self.managed = None
 
 
 async def _seed_running(p: MemoryPersistence) -> tuple[UUID, UUID]:
@@ -187,7 +198,7 @@ async def test_event_pump_routes_interaction_request_through_broker(envelope: bo
     publisher = _Publisher()
     broker = InteractionBroker(p, publisher, clock=_now)
     adapter = _InteractionAdapter()
-    runtime = _Runtime(adapter)
+    runtime = _Runtime(adapter, p)
     processor = CommandProcessor(
         p,
         publisher,
@@ -236,7 +247,7 @@ async def test_answer_command_settles_after_native_flush_at_most_once() -> None:
     publisher = _Publisher()
     broker = InteractionBroker(p, publisher, clock=_now)
     adapter = _InteractionAdapter()
-    runtime = _Runtime(adapter)
+    runtime = _Runtime(adapter, p)
     processor = CommandProcessor(
         p,
         publisher,
@@ -314,7 +325,7 @@ async def test_failed_answer_delivery_is_outcome_unknown_in_row_and_aggregate() 
     broker = InteractionBroker(p, publisher, clock=_now)
     adapter = _InteractionAdapter()
     adapter.answer_error = RuntimeError("native delivery failed")
-    runtime = _Runtime(adapter)
+    runtime = _Runtime(adapter, p)
     processor = CommandProcessor(
         p,
         publisher,
@@ -354,7 +365,7 @@ async def test_interrupt_cancels_open_interactions_before_adapter() -> None:
     publisher = _Publisher()
     broker = InteractionBroker(p, publisher, clock=_now)
     adapter = _InteractionAdapter()
-    runtime = _Runtime(adapter)
+    runtime = _Runtime(adapter, p)
     processor = CommandProcessor(
         p,
         publisher,
@@ -413,7 +424,7 @@ async def test_interrupt_flushes_pending_deltas_before_cancelling_interactions()
     publisher = _Publisher()
     broker = InteractionBroker(p, publisher, clock=_now)
     adapter = _InteractionAdapter()
-    runtime = _Runtime(adapter)
+    runtime = _Runtime(adapter, p)
     processor = CommandProcessor(
         p,
         publisher,

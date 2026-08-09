@@ -38,7 +38,7 @@ from talktoharnesses.runtime.handle import ProcessHandle
 
 logger = logging.getLogger(__name__)
 
-CLIENT_INFO = {"name": "talktoharnesses", "version": "2026.8.0.dev7"}
+CLIENT_INFO = {"name": "talktoharnesses", "version": "2026.8.0.dev8"}
 
 
 def _map_dict(value: object) -> dict[str, Any]:
