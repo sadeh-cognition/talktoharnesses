@@ -8,7 +8,7 @@ import logging
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Protocol, runtime_checkable
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from talktoharnesses.application.delta_batcher import DeltaBatcher
 from talktoharnesses.application.event_dispatcher import (
@@ -17,9 +17,10 @@ from talktoharnesses.application.event_dispatcher import (
     mark_command_delivered,
     mark_command_delivery_started,
 )
+from talktoharnesses.application.handoff import render_handoff
 from talktoharnesses.application.persistence import Persistence
 from talktoharnesses.application.publisher import CommittedEventPublisher
-from talktoharnesses.domain.enums import CommandKind, CommandStatus, ErrorCode
+from talktoharnesses.domain.enums import ActivityStatus, CommandKind, CommandStatus, ErrorCode
 from talktoharnesses.domain.errors import DomainError
 from talktoharnesses.domain.events import (
     ConversationEvent,
@@ -29,12 +30,20 @@ from talktoharnesses.domain.events import (
 from talktoharnesses.domain.models import (
     AnswerInteractionPayload,
     Command,
+    ConversationHarnessBinding,
     InteractionAnswer,
     PendingInteraction,
     SteerPayload,
     SubmitTurnPayload,
+    SwitchHarnessPayload,
 )
-from talktoharnesses.domain.transitions import ConversationState, apply_steer, start_turn
+from talktoharnesses.domain.transitions import (
+    ConversationState,
+    apply_steer,
+    commit_switch,
+    fail_switch,
+    start_turn,
+)
 from talktoharnesses.providers.adapter import (
     HarnessAdapter,
     HarnessInteractionRequest,
@@ -42,7 +51,7 @@ from talktoharnesses.providers.adapter import (
     SteerRequest,
     TurnRequest,
 )
-from talktoharnesses.runtime.manager import RuntimeManager
+from talktoharnesses.runtime.manager import ManagedRuntime, RuntimeManager
 
 logger = logging.getLogger(__name__)
 
@@ -171,7 +180,12 @@ class CommandProcessor:
         commands[command.id] = command
         state = state.model_copy(update={"commands": commands})
 
-        if self._runtime.get_runtime(command.conversation_id) is None:
+        # Switching replaces the binding, so it must never resume the old one first.
+        if command.kind == CommandKind.SWITCH_HARNESS:
+            await self._execute_switch(command, state)
+            return
+
+        if await self._runtime.ensure_binding_current(command.conversation_id, state) is None:
             await self._ensure_runtime(state)
             state = await self._persistence.get_worker_snapshot(command.conversation_id)
             commands = dict(state.commands)
@@ -413,12 +427,221 @@ class CommandProcessor:
         )
         await self._safe_publish(committed)
 
+    async def _execute_switch(self, command: Command, _state: ConversationState) -> None:
+        """Durable harness switch: candidate first, current binding until commit."""
+        assert isinstance(command.payload, SwitchHarnessPayload)
+        conversation_id = command.conversation_id
+        prepared = await self._persistence.prepare_harness_switch(conversation_id)
+        state = prepared.state
+        commands = dict(state.commands)
+        commands[command.id] = command
+        state = state.model_copy(update={"commands": commands})
+        if state.binding is None:
+            raise DomainError(ErrorCode.INVALID_STATE, "conversation has no binding")
+        if (
+            state.active_turn is not None
+            or state.queued_turn is not None
+            or any(a.status is ActivityStatus.RUNNING for a in state.activities.values())
+        ):
+            logger.info(
+                "deferring switch until conversation is idle conversation=%s command=%s",
+                conversation_id,
+                command.id,
+            )
+            await self._release_to_accepted(command, state)
+            return
+
+        configuration = command.payload.configuration
+        binding_id = uuid4()
+        quiesced = False
+        lease_task: asyncio.Task[None] | None = None
+        parent_task = asyncio.current_task()
+
+        async def renew_lease() -> None:
+            assert self._worker_id is not None
+            while True:
+                expires = self._clock() + timedelta(seconds=self._lease_seconds)
+                await self._persistence.renew_command_lease(
+                    command.id,
+                    self._worker_id,
+                    expires,
+                )
+                await asyncio.sleep(max(0.01, self._lease_seconds / 3))
+
+        def stop_on_lost_lease(task: asyncio.Task[None]) -> None:
+            if not task.cancelled() and task.exception() is not None and parent_task is not None:
+                logger.warning("switch command lease renewal failed command=%s", command.id)
+                parent_task.cancel()
+
+        try:
+            if self._worker_id is not None:
+                lease_task = asyncio.create_task(
+                    renew_lease(),
+                    name=f"switch-lease-{command.id}",
+                )
+                lease_task.add_done_callback(stop_on_lost_lease)
+            candidate = await self._runtime.start_candidate(
+                conversation_id=conversation_id,
+                owner_id=state.conversation.owner_id,
+                binding_id=binding_id,
+                configuration=configuration,
+            )
+            await self._runtime.seed_candidate(candidate, render_handoff(prepared.handoff))
+
+            await self._quiesce_pump(conversation_id)
+            quiesced = True
+
+            if lease_task is not None:
+                lease_task.cancel()
+                await asyncio.gather(lease_task, return_exceptions=True)
+                lease_task = None
+                assert self._worker_id is not None
+                await self._persistence.renew_command_lease(
+                    command.id,
+                    self._worker_id,
+                    self._clock() + timedelta(seconds=self._lease_seconds),
+                )
+
+            now = self._clock()
+            result = commit_switch(
+                state,
+                new_binding=ConversationHarnessBinding(
+                    id=binding_id,
+                    conversation_id=conversation_id,
+                    kind=configuration.kind,
+                    configuration=configuration,
+                    harness_instance_id=command.payload.harness_instance_id,
+                    native_session_id=candidate.session.native_session_id,
+                    launch_snapshot=candidate.launch,
+                    created_at=now,
+                ),
+                now=now,
+            )
+            settled = self._settled(command, now=now)
+            commands = dict(result.state.commands)
+            commands[settled.id] = settled
+            committed = await self._persistence.commit_harness_switch(
+                conversation_id,
+                state.conversation.version,
+                result.state.model_copy(
+                    update={
+                        "commands": commands,
+                        # The new native session starts with an empty dedupe set.
+                        "seen_native_ids": frozenset(),
+                        "seen_stream_offsets": frozenset(),
+                    }
+                ),
+                result.events,
+                command=settled,
+                process=candidate.process_record,
+                launch_history_entry=candidate.launch,
+            )
+        except asyncio.CancelledError:
+            # Closing the candidate is non-negotiable even during shutdown.
+            await asyncio.shield(self._runtime.close_candidate(binding_id))
+            if quiesced and self._running:
+                self._ensure_pump(conversation_id)
+            raise
+        except Exception as exc:
+            if lease_task is not None:
+                lease_task.cancel()
+                await asyncio.gather(lease_task, return_exceptions=True)
+                lease_task = None
+            await self._runtime.close_candidate(binding_id)
+            if quiesced:
+                self._ensure_pump(conversation_id)
+            await self._fail_switch(command, exc)
+            return
+        finally:
+            if lease_task is not None:
+                lease_task.cancel()
+                await asyncio.gather(lease_task, return_exceptions=True)
+
+        await self._safe_publish(committed)
+        previous = self._runtime.get_runtime(conversation_id)
+        await self._runtime.promote_candidate(conversation_id, binding_id)
+        if previous is not None:
+            try:
+                await self._runtime.close_replaced_runtime(previous)
+            except Exception:
+                logger.exception(
+                    "failed to close replaced runtime conversation=%s",
+                    conversation_id,
+                )
+        self._ensure_pump(conversation_id)
+
+    async def _fail_switch(self, command: Command, exc: BaseException) -> None:
+        """Settle the switch command and publish only harness_switch_failed."""
+        logger.warning("harness switch failed conversation=%s: %s", command.conversation_id, exc)
+        code = exc.code.value if isinstance(exc, DomainError) else ErrorCode.INVALID_STATE.value
+        message = exc.message if isinstance(exc, DomainError) else "harness switch failed"
+        state = await self._persistence.get_worker_snapshot(command.conversation_id)
+        now = self._clock()
+        result = fail_switch(state, now=now, message=message, error_code=code)
+        settled = self._settled(
+            state.commands.get(command.id, command),
+            now=now,
+        ).model_copy(update={"recovery_result": f"{code}: {message}"})
+        commands = dict(result.state.commands)
+        commands[settled.id] = settled
+        committed = await self._persistence.commit_harness_switch_failure(
+            command.conversation_id,
+            state.conversation.version,
+            result.state.model_copy(update={"commands": commands}),
+            result.events,
+            command=settled,
+        )
+        await self._safe_publish(committed)
+
+    def _settled(self, command: Command, *, now: datetime) -> Command:
+        return command.model_copy(
+            update={
+                "status": CommandStatus.SETTLED,
+                "delivered_at": command.delivered_at or now,
+                "settled_at": now,
+                "worker_id": None,
+                "lease_expires_at": None,
+            }
+        )
+
+    async def _release_to_accepted(self, command: Command, state: ConversationState) -> None:
+        """Return a claimed command to the accepted pool without executing it."""
+        released = command.model_copy(
+            update={
+                "status": CommandStatus.ACCEPTED,
+                "worker_id": None,
+                "lease_expires_at": None,
+                "delivery_started_at": None,
+            }
+        )
+        commands = dict(state.commands)
+        commands[released.id] = released
+        await self._persistence.commit_turn_batch(
+            command.conversation_id,
+            state.conversation.version,
+            state.model_copy(update={"commands": commands}),
+            (),
+            (released,),
+        )
+
+    async def _quiesce_pump(self, conversation_id: UUID) -> None:
+        """Stop the current event pump and flush its pending delta batch."""
+        pump = self._pumps.pop(conversation_id, None)
+        if pump is not None and not pump.done():
+            pump.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await pump
+        batcher = self._batchers.pop(conversation_id, None)
+        if batcher is not None:
+            with contextlib.suppress(Exception):
+                await batcher.close()
+
     async def _ensure_runtime(self, state: ConversationState) -> None:
         if state.binding is None:
             raise DomainError(ErrorCode.INVALID_STATE, "conversation has no binding")
         config = state.binding.configuration
         native = state.binding.native_session_id
-        if native:
+        if native and not state.binding.requires_session_recreation:
             await self._runtime.resume(
                 conversation_id=state.conversation.id,
                 owner_id=state.conversation.owner_id,
@@ -472,9 +695,17 @@ class CommandProcessor:
             managed.adapter.import_seen(snapshot.seen_native_ids, snapshot.seen_stream_offsets)
 
         stream_ended = False
+        stale_runtime = False
         try:
             async for event in managed.adapter.events(managed.session):
-                await self._on_harness_event(conversation_id, event, batcher)
+                if not await self._on_harness_event(
+                    conversation_id,
+                    event,
+                    batcher,
+                    managed_runtime=managed,
+                ):
+                    stale_runtime = True
+                    break
             stream_ended = True
         except asyncio.CancelledError:
             raise
@@ -483,8 +714,28 @@ class CommandProcessor:
             logger.exception("event pump failed for %s", conversation_id)
         finally:
             with contextlib.suppress(Exception):
-                await batcher.flush()
-            if stream_ended and self._running:
+                if stale_runtime:
+                    await batcher.discard()
+                else:
+                    await batcher.flush()
+            current_task = asyncio.current_task()
+            if self._pumps.get(conversation_id) is current_task:
+                self._pumps.pop(conversation_id, None)
+            if self._batchers.get(conversation_id) is batcher:
+                self._batchers.pop(conversation_id, None)
+            if stale_runtime and self._running:
+                try:
+                    snapshot = await self._persistence.get_worker_snapshot(conversation_id)
+                    current = await self._runtime.ensure_binding_current(
+                        conversation_id,
+                        snapshot,
+                    )
+                    if current is None:
+                        await self._ensure_runtime(snapshot)
+                    self._ensure_pump(conversation_id)
+                except Exception:
+                    logger.exception("failed to replace stale runtime for %s", conversation_id)
+            elif stream_ended and self._running:
                 with contextlib.suppress(Exception):
                     await self._runtime.close(conversation_id, reason="event_stream_closed")
 
@@ -493,8 +744,37 @@ class CommandProcessor:
         conversation_id: UUID,
         event: HarnessEvent | HarnessInteractionRequest,
         batcher: DeltaBatcher,
-    ) -> None:
+        *,
+        managed_runtime: ManagedRuntime | None = None,
+    ) -> bool:
         async with self._lock_for(conversation_id):
+            # Chain from pending batcher state when present so version stays coherent.
+            state = batcher.state
+            if state is None:
+                state = await self._persistence.get_worker_snapshot(conversation_id)
+                base_version = state.conversation.version
+                authoritative = state
+            else:
+                authoritative = await self._persistence.get_worker_snapshot(conversation_id)
+                base_version = authoritative.conversation.version
+
+            # A stale runtime must never recreate history for a replaced binding.
+            managed = managed_runtime or self._runtime.get_runtime(conversation_id)
+            binding = authoritative.binding
+            if managed is not None and (
+                binding is None
+                or binding.requires_session_recreation
+                or managed.session.binding_id != binding.id
+                or managed.session.native_session_id != binding.native_session_id
+            ):
+                logger.warning(
+                    "discarding event from stale binding conversation=%s binding=%s",
+                    conversation_id,
+                    managed.session.binding_id,
+                )
+                await self._runtime.close_replaced_runtime(managed, reason="stale_binding")
+                return False
+
             # Interaction requests force-flush through the broker (not the 50ms window).
             if isinstance(event, (HarnessInteractionRequest, InteractionRequestedPayload)):
                 if self._broker is None:
@@ -521,22 +801,12 @@ class CommandProcessor:
                         else None
                     ),
                 )
-                return
+                return True
 
-            # Chain from pending batcher state when present so version stays coherent.
-            state = batcher.state
-            if state is None:
-                state = await self._persistence.get_worker_snapshot(conversation_id)
-            if batcher.state is None:
-                base_version = state.conversation.version
-            else:
-                snap = await self._persistence.get_worker_snapshot(conversation_id)
-                base_version = snap.conversation.version
             now = self._clock()
             try:
                 native_ids: tuple[str, ...] = ()
                 stream_offsets: tuple[str, ...] = ()
-                managed = self._runtime.get_runtime(conversation_id)
                 if managed is not None and isinstance(managed.adapter, _NativeDedupeAdapter):
                     seen_native, seen_offsets = managed.adapter.export_seen()
                     native_ids = tuple(seen_native - state.seen_native_ids)
@@ -571,7 +841,7 @@ class CommandProcessor:
                     )
                     await self._safe_publish(committed)
                 await self._runtime.close(conversation_id, reason="protocol_error")
-                return
+                return True
 
             await batcher.add(
                 base_version=base_version,
@@ -582,6 +852,7 @@ class CommandProcessor:
             )
             if result.terminal:
                 await self._wake_queued_submit(conversation_id)
+            return True
 
     async def _wake_queued_submit(self, conversation_id: UUID) -> None:
         """Re-accept a deferred queued submit so claim can start the next turn."""

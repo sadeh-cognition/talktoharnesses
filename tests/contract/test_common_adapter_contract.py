@@ -31,7 +31,7 @@ def _launch(kind: HarnessKind) -> LaunchSnapshot:
         resolved_executable="/bin/true" if kind is HarnessKind.OPENCODE else None,
         harness_version=caps.version,
         working_directory="/tmp",
-        adapter_version="2026.8.0.dev7",
+        adapter_version="2026.8.0.dev8",
         capabilities=caps,
         model="default",
         mode="default",

@@ -89,6 +89,9 @@ class _Runtime:
     def get_runtime(self, conversation_id: UUID):
         return self.managed
 
+    async def ensure_binding_current(self, conversation_id: UUID, state: Any):
+        return self.managed
+
     async def start(
         self,
         *,
@@ -99,6 +102,11 @@ class _Runtime:
         # Model the lifecycle commit performed by RuntimeManager.start(). This
         # invalidates the snapshot the command worker loaded before lazy start.
         state = await self.persistence.get_worker_snapshot(conversation_id)
+        assert state.binding is not None
+        binding = state.binding.model_copy(update={"native_session_id": "session-1"})
+        state = state.model_copy(
+            update={"binding": binding}
+        )
         next_state, events = append_events(
             state,
             datetime.now(UTC),
@@ -112,10 +120,9 @@ class _Runtime:
             None,
             events,
         )
-        assert state.binding is not None
         session = HarnessSession(
             conversation_id=conversation_id,
-            binding_id=state.binding.id,
+            binding_id=binding.id,
             kind=HarnessKind.GROK,
             native_session_id="session-1",
         )
@@ -135,6 +142,9 @@ class _HangingRuntime:
         self.cancelled = asyncio.Event()
 
     def get_runtime(self, conversation_id: UUID):
+        return None
+
+    async def ensure_binding_current(self, conversation_id: UUID, state: Any):
         return None
 
     async def start(self, **kwargs: Any) -> None:

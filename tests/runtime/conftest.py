@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal
 from uuid import UUID, uuid4
 
 import pytest
@@ -16,11 +17,19 @@ from talktoharnesses.domain import (
     HarnessConfiguration,
     HarnessKind,
     InteractionAnswer,
+    InteractionKind,
     LaunchSnapshot,
     new_conversation_state,
 )
-from talktoharnesses.domain.events import HarnessEvent, TurnStartedPayload
-from talktoharnesses.domain.models import ConversationHarnessBinding
+from talktoharnesses.domain.events import (
+    AssistantMessageCompletedPayload,
+    HarnessEvent,
+    InteractionRequestedPayload,
+    TurnCompletedPayload,
+    TurnFailedPayload,
+    TurnStartedPayload,
+)
+from talktoharnesses.domain.models import ApprovalRequestPayload, ConversationHarnessBinding
 from talktoharnesses.domain.transitions import ConversationState
 from talktoharnesses.providers import (
     AdapterRegistry,
@@ -31,6 +40,8 @@ from talktoharnesses.providers import (
     TurnRequest,
 )
 from talktoharnesses.runtime import RuntimePolicy
+
+SeedReply = Literal["completed", "failed", "foreign_turn", "interaction", "silent", "hang"]
 
 
 @pytest.fixture
@@ -132,13 +143,16 @@ class FakeAdapter:
         hang_interrupt: bool = False,
         hang_close: bool = False,
         start_delay: float = 0.0,
+        seed_reply: SeedReply = "completed",
     ) -> None:
         self.hang_start = hang_start
         self.hang_interrupt = hang_interrupt
         self.hang_close = hang_close
         self.start_delay = start_delay
+        self.seed_reply = seed_reply
         self.closed = False
         self.interrupt_calls = 0
+        self.submissions: list[TurnRequest] = []
         self.instance_id = uuid4()
         FakeAdapter.instances.append(self)
 
@@ -176,7 +190,7 @@ class FakeAdapter:
         )
 
     async def submit(self, session: HarnessSession, request: TurnRequest) -> None:
-        return None
+        self.submissions.append(request)
 
     async def steer(self, session: HarnessSession, request: SteerRequest) -> bool:
         return False
@@ -197,9 +211,42 @@ class FakeAdapter:
 
     def events(self, session: HarnessSession) -> AsyncIterator[HarnessEvent]:
         async def _gen() -> AsyncIterator[HarnessEvent]:
-            yield TurnStartedPayload(turn_id=uuid4())
+            if not self.submissions:
+                yield TurnStartedPayload(turn_id=uuid4())
+                return
+            for event in self._seed_events(self.submissions[-1].turn_id):
+                yield event
+            if self.seed_reply == "hang":
+                import asyncio
+
+                await asyncio.sleep(3600)
 
         return _gen()
+
+    def _seed_events(self, turn_id: UUID) -> tuple[HarnessEvent, ...]:
+        """Reply script for one seeded turn; "silent" ends without a terminal."""
+        if self.seed_reply == "completed":
+            return (
+                # Content must be drained and discarded, never materialized.
+                AssistantMessageCompletedPayload(turn_id=turn_id, message_id=uuid4(), text="ack"),
+                TurnCompletedPayload(turn_id=turn_id, terminal_reason="end_turn"),
+            )
+        if self.seed_reply == "failed":
+            return (
+                TurnFailedPayload(turn_id=turn_id, error_code="provider_error", message="boom"),
+            )
+        if self.seed_reply == "foreign_turn":
+            return (TurnCompletedPayload(turn_id=uuid4(), terminal_reason="end_turn"),)
+        if self.seed_reply == "interaction":
+            return (
+                InteractionRequestedPayload(
+                    turn_id=turn_id,
+                    interaction_id=uuid4(),
+                    kind=InteractionKind.APPROVAL,
+                    request=ApprovalRequestPayload(tool_name="bash"),
+                ),
+            )
+        return ()
 
     async def close(self, session: HarnessSession) -> None:
         if self.hang_close:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Sequence
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import TypeVar, cast
 from uuid import UUID
 
@@ -13,12 +13,21 @@ from django.db import connection, models, transaction
 from pydantic import BaseModel
 
 from talktoharnesses.application.cursors import clamp_page_limit, encode_cursor
+from talktoharnesses.application.handoff import (
+    HandoffDocument,
+    HandoffMessage,
+    HandoffTool,
+    handoff_sort_key,
+)
+from talktoharnesses.application.persistence import PruneResult, SwitchPreparation
+from talktoharnesses.application.search_documents import normalize_search_terms
 from talktoharnesses.domain.approval_matching import (
     InteractionMatchContext,
     rule_matches_request,
     select_matching_rule,
 )
 from talktoharnesses.domain.enums import (
+    ActivityStatus,
     ApprovalDecision,
     ApprovalRuleDecision,
     CommandStatus,
@@ -26,9 +35,12 @@ from talktoharnesses.domain.enums import (
     HarnessKind,
     InteractionKind,
     InteractionStatus,
+    MessageRole,
+    ToolOutcome,
+    TurnStatus,
 )
 from talktoharnesses.domain.errors import DomainError
-from talktoharnesses.domain.events import ConversationEvent
+from talktoharnesses.domain.events import ConversationEvent, event_turn_id
 from talktoharnesses.domain.models import (
     ActivityProjection,
     ApprovalAction,
@@ -37,6 +49,7 @@ from talktoharnesses.domain.models import (
     ApprovalRule,
     ApprovalRuleProjection,
     ApprovalRuleScope,
+    CanonicalToolResult,
     Command,
     ConversationDetail,
     ConversationShell,
@@ -57,7 +70,13 @@ from talktoharnesses.domain.models import (
     ToolProjection,
     TurnProjection,
 )
-from talktoharnesses.domain.transitions import ConversationState, submit_interaction_answer
+from talktoharnesses.domain.transitions import (
+    ConversationState,
+    interrupt_turn,
+    mark_requires_recreation,
+    rotate_session,
+    submit_interaction_answer,
+)
 
 from .models import (
     ActivityRecord,
@@ -73,7 +92,6 @@ from .models import (
     MessageRecord,
     PlanRecord,
     RuntimeProcess,
-    SearchDocument,
     ToolRecord,
     TurnRecord,
 )
@@ -99,6 +117,14 @@ def _json(model: BaseModel) -> dict[str, object]:
     return model.model_dump(mode="json")
 
 
+_TERMINAL_TURN_STATUSES = (
+    TurnStatus.COMPLETED.value,
+    TurnStatus.INTERRUPTED.value,
+    TurnStatus.FAILED.value,
+    TurnStatus.OUTCOME_UNKNOWN.value,
+)
+
+
 ModelT = TypeVar("ModelT", bound=BaseModel)
 
 
@@ -106,6 +132,58 @@ def _load(model: type[ModelT], value: object) -> ModelT:
     # Strict domain models intentionally accept serialized UUIDs/enums only
     # through Pydantic's JSON validation path.
     return model.model_validate_json(json.dumps(value))
+
+
+def _insert_events(
+    conversation_id: UUID,
+    events: Sequence[ConversationEvent],
+    state: ConversationState,
+) -> None:
+    """Insert committed event rows with their turn link for turn-owned deletion."""
+    interaction_turn_ids = {
+        interaction_id: interaction.turn_id
+        for interaction_id, interaction in state.interactions.items()
+    }
+    ConversationEventRecord.objects.bulk_create(
+        [
+            ConversationEventRecord(
+                event_id=event.event_id,
+                conversation_id=conversation_id,
+                sequence=event.sequence,
+                timestamp=event.timestamp,
+                type=event.type,
+                payload=_json(event),
+                turn_id=event_turn_id(event, interaction_turn_ids),
+            )
+            for event in events
+        ]
+    )
+
+
+def _full_text_matches(terms: tuple[str, ...]) -> list[object]:
+    """Return conversation IDs whose search document contains every term.
+
+    Both backends query the private index built by ``0006_phase8_fts`` from the
+    same normalized term stream; owner, soft-delete, cursor, and limit
+    predicates stay on ``ConversationAggregate``. The PostgreSQL column and
+    SQLite virtual table are private to this module so a SQLite install never
+    imports ``django.contrib.postgres`` or Psycopg.
+    """
+    if connection.vendor == "postgresql":
+        sql = (
+            "SELECT conversation_id FROM talktoharnesses_search_document "
+            "WHERE search_vector @@ plainto_tsquery('simple', %s)"
+        )
+        parameter = " ".join(terms)
+    else:
+        sql = (
+            "SELECT conversation_id FROM talktoharnesses_search_document_fts "
+            "WHERE talktoharnesses_search_document_fts MATCH %s"
+        )
+        parameter = " AND ".join(f'"{term}"' for term in terms)
+    with connection.cursor() as cursor:
+        cursor.execute(sql, [parameter])
+        return [row[0] for row in cursor.fetchall()]
 
 
 def _conflict(expected: int, actual: int) -> DomainError:
@@ -344,7 +422,11 @@ class DjangoPersistence:
         worker_id: str,
         expires_at: datetime,
     ) -> None:
-        row = CommandRecord.objects.filter(command_id=command_id, worker_id=worker_id).first()
+        row = CommandRecord.objects.filter(
+            command_id=command_id,
+            worker_id=worker_id,
+            status=CommandStatus.CLAIMED.value,
+        ).first()
         if row is None:
             raise DomainError(ErrorCode.INVALID_STATE, "command lease not found for worker")
         command = _load(Command, row.data).model_copy(update={"lease_expires_at": expires_at})
@@ -412,15 +494,7 @@ class DjangoPersistence:
             events,
         )
         for command in commands:
-            updated = CommandRecord.objects.filter(command_id=command.id).update(
-                **self._command_values(command)
-            )
-            if not updated:
-                raise DomainError(
-                    ErrorCode.INVALID_STATE,
-                    "command not found",
-                    details={"command_id": str(command.id)},
-                )
+            self._settle_command(command)
         return committed
 
     async def commit_runtime_lifecycle(
@@ -499,19 +573,7 @@ class DjangoPersistence:
         elif launch_history_entry is not None:
             raise DomainError(ErrorCode.INVALID_STATE, "launch history requires a process")
 
-        ConversationEventRecord.objects.bulk_create(
-            [
-                ConversationEventRecord(
-                    event_id=event.event_id,
-                    conversation_id=conversation_id,
-                    sequence=event.sequence,
-                    timestamp=event.timestamp,
-                    type=event.type,
-                    payload=_json(event),
-                )
-                for event in events
-            ]
-        )
+        _insert_events(conversation_id, events, state)
         from talktoharnesses.django.materialize import materialize_projections
 
         materialize_projections(state, events)
@@ -1225,19 +1287,7 @@ class DjangoPersistence:
         if state.conversation.next_event_sequence != expected_sequence:
             raise DomainError(ErrorCode.OPTIMISTIC_CONFLICT, "aggregate sequence conflict")
         self._store_aggregate(row, state)
-        ConversationEventRecord.objects.bulk_create(
-            [
-                ConversationEventRecord(
-                    event_id=event.event_id,
-                    conversation_id=conversation_id,
-                    sequence=event.sequence,
-                    timestamp=event.timestamp,
-                    type=event.type,
-                    payload=_json(event),
-                )
-                for event in events
-            ]
-        )
+        _insert_events(conversation_id, events, state)
         for command in commands:
             CommandRecord.objects.update_or_create(
                 command_id=command.id,
@@ -1252,19 +1302,387 @@ class DjangoPersistence:
         materialize_projections(state, events)
         return events
 
-    async def delete_expired_turn_aggregates(self, cutoff: datetime) -> int:
-        return await sync_to_async(self._delete_expired, thread_sensitive=True)(cutoff)
+    async def read_retained_handoff(
+        self,
+        conversation_id: UUID,
+        *,
+        owner_id: str | None = None,
+    ) -> HandoffDocument:
+        return await sync_to_async(self._read_retained_handoff, thread_sensitive=True)(
+            conversation_id, owner_id
+        )
 
-    def _delete_expired(self, cutoff: datetime) -> int:
-        # Turn-level retention requires dedicated turn rows; aggregate JSON is
-        # never deleted as a proxy because it is the canonical conversation.
-        return 0
+    def _read_retained_handoff(
+        self,
+        conversation_id: UUID,
+        owner_id: str | None,
+    ) -> HandoffDocument:
+        if owner_id is not None:
+            self._require_owned_conversation(conversation_id, owner_id)
+        entries: list[HandoffMessage | HandoffTool] = []
+        for message in MessageRecord.objects.filter(conversation_id=conversation_id).select_related(
+            "turn"
+        ):
+            entries.append(
+                HandoffMessage(
+                    id=message.message_id,
+                    turn_id=message.turn.turn_id,
+                    role=MessageRole(message.role),
+                    text=message.text,
+                    interrupted=message.interrupted,
+                    turn_order_index=message.turn.order_index,
+                    order_index=message.order_index,
+                )
+            )
+        for tool in ToolRecord.objects.filter(conversation_id=conversation_id).select_related(
+            "turn"
+        ):
+            # CanonicalToolResult owns the UTF-8-safe 2 KiB tail rule; full
+            # output is dropped rather than handed to another harness.
+            canonical = CanonicalToolResult(
+                id=tool.tool_id,
+                turn_id=tool.turn.turn_id,
+                tool_name=tool.tool_name,
+                arguments=dict(tool.arguments),
+                outcome=ToolOutcome(tool.outcome),
+                exit_status=tool.exit_status,
+                paths=tuple(str(path) for path in (tool.paths or [])),
+                output_tail=tool.output_tail,
+            )
+            entries.append(
+                HandoffTool(
+                    **canonical.model_dump(exclude={"full_output"}),
+                    turn_order_index=tool.turn.order_index,
+                    order_index=tool.order_index,
+                )
+            )
+        return HandoffDocument(entries=tuple(sorted(entries, key=handoff_sort_key)))
+
+    async def prepare_harness_switch(self, conversation_id: UUID) -> SwitchPreparation:
+        return await sync_to_async(self._prepare_harness_switch, thread_sensitive=True)(
+            conversation_id
+        )
+
+    @transaction.atomic
+    def _prepare_harness_switch(self, conversation_id: UUID) -> SwitchPreparation:
+        row = (
+            ConversationAggregate.objects.select_for_update()
+            .filter(conversation_id=conversation_id)
+            .first()
+        )
+        if row is None:
+            raise DomainError(ErrorCode.NOT_FOUND, "conversation not found")
+        return SwitchPreparation(
+            state=_load(ConversationState, row.state),
+            handoff=self._read_retained_handoff(conversation_id, None),
+        )
+
+    async def commit_harness_switch(
+        self,
+        conversation_id: UUID,
+        expected_version: int,
+        state: ConversationState,
+        events: Sequence[ConversationEvent],
+        *,
+        command: Command,
+        process: ProcessRecord | None = None,
+        launch_history_entry: LaunchSnapshot | None = None,
+    ) -> Sequence[ConversationEvent]:
+        return await sync_to_async(self._commit_harness_switch, thread_sensitive=True)(
+            conversation_id,
+            expected_version,
+            state,
+            tuple(events),
+            command,
+            process,
+            launch_history_entry,
+        )
+
+    @transaction.atomic
+    def _commit_harness_switch(
+        self,
+        conversation_id: UUID,
+        expected_version: int,
+        state: ConversationState,
+        events: tuple[ConversationEvent, ...],
+        command: Command,
+        process: ProcessRecord | None,
+        launch_history_entry: LaunchSnapshot | None,
+    ) -> tuple[ConversationEvent, ...]:
+        # Binding history follows ``state.binding``: projection materialization
+        # closes the previous active row and writes the accepted candidate's.
+        committed = self._commit_runtime_lifecycle(
+            conversation_id,
+            expected_version,
+            state,
+            process,
+            launch_history_entry,
+            events,
+        )
+        self._settle_command(command)
+        return committed
+
+    async def commit_harness_switch_failure(
+        self,
+        conversation_id: UUID,
+        expected_version: int,
+        state: ConversationState,
+        events: Sequence[ConversationEvent],
+        *,
+        command: Command,
+    ) -> Sequence[ConversationEvent]:
+        # The unchanged current binding is re-synced, never closed or replaced.
+        return await self.commit_turn_batch(
+            conversation_id, expected_version, state, events, (command,)
+        )
+
+    def _settle_command(self, command: Command) -> None:
+        updated = CommandRecord.objects.filter(command_id=command.id).update(
+            **self._command_values(command)
+        )
+        if not updated:
+            raise DomainError(
+                ErrorCode.INVALID_STATE,
+                "command not found",
+                details={"command_id": str(command.id)},
+            )
+
+    async def list_cleanup_conversation_ids(self) -> Sequence[UUID]:
+        return await sync_to_async(self._list_cleanup_conversation_ids, thread_sensitive=True)()
+
+    def _list_cleanup_conversation_ids(self) -> Sequence[UUID]:
+        return list(
+            ConversationAggregate.objects.filter(deleted_at__isnull=True)
+            .order_by("conversation_id")
+            .values_list("conversation_id", flat=True)
+        )
+
+    async def prune_expired_history(
+        self,
+        conversation_id: UUID,
+        cutoff: datetime,
+    ) -> PruneResult | None:
+        return await sync_to_async(self._prune_expired_history, thread_sensitive=True)(
+            conversation_id, cutoff
+        )
+
+    @transaction.atomic
+    def _prune_expired_history(
+        self,
+        conversation_id: UUID,
+        cutoff: datetime,
+    ) -> PruneResult | None:
+        from talktoharnesses.django.materialize import materialize_projections
+
+        row = (
+            ConversationAggregate.objects.select_for_update()
+            .filter(conversation_id=conversation_id)
+            .first()
+        )
+        if row is None:
+            return None
+        state = _load(ConversationState, row.state)
+        if state.binding is None:
+            return None
+        if any(activity.status is ActivityStatus.RUNNING for activity in state.activities.values()):
+            return None
+        active = state.active_turn
+        waiting_expired = (
+            active is not None
+            and active.status is TurnStatus.WAITING
+            and (active.started_at or active.created_at) <= cutoff
+        )
+        if active is not None and not waiting_expired:
+            return None
+
+        expired = set(
+            TurnRecord.objects.filter(
+                conversation_id=conversation_id,
+                status__in=_TERMINAL_TURN_STATUSES,
+                completed_at__lte=cutoff,
+            ).values_list("turn_id", flat=True)
+        )
+        if active is not None and waiting_expired:
+            expired.add(active.id)
+        if not expired:
+            return None
+
+        now = datetime.now(UTC)
+        events: tuple[ConversationEvent, ...] = ()
+        if waiting_expired:
+            # Cancels the turn's open interactions and settles its command
+            # before the answer could reach a session about to be invalidated.
+            interrupted = interrupt_turn(state, now=now, reason="retention")
+            state = interrupted.state
+            events += interrupted.events
+
+        state = self._delete_turn_history(conversation_id, state, expired)
+
+        binding = state.binding
+        assert binding is not None
+        previous_native_session_id = binding.native_session_id
+        rotated = rotate_session(state, now=now)
+        state = rotated.state
+        events += rotated.events
+
+        self._store_aggregate(row, state)
+        _insert_events(conversation_id, events, state)
+        # Events of deleted turns leave valid sequence gaps; new events never
+        # reuse them.
+        ConversationEventRecord.objects.filter(
+            conversation_id=conversation_id, turn_id__in=expired
+        ).delete()
+        materialize_projections(state, events)
+        return PruneResult(
+            conversation_id=conversation_id,
+            owner_id=state.conversation.owner_id,
+            binding_id=binding.id,
+            previous_native_session_id=previous_native_session_id,
+            configuration=binding.configuration,
+            handoff=self._read_retained_handoff(conversation_id, None),
+            version=state.conversation.version,
+            session_rotated_events=events,
+            pruned_turn_count=len(expired),
+            cancelled_waiting_count=1 if waiting_expired else 0,
+        )
+
+    def _delete_turn_history(
+        self,
+        conversation_id: UUID,
+        state: ConversationState,
+        expired: set[UUID],
+    ) -> ConversationState:
+        """Delete every turn-owned row and drop the same turns from aggregate JSON.
+
+        Messages, reasoning, plans, tools, and usage carry real ``TurnRecord``
+        foreign keys and are removed by the cascade; rows linked by turn UUID
+        are deleted explicitly.
+        """
+        removed_interactions = set(
+            InteractionRecord.objects.filter(
+                conversation_id=conversation_id, turn_id__in=expired
+            ).values_list("interaction_id", flat=True)
+        ) | {i.id for i in state.interactions.values() if i.turn_id in expired}
+        InteractionAnswerRecord.objects.filter(interaction_id__in=removed_interactions).delete()
+        InteractionRecord.objects.filter(interaction_id__in=removed_interactions).delete()
+        ActivityRecord.objects.filter(
+            conversation_id=conversation_id, parent_turn_id__in=expired
+        ).delete()
+        CommandRecord.objects.filter(
+            conversation_id=conversation_id, target_turn_id__in=expired
+        ).delete()
+        TurnRecord.objects.filter(conversation_id=conversation_id, turn_id__in=expired).delete()
+        return state.model_copy(
+            update={
+                "commands": {
+                    command_id: command
+                    for command_id, command in state.commands.items()
+                    if command.target_turn_id not in expired
+                },
+                "interactions": {
+                    interaction_id: interaction
+                    for interaction_id, interaction in state.interactions.items()
+                    if interaction_id not in removed_interactions
+                },
+                "answers": {
+                    interaction_id: answer
+                    for interaction_id, answer in state.answers.items()
+                    if interaction_id not in removed_interactions
+                },
+                "activities": {
+                    activity_id: activity
+                    for activity_id, activity in state.activities.items()
+                    if activity.parent_turn_id not in expired
+                },
+            }
+        )
+
+    async def commit_session_rotation(
+        self,
+        conversation_id: UUID,
+        expected_version: int,
+        *,
+        native_session_id: str | None,
+        launch_snapshot: LaunchSnapshot | None,
+    ) -> None:
+        await sync_to_async(self._commit_session_rotation, thread_sensitive=True)(
+            conversation_id, expected_version, native_session_id, launch_snapshot
+        )
+
+    @transaction.atomic
+    def _commit_session_rotation(
+        self,
+        conversation_id: UUID,
+        expected_version: int,
+        native_session_id: str | None,
+        launch_snapshot: LaunchSnapshot | None,
+    ) -> None:
+        row, state = self._lock_for_binding_update(conversation_id, expected_version)
+        assert state.binding is not None
+        binding = state.binding.model_copy(
+            update={
+                "native_session_id": native_session_id,
+                "launch_snapshot": launch_snapshot or state.binding.launch_snapshot,
+                "requires_session_recreation": False,
+            }
+        )
+        self._store_binding_update(row, state.model_copy(update={"binding": binding}))
+
+    async def commit_rotation_requires_recreation(
+        self,
+        conversation_id: UUID,
+        expected_version: int,
+    ) -> None:
+        await sync_to_async(self._commit_rotation_requires_recreation, thread_sensitive=True)(
+            conversation_id, expected_version
+        )
+
+    @transaction.atomic
+    def _commit_rotation_requires_recreation(
+        self,
+        conversation_id: UUID,
+        expected_version: int,
+    ) -> None:
+        row, state = self._lock_for_binding_update(conversation_id, expected_version)
+        marked = mark_requires_recreation(state, now=datetime.now(UTC))
+        self._store_binding_update(row, marked.state)
+
+    def _lock_for_binding_update(
+        self,
+        conversation_id: UUID,
+        expected_version: int,
+    ) -> tuple[ConversationAggregate, ConversationState]:
+        row = (
+            ConversationAggregate.objects.select_for_update()
+            .filter(conversation_id=conversation_id)
+            .first()
+        )
+        if row is None:
+            raise not_found("conversation")
+        if row.version != expected_version:
+            raise _conflict(expected_version, row.version)
+        state = _load(ConversationState, row.state)
+        if state.binding is None:
+            raise DomainError(ErrorCode.INVALID_STATE, "no binding to rotate")
+        return row, state
+
+    def _store_binding_update(
+        self,
+        row: ConversationAggregate,
+        state: ConversationState,
+    ) -> None:
+        from talktoharnesses.django.materialize import sync_active_binding
+
+        self._store_aggregate(row, state)
+        sync_active_binding(state)
 
     async def purge_soft_deleted(self, cutoff: datetime) -> int:
         return await sync_to_async(self._purge_soft_deleted, thread_sensitive=True)(cutoff)
 
     def _purge_soft_deleted(self, cutoff: datetime) -> int:
-        rows = ConversationAggregate.objects.filter(deleted_at__lt=cutoff)
+        # ``<=`` so a boundary row is purged the run its cutoff equals it, and
+        # a rerun with the same cutoff stays idempotent.
+        rows = ConversationAggregate.objects.filter(deleted_at__lte=cutoff)
         count = rows.count()
         rows.delete()
         return count
@@ -1336,6 +1754,7 @@ class DjangoPersistence:
             "status": command.status.value,
             "worker_id": command.worker_id,
             "lease_expires_at": command.lease_expires_at,
+            "target_turn_id": command.target_turn_id,
             "data": _json(command),
         }
 
@@ -1498,15 +1917,11 @@ class DjangoPersistence:
         limit: int,
     ) -> Page[ConversationShell]:
         page_size = clamp_page_limit(limit)
-        needle = " ".join(query.split()).casefold()
-        if not needle:
+        terms = normalize_search_terms(query)
+        if not terms:
             return Page(items=(), next_cursor=None)
-        matching_ids = SearchDocument.objects.filter(
-            owner_id=owner_id,
-            normalized_text__icontains=needle,
-        ).values_list("conversation_id", flat=True)
         qs = ConversationAggregate.objects.filter(
-            conversation_id__in=matching_ids,
+            conversation_id__in=_full_text_matches(terms),
             owner_id=owner_id,
             deleted_at__isnull=True,
         ).order_by("-updated_at", "-conversation_id")
@@ -1910,19 +2325,7 @@ class DjangoPersistence:
             raise DomainError(ErrorCode.OPTIMISTIC_CONFLICT, "aggregate sequence conflict")
 
         self._store_aggregate(row, state)
-        ConversationEventRecord.objects.bulk_create(
-            [
-                ConversationEventRecord(
-                    event_id=event.event_id,
-                    conversation_id=conversation_id,
-                    sequence=event.sequence,
-                    timestamp=event.timestamp,
-                    type=event.type,
-                    payload=_json(event),
-                )
-                for event in events
-            ]
-        )
+        _insert_events(conversation_id, events, state)
         for command in commands:
             CommandRecord.objects.update_or_create(
                 command_id=command.id,

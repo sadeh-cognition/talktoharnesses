@@ -52,7 +52,7 @@ async def test_live_opencode_probe_and_create(tmp_path: Path) -> None:
     launch = LaunchSnapshot(
         harness_version=caps.version,
         working_directory=str(tmp_path),
-        adapter_version="2026.8.0.dev7",
+        adapter_version="2026.8.0.dev8",
         capabilities=caps,
         resolved_executable=executable,
     )

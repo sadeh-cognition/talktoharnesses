@@ -147,10 +147,17 @@ def test_get_service_fails_closed_without_lifespan() -> None:
     assert "not started" in exc.value.message
 
 
-def test_codex_without_broker_compatible_approval_api_is_not_registered() -> None:
+def test_default_registry_contains_all_phase7_adapters() -> None:
     service = asgi_mod._build_service()  # pyright: ignore[reportPrivateUsage]
-    assert (
-        HarnessKind.CODEX not in service._registry.kinds()  # pyright: ignore[reportPrivateUsage]
+    kinds = service._registry.kinds()  # pyright: ignore[reportPrivateUsage]
+    assert kinds == frozenset(
+        {
+            HarnessKind.GROK,
+            HarnessKind.CURSOR,
+            HarnessKind.CODEX,
+            HarnessKind.CLAUDE,
+            HarnessKind.OPENCODE,
+        }
     )
 
 

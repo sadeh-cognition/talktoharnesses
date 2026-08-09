@@ -15,7 +15,7 @@ from talktoharnesses.providers.compatibility import render_supported_harnesses_m
 
 def test_load_and_match_release() -> None:
     doc = load_codex_compatibility()
-    assert doc.adapter_version == "2026.8.0.dev7"
+    assert doc.adapter_version == "2026.8.0.dev8"
     assert doc.create_matrix == []
     assert doc.resume_matrix == []
     release = match_release(sdk_version="0.144.4", runtime_version="0.144.4", platform="linux")
