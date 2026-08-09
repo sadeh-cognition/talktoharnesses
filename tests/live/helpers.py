@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Any, cast
 from uuid import UUID, uuid4
 
 from talktoharnesses import __version__
@@ -38,8 +38,12 @@ def make_launch(
 
 
 def unique_prompt(prefix: str) -> str:
+    token = uuid4().hex[:12]
+    # Workspace-relative write keeps Claude from treating /tmp markers as injection.
+    # Explicit shell + python3 keeps broker approvals on Codex/Grok/Cursor allowlists.
     return (
-        f"{prefix} token={uuid4().hex[:12]}. Use the native shell tool to run `pwd` "
+        f"{prefix} token={token}. Use the native shell tool to run "
+        f"`python3 -c \"open('live-{token}.txt','w').write('live-ok')\"` "
         "and request permission through the provider before completing."
     )
 
@@ -90,19 +94,48 @@ def assert_no_duplicate_first_turn(
 
 async def _answer_interaction(adapter: Any, session: HarnessSession, item: object) -> bool:
     """Answer one deferred interaction as soon as it appears on the stream."""
+    payload: InteractionRequestedPayload | None = None
     if isinstance(item, HarnessInteractionRequest):
-        interaction_id = item.payload.interaction_id
+        payload = item.payload
     elif isinstance(item, InteractionRequestedPayload):
-        interaction_id = item.interaction_id
+        payload = item
     else:
         return False
-    await adapter.answer_interaction(
-        session,
-        InteractionAnswer(
-            interaction_id=interaction_id,
-            decision=ApprovalDecision.ALLOW_ONCE,
-        ),
-    )
+    request = payload.request
+    if getattr(request, "kind", None) == "structured_question":
+        answers: list[list[str]] = []
+        for question in getattr(request, "questions", ()) or ():
+            options: list[object] = []
+            if isinstance(question, dict):
+                q = cast(dict[str, Any], question)
+                maybe_options = q.get("options")
+                if isinstance(maybe_options, list):
+                    options.extend(cast(list[object], maybe_options))
+            label = "yes"
+            if options:
+                first = options[0]
+                if isinstance(first, dict):
+                    option_label = cast(dict[str, Any], first).get("label")
+                    if isinstance(option_label, str):
+                        label = option_label
+                elif isinstance(first, str):
+                    label = first
+            answers.append([label])
+        await adapter.answer_interaction(
+            session,
+            InteractionAnswer(
+                interaction_id=payload.interaction_id,
+                answers={"answers": answers or [["yes"]]},
+            ),
+        )
+    else:
+        await adapter.answer_interaction(
+            session,
+            InteractionAnswer(
+                interaction_id=payload.interaction_id,
+                decision=ApprovalDecision.ALLOW_ONCE,
+            ),
+        )
     return True
 
 
@@ -111,6 +144,7 @@ async def collect_turn(
     session: HarnessSession,
     *,
     timeout: float = 180.0,
+    require_interaction: bool = True,
 ) -> list[Any]:
     """Drain one turn, answering interactions until a terminal event arrives."""
     events: list[Any] = []
@@ -129,5 +163,6 @@ async def collect_turn(
         raise AssertionError("live event stream ended without a terminal event")
 
     await asyncio.wait_for(_run(), timeout=timeout)
-    assert interaction_seen, "live turn completed without a deferred interaction"
+    if require_interaction:
+        assert interaction_seen, "live turn completed without a deferred interaction"
     return events

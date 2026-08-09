@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal
+import shlex
+from typing import Any, Literal, cast
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 _STRICT = ConfigDict(extra="forbid", frozen=True)
+_STRICT_ALIASED = ConfigDict(extra="forbid", frozen=True, populate_by_name=True)
 
 
 class CodexTurnUsage(BaseModel):
@@ -78,6 +80,83 @@ class CodexItemCompleted(BaseModel):
     item_id: str
     item_type: str
     status: str | None = None
+
+
+class CodexExecpolicyAmendment(BaseModel):
+    model_config = _STRICT_ALIASED
+
+    prefix: list[str] | None = None
+
+
+class CodexCommandApprovalParams(BaseModel):
+    """Typed params for item/commandExecution/requestApproval."""
+
+    model_config = _STRICT_ALIASED
+
+    thread_id: str | None = Field(default=None, alias="threadId")
+    turn_id: str | None = Field(default=None, alias="turnId")
+    item_id: str | None = Field(default=None, alias="itemId")
+    command: list[str] | None = None
+    cwd: str | None = None
+    reason: str | None = None
+    risk: Any | None = None
+    parsed_cmd: list[Any] | None = Field(default=None, alias="parsedCmd")
+    proposed_execpolicy_amendment: CodexExecpolicyAmendment | None = Field(
+        default=None,
+        alias="proposedExecpolicyAmendment",
+    )
+    started_at_ms: int | None = Field(default=None, alias="startedAtMs")
+    environment_id: str | None = Field(default=None, alias="environmentId")
+    command_actions: list[Any] | None = Field(default=None, alias="commandActions")
+    available_decisions: list[Any] | None = Field(default=None, alias="availableDecisions")
+
+    @field_validator("command", mode="before")
+    @classmethod
+    def _coerce_command(cls, value: object) -> object:
+        if isinstance(value, str):
+            return shlex.split(value)
+        return value
+
+    @field_validator("proposed_execpolicy_amendment", mode="before")
+    @classmethod
+    def _coerce_amendment(cls, value: object) -> object:
+        if isinstance(value, list):
+            return {"prefix": [str(item) for item in cast(list[object], value)]}
+        return value
+
+
+class CodexFileChangeEntry(BaseModel):
+    model_config = _STRICT_ALIASED
+
+    path: str
+    kind: str | None = None
+
+
+class CodexFileApprovalParams(BaseModel):
+    """Typed params for item/fileChange/requestApproval."""
+
+    model_config = _STRICT_ALIASED
+
+    thread_id: str | None = Field(default=None, alias="threadId")
+    turn_id: str | None = Field(default=None, alias="turnId")
+    item_id: str | None = Field(default=None, alias="itemId")
+    files: list[CodexFileChangeEntry] | None = None
+    reason: str | None = None
+
+
+CodexApprovalParams = CodexCommandApprovalParams | CodexFileApprovalParams
+
+_COMMAND_APPROVAL_METHOD = "item/commandExecution/requestApproval"
+_FILE_APPROVAL_METHOD = "item/fileChange/requestApproval"
+
+
+def parse_codex_approval_params(method: str, params: dict[str, Any] | None) -> CodexApprovalParams:
+    raw = params or {}
+    if method == _COMMAND_APPROVAL_METHOD:
+        return CodexCommandApprovalParams.model_validate(raw)
+    if method == _FILE_APPROVAL_METHOD:
+        return CodexFileApprovalParams.model_validate(raw)
+    raise ValueError(f"unsupported codex approval method: {method!r}")
 
 
 CodexNotification = (

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, cast
 from uuid import UUID, uuid5
 
 from talktoharnesses.domain.enums import ApprovalDecision, ErrorCode, InteractionKind
@@ -19,7 +19,7 @@ from talktoharnesses.domain.events import (
     TurnInterruptedPayload,
     TurnOutcomeUnknownPayload,
 )
-from talktoharnesses.domain.models import ApprovalRequestPayload
+from talktoharnesses.domain.models import ApprovalRequestPayload, StructuredQuestionPayload
 from talktoharnesses.providers.opencode.schemas import parse_server_event
 
 _NS = UUID("d0f6b2c4-5e7a-619c-bd3f-4a5b6c7d8e9f")
@@ -71,22 +71,32 @@ class OpenCodeNormalizer:
     def on_server_event(self, raw: dict[str, Any]) -> list[HarnessEvent]:
         event = parse_server_event(raw)
         props = event.properties
-        session_id = props.get("sessionID") or props.get("session_id")
-        if isinstance(session_id, str) and not self.accepts_session(session_id):
-            return []
-        if event.type == "server.connected":
-            return []
-        if event.type == "message.part.delta":
-            return self._part_delta(props)
-        if event.type == "session.status":
-            return self._session_status(props)
-        if event.type == "permission.asked":
-            return []
+        # Child discovery must run before session filtering so parentID events
+        # whose sessionID is the new child are not dropped as foreign.
         if event.type.startswith("session.") and props.get("parentID") == self._native_session_id:
             child = props.get("sessionID")
             if isinstance(child, str):
                 self._child_sessions.add(child)
             return []
+        session_id = props.get("sessionID") or props.get("session_id")
+        if isinstance(session_id, str) and not self.accepts_session(session_id):
+            return []
+        if event.type in {
+            "server.connected",
+            "server.heartbeat",
+            "permission.asked",
+            "permission.replied",
+            "question.asked",
+            "question.replied",
+            "question.rejected",
+        }:
+            return []
+        if event.type == "message.part.delta":
+            return self._part_delta(props)
+        if event.type == "session.status":
+            return self._session_status(props)
+        if event.type == "session.idle":
+            return self._session_status({**props, "status": props.get("status") or "idle"})
         # Unknown event types fail the runtime.
         if event.type not in {
             "message.updated",
@@ -129,6 +139,25 @@ class OpenCodeNormalizer:
                         ApprovalDecision.CANCEL,
                     ),
                 ),
+            )
+        ]
+
+    def on_question(
+        self,
+        *,
+        question_id: str,
+        questions: list[dict[str, Any]],
+        interaction_id: UUID,
+    ) -> list[HarnessEvent]:
+        if self._active_turn_id is None:
+            raise DomainError(ErrorCode.INVALID_STATE, "question without active turn")
+        del question_id
+        return [
+            InteractionRequestedPayload(
+                turn_id=self._active_turn_id,
+                interaction_id=interaction_id,
+                kind=InteractionKind.STRUCTURED_QUESTION,
+                request=StructuredQuestionPayload(questions=tuple(questions)),
             )
         ]
 
@@ -183,7 +212,12 @@ class OpenCodeNormalizer:
     def _session_status(self, props: dict[str, Any]) -> list[HarnessEvent]:
         if self._active_turn_id is None:
             return []
-        status = str(props.get("status") or "").lower()
+        status_obj = props.get("status")
+        if isinstance(status_obj, dict):
+            typed = cast(dict[str, object], status_obj)
+            status = str(typed.get("type") or "").lower()
+        else:
+            status = str(status_obj or "").lower()
         events: list[HarnessEvent] = []
         if self._message_id is not None:
             events.append(

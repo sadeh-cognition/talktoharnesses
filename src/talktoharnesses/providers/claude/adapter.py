@@ -275,7 +275,7 @@ class ClaudeAdapter:
         session_id: str | None,
     ) -> Any:
         try:
-            from claude_agent_sdk import ClaudeAgentOptions
+            from claude_agent_sdk import ClaudeAgentOptions, HookMatcher
         except ImportError:
             # Fake factory path: return a simple namespace.
             return {
@@ -290,6 +290,21 @@ class ClaudeAdapter:
         cli_path = None
         if config.executable_path:
             cli_path = str(resolve_executable(config.executable_path))
+
+        async def _force_broker_ask(
+            input_data: dict[str, Any],
+            tool_use_id: str | None,
+            context: Any,
+        ) -> dict[str, Any]:
+            del input_data, tool_use_id, context
+            # Keep tool execution on the can_use_tool → answer_interaction path.
+            return {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "ask",
+                }
+            }
+
         return ClaudeAgentOptions(
             cwd=cwd,
             model=config.model,
@@ -298,6 +313,13 @@ class ClaudeAdapter:
             permission_mode="default",
             can_use_tool=self._can_use_tool,
             cli_path=cli_path,
+            # Avoid project/local auto-allow settings; user auth still applies via SDK login.
+            setting_sources=[],
+            hooks={
+                "PreToolUse": [
+                    HookMatcher(matcher=None, hooks=[cast(Any, _force_broker_ask)]),
+                ]
+            },
         )
 
     async def _consume_response(self) -> None:
@@ -306,6 +328,8 @@ class ClaudeAdapter:
         try:
             async for message in self._client.receive_response():
                 raw = self._coerce_message(message)
+                if raw is None:
+                    continue
                 try:
                     parsed = parse_claude_message(raw)
                 except Exception as exc:
@@ -392,15 +416,14 @@ class ClaudeAdapter:
             interrupt=decision is ApprovalDecision.CANCEL,
         )
 
-    def _coerce_message(self, message: Any) -> dict[str, Any]:
+    def _coerce_message(self, message: Any) -> dict[str, Any] | None:
         if isinstance(message, dict):
             return {str(k): v for k, v in cast(dict[object, object], message).items()}
-        if hasattr(message, "model_dump"):
-            dumped = message.model_dump()
-            if isinstance(dumped, dict):
-                return {str(k): v for k, v in cast(dict[object, object], dumped).items()}
-        # Dataclass-style SDK messages
+        # Dataclass-style SDK messages (prefer explicit shapes over model_dump).
         name = type(message).__name__
+        if name in {"RateLimitEvent"}:
+            # Advisory SDK events; not part of the turn message model.
+            return None
         if name == "ResultMessage":
             return {
                 "type": "result",
@@ -457,6 +480,37 @@ class ClaudeAdapter:
                 "subtype": getattr(message, "subtype", ""),
                 "data": getattr(message, "data", {}) or {},
             }
+        if name == "UserMessage":
+            content_out: list[dict[str, Any]] = []
+            raw_content = getattr(message, "content", []) or []
+            if isinstance(raw_content, str):
+                return {
+                    "type": "user",
+                    "content": raw_content,
+                    "session_id": getattr(message, "session_id", None),
+                }
+            for block in raw_content:
+                bname = type(block).__name__
+                if bname == "TextBlock":
+                    content_out.append({"type": "text", "text": getattr(block, "text", "")})
+                elif bname == "ToolResultBlock":
+                    content_out.append(
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": getattr(block, "tool_use_id", ""),
+                            "content": getattr(block, "content", None),
+                            "is_error": getattr(block, "is_error", None),
+                        }
+                    )
+            return {
+                "type": "user",
+                "content": content_out,
+                "session_id": getattr(message, "session_id", None),
+            }
+        if hasattr(message, "model_dump"):
+            dumped = message.model_dump()
+            if isinstance(dumped, dict):
+                return {str(k): v for k, v in cast(dict[object, object], dumped).items()}
         raise DomainError(
             ErrorCode.UNSUPPORTED_NATIVE_EVENT,
             "unrecognized claude message shape",

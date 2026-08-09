@@ -80,6 +80,56 @@ def test_executable_owner_mismatch(owned_python: Path) -> None:
     assert ei.value.code is ErrorCode.EXECUTABLE_OWNER_MISMATCH
 
 
+def test_effective_access_fallback_and_stat_failure(tmp_path: Path, owned_python: Path) -> None:
+    from talktoharnesses.runtime import paths as paths_mod
+
+    def _access_raises(*_a: object, **_k: object) -> bool:
+        raise TypeError("no effective_ids")
+
+    with patch.object(paths_mod.os, "access", side_effect=_access_raises):
+        assert paths_mod._effective_access(owned_python) is True  # pyright: ignore[reportPrivateUsage]
+
+    with (
+        patch.object(Path, "stat", side_effect=OSError("gone")),
+        pytest.raises(DomainError) as ei,
+    ):
+        paths_mod._check_ownership(tmp_path / "x")  # pyright: ignore[reportPrivateUsage]
+    assert ei.value.code is ErrorCode.INVALID_EXECUTABLE
+
+    with (
+        patch("talktoharnesses.runtime.paths.sys.platform", "win32"),
+        patch(
+            "talktoharnesses.runtime.paths._windows_file_and_token_sids",
+            side_effect=ImportError("no pywin32"),
+        ),
+        pytest.raises(DomainError) as win,
+    ):
+        paths_mod._check_ownership_windows(owned_python)  # pyright: ignore[reportPrivateUsage]
+    assert win.value.code is ErrorCode.INVALID_EXECUTABLE
+
+    with (
+        patch("talktoharnesses.runtime.paths.sys.platform", "win32"),
+        patch(
+            "talktoharnesses.runtime.paths._windows_file_and_token_sids",
+            side_effect=RuntimeError("acl boom"),
+        ),
+        pytest.raises(DomainError) as win2,
+    ):
+        paths_mod._check_ownership_windows(owned_python)  # pyright: ignore[reportPrivateUsage]
+    assert win2.value.code is ErrorCode.INVALID_EXECUTABLE
+
+    with (
+        patch("talktoharnesses.runtime.paths.sys.platform", "win32"),
+        patch(
+            "talktoharnesses.runtime.paths._windows_file_and_token_sids",
+            return_value=("owner", "other"),
+        ),
+        pytest.raises(DomainError) as mismatch,
+    ):
+        paths_mod._check_ownership_windows(owned_python)  # pyright: ignore[reportPrivateUsage]
+    assert mismatch.value.code is ErrorCode.EXECUTABLE_OWNER_MISMATCH
+
+
 def test_resolve_launch_paths_ok(workdir: Path, owned_python: Path) -> None:
     exe, wd, roots = resolve_launch_paths(
         executable_path=str(owned_python),

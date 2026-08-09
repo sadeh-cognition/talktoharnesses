@@ -48,23 +48,21 @@ PROVIDERS = (
 
 
 @pytest.mark.parametrize("label,loader", PROVIDERS)
-def test_packaged_documents_load_with_empty_matrices(label: str, loader: Any) -> None:
+def test_packaged_documents_load_with_published_matrices(label: str, loader: Any) -> None:
     del label
     doc = loader()
-    assert doc.adapter_version == "2026.8.1.dev1"
-    assert doc.create_matrix == []
-    assert doc.resume_matrix == []
+    assert doc.adapter_version == "2026.8.1"
+    assert doc.create_matrix
+    assert doc.resume_matrix
     assert doc.releases
 
 
-def test_development_validation_allows_empty_matrices() -> None:
+def test_development_validation_allows_packaged_matrices() -> None:
     validate_compatibility_documents(mode="development")
 
 
-def test_stable_validation_rejects_empty_matrices() -> None:
-    with pytest.raises(DomainError) as exc:
-        validate_compatibility_documents(mode="stable")
-    assert exc.value.code is ErrorCode.PROVIDER_INCOMPATIBLE
+def test_stable_validation_accepts_published_matrices() -> None:
+    validate_compatibility_documents(mode="stable")
 
 
 def test_matrix_entry_rejects_extra_fields() -> None:

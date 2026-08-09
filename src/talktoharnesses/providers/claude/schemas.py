@@ -103,7 +103,7 @@ def parse_claude_message(raw: dict[str, Any]) -> ClaudeMessage:
     if msg_type == "assistant":
         return ClaudeAssistantMessage.model_validate(_normalize_assistant(raw))
     if msg_type == "user":
-        return ClaudeUserMessage.model_validate(raw)
+        return ClaudeUserMessage.model_validate(_normalize_assistant(raw))
     if msg_type == "result":
         return ClaudeResultMessage.model_validate(raw)
     raise ValueError(f"unsupported claude message type: {msg_type!r}")

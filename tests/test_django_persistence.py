@@ -44,6 +44,7 @@ from talktoharnesses.domain.models import (
     PendingInteraction,
     SubmitTurnPayload,
 )
+from talktoharnesses.domain.transitions import ConversationState
 
 
 @pytest.mark.django_db(transaction=True)
@@ -587,3 +588,745 @@ async def test_create_and_allow_loser_does_not_leave_orphan_rule() -> None:
     assert second.was_first_write is False
     rules = await persistence.list_applicable_approval_rules("owner")
     assert {r.id for r in rules} == {rule_a.id}
+
+
+def _bound_state(owner_id: str, now: datetime) -> ConversationState:
+    conversation_id = uuid4()
+    binding = ConversationHarnessBinding(
+        conversation_id=conversation_id,
+        kind=HarnessKind.OPENCODE,
+        configuration=HarnessConfiguration(
+            kind=HarnessKind.OPENCODE,
+            working_directory="/tmp",
+        ),
+        created_at=now,
+    )
+    return new_conversation_state(
+        owner_id=owner_id,
+        now=now,
+        binding=binding,
+        conversation_id=conversation_id,
+    )
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_claim_expired_conversations_and_lease_edges() -> None:
+    from talktoharnesses.django.models import ConversationAggregate, RecoveryAttemptRecord
+    from talktoharnesses.domain.enums import ConversationStatus, RecoveryTrigger
+
+    now = datetime.now(UTC)
+    persistence = DjangoPersistence()
+    # Unowned active conversation is claimable.
+    active = _bound_state("owner", now)
+    assert active.binding is not None
+    active = active.model_copy(
+        update={
+            "conversation": active.conversation.model_copy(
+                update={"status": ConversationStatus.RUNNING}
+            )
+        }
+    )
+    await persistence.save_snapshot(active)
+
+    # Expired owned conversation is claimable and abandons open attempts.
+    expired = _bound_state("owner-2", now)
+    assert expired.binding is not None
+    await persistence.save_snapshot(expired)
+    await ConversationAggregate.objects.filter(conversation_id=expired.conversation.id).aupdate(
+        runtime_worker_id="dead",
+        runtime_fence=2,
+        runtime_lease_expires_at=now - timedelta(seconds=5),
+        status=ConversationStatus.WAITING.value,
+    )
+    await RecoveryAttemptRecord.objects.acreate(
+        attempt_id=uuid4(),
+        conversation_id=expired.conversation.id,
+        binding_id=expired.binding.id,
+        worker_id="dead",
+        fence=2,
+        trigger=RecoveryTrigger.STARTUP.value,
+        observed_delivery_phase="none",
+        action="no_action",
+        result=None,
+        reason_code="worker_lost",
+        started_at=now - timedelta(minutes=1),
+    )
+
+    claimed = await persistence.claim_expired_conversations(
+        "worker-live",
+        10,
+        lease_duration=30.0,
+        trigger=RecoveryTrigger.TAKEOVER.value,
+    )
+    claimed_ids = {item.conversation_id for item in claimed}
+    assert active.conversation.id in claimed_ids
+    assert expired.conversation.id in claimed_ids
+    expired_claim = next(
+        item for item in claimed if item.conversation_id == expired.conversation.id
+    )
+    assert expired_claim.fence == 3
+    abandoned = await RecoveryAttemptRecord.objects.filter(
+        conversation_id=expired.conversation.id,
+        result="abandoned",
+    ).acount()
+    assert abandoned == 1
+
+    # Live owner renews; foreign expired row is reported lost.
+    lost = await persistence.renew_owned_conversation_leases("worker-live", lease_duration=30.0)
+    assert lost == ()
+    await ConversationAggregate.objects.filter(conversation_id=active.conversation.id).aupdate(
+        runtime_lease_expires_at=now - timedelta(seconds=1)
+    )
+    lost = await persistence.renew_owned_conversation_leases("worker-live", lease_duration=30.0)
+    assert any(item.conversation_id == active.conversation.id for item in lost)
+
+    # Re-claim then release under fence.
+    reclaimed = await persistence.claim_expired_conversations(
+        "worker-live",
+        1,
+        lease_duration=30.0,
+    )
+    assert len(reclaimed) == 1
+    await persistence.release_conversation_lease(
+        reclaimed[0].conversation_id,
+        "worker-live",
+        reclaimed[0].fence,
+    )
+    row = await ConversationAggregate.objects.aget(conversation_id=reclaimed[0].conversation_id)
+    assert row.runtime_worker_id is None
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_fenced_session_rotation_and_stale_owner() -> None:
+    from talktoharnesses.django.models import ConversationAggregate
+
+    now = datetime.now(UTC)
+    persistence = DjangoPersistence()
+    state = _bound_state("owner", now)
+    assert state.binding is not None
+    await persistence.save_snapshot(state)
+    await ConversationAggregate.objects.filter(conversation_id=state.conversation.id).aupdate(
+        runtime_worker_id="worker-a",
+        runtime_fence=4,
+        runtime_lease_expires_at=now + timedelta(hours=1),
+    )
+    launch = LaunchSnapshot(
+        resolved_executable="/bin/true",
+        harness_version="1",
+        working_directory="/tmp",
+        adapter_version="1",
+        capabilities=HarnessCapabilities(kind=HarnessKind.OPENCODE, version="1"),
+    )
+    await persistence.commit_session_rotation(
+        state.conversation.id,
+        state.conversation.version,
+        native_session_id="rotated-native",
+        launch_snapshot=launch,
+        worker_id="worker-a",
+        fence=4,
+    )
+    rotated = await persistence.get_snapshot(state.conversation.id, "owner")
+    assert rotated.binding is not None
+    assert rotated.binding.native_session_id == "rotated-native"
+    assert rotated.binding.requires_session_recreation is False
+
+    with pytest.raises(DomainError) as stale:
+        await persistence.commit_rotation_requires_recreation(
+            state.conversation.id,
+            rotated.conversation.version,
+            worker_id="worker-b",
+            fence=4,
+        )
+    assert stale.value.code is ErrorCode.STALE_OWNER
+
+    await persistence.commit_rotation_requires_recreation(
+        state.conversation.id,
+        rotated.conversation.version,
+        worker_id="worker-a",
+        fence=4,
+    )
+    marked = await persistence.get_snapshot(state.conversation.id, "owner")
+    assert marked.binding is not None
+    assert marked.binding.requires_session_recreation is True
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_commit_transcript_import_and_export_edges() -> None:
+    from talktoharnesses.application.handoff import HandoffDocument, HandoffMessage, HandoffTool
+    from talktoharnesses.django.models import MessageRecord, ToolRecord, TurnRecord
+    from talktoharnesses.domain.enums import MessageRole, ToolOutcome
+    from talktoharnesses.domain.events import ConversationEvent, SessionStartedPayload
+
+    now = datetime.now(UTC)
+    persistence = DjangoPersistence()
+    state = _bound_state("owner", now)
+    assert state.binding is not None
+    turn_id = uuid4()
+    user_id = uuid4()
+    assistant_id = uuid4()
+    tool_id = uuid4()
+    handoff = HandoffDocument(
+        entries=(
+            HandoffMessage(
+                id=user_id,
+                turn_id=turn_id,
+                role=MessageRole.USER,
+                text="hello",
+                turn_order_index=1,
+                order_index=1,
+            ),
+            HandoffTool(
+                id=tool_id,
+                turn_id=turn_id,
+                tool_name="shell",
+                arguments={"cmd": "echo"},
+                outcome=ToolOutcome.SUCCESS,
+                exit_status=0,
+                paths=("/tmp",),
+                output_tail="ok",
+                turn_order_index=1,
+                order_index=2,
+            ),
+            HandoffMessage(
+                id=assistant_id,
+                turn_id=turn_id,
+                role=MessageRole.ASSISTANT,
+                text="done",
+                turn_order_index=1,
+                order_index=3,
+            ),
+        )
+    )
+    events = (
+        ConversationEvent(
+            conversation_id=state.conversation.id,
+            sequence=1,
+            timestamp=now,
+            type="session_started",
+            payload=SessionStartedPayload(
+                binding_id=state.binding.id,
+                native_session_id="imported",
+                harness_kind=HarnessKind.OPENCODE,
+            ),
+        ),
+    )
+    imported_state = state.model_copy(
+        update={
+            "conversation": state.conversation.model_copy(update={"next_event_sequence": 2}),
+            "binding": state.binding.model_copy(update={"native_session_id": "imported"}),
+        }
+    )
+    process = ProcessRecord(
+        conversation_id=state.conversation.id,
+        binding_id=state.binding.id,
+        status=ProcessStatus.RUNNING,
+        pid=9,
+        started_at=now,
+    )
+    launch = LaunchSnapshot(
+        resolved_executable="/bin/true",
+        harness_version="1",
+        working_directory="/tmp",
+        adapter_version="1",
+        capabilities=HarnessCapabilities(kind=HarnessKind.OPENCODE, version="1"),
+    )
+    committed = await persistence.commit_transcript_import(
+        imported_state,
+        handoff,
+        events,
+        process=process,
+        launch_history_entry=launch,
+    )
+    assert committed == events
+    assert await TurnRecord.objects.filter(conversation_id=state.conversation.id).acount() == 1
+    assert await MessageRecord.objects.filter(conversation_id=state.conversation.id).acount() == 2
+    assert await ToolRecord.objects.filter(conversation_id=state.conversation.id).acount() == 1
+
+    handoff_doc, display_title = await persistence.read_retained_export(
+        state.conversation.id, "owner"
+    )
+    assert isinstance(display_title, str)
+    assert len(handoff_doc.entries) >= 1
+
+    with pytest.raises(DomainError) as exists:
+        await persistence.commit_transcript_import(imported_state, handoff, events)
+    assert exists.value.code is ErrorCode.INVALID_STATE
+
+    with pytest.raises(DomainError) as launch_only:
+        fresh = _bound_state("owner-b", now)
+        fresh = fresh.model_copy(
+            update={
+                "conversation": fresh.conversation.model_copy(update={"next_event_sequence": 1})
+            }
+        )
+        await persistence.commit_transcript_import(
+            fresh,
+            HandoffDocument(),
+            (),
+            launch_history_entry=launch,
+        )
+    assert launch_only.value.code is ErrorCode.INVALID_STATE
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_commit_recovery_batch_and_complete_attempt() -> None:
+    from talktoharnesses.django.models import ConversationAggregate, RecoveryAttemptRecord
+    from talktoharnesses.domain.enums import (
+        ConversationStatus,
+        ObservedDeliveryPhase,
+        RecoveryAction,
+        RecoveryReasonCode,
+        RecoveryResultCode,
+        RecoveryTrigger,
+        TurnStatus,
+    )
+    from talktoharnesses.domain.events import ConversationEvent, TurnOutcomeUnknownPayload
+    from talktoharnesses.domain.models import Turn
+
+    now = datetime.now(UTC)
+    persistence = DjangoPersistence()
+    state = _bound_state("owner", now)
+    assert state.binding is not None
+    turn = Turn(
+        conversation_id=state.conversation.id,
+        status=TurnStatus.RUNNING,
+        created_at=now,
+        started_at=now,
+    )
+    command = Command(
+        conversation_id=state.conversation.id,
+        kind=CommandKind.SUBMIT_TURN,
+        status=CommandStatus.DELIVERY_STARTED,
+        idempotency_key="rec-1",
+        target_turn_id=turn.id,
+        payload=SubmitTurnPayload(prompt="hi"),
+        created_at=now,
+        delivery_started_at=now,
+    )
+    state = state.model_copy(
+        update={
+            "active_turn": turn,
+            "commands": {command.id: command},
+            "conversation": state.conversation.model_copy(
+                update={
+                    "status": ConversationStatus.RUNNING,
+                    "active_turn_id": turn.id,
+                    "next_event_sequence": 1,
+                }
+            ),
+        }
+    )
+    await persistence.save_snapshot(state)
+    await ConversationAggregate.objects.filter(conversation_id=state.conversation.id).aupdate(
+        runtime_worker_id="worker-a",
+        runtime_fence=1,
+        runtime_lease_expires_at=now + timedelta(hours=1),
+    )
+    attempt_id = uuid4()
+    recovery_binding = state.binding
+    assert recovery_binding is not None
+    await RecoveryAttemptRecord.objects.acreate(
+        attempt_id=attempt_id,
+        conversation_id=state.conversation.id,
+        binding_id=recovery_binding.id,
+        worker_id="worker-a",
+        fence=1,
+        trigger=RecoveryTrigger.TAKEOVER.value,
+        observed_delivery_phase=ObservedDeliveryPhase.DELIVERY_STARTED.value,
+        action=RecoveryAction.OUTCOME_UNKNOWN.value,
+        result=None,
+        reason_code=RecoveryReasonCode.DELIVERY_AMBIGUOUS.value,
+        started_at=now,
+    )
+    next_state = state.model_copy(
+        update={
+            "active_turn": None,
+            "commands": {
+                command.id: command.model_copy(update={"status": CommandStatus.OUTCOME_UNKNOWN})
+            },
+            "conversation": state.conversation.model_copy(
+                update={
+                    "status": ConversationStatus.IDLE,
+                    "active_turn_id": None,
+                    "version": state.conversation.version,
+                    "next_event_sequence": 2,
+                }
+            ),
+        }
+    )
+    events = (
+        ConversationEvent(
+            conversation_id=state.conversation.id,
+            sequence=1,
+            timestamp=now,
+            type="turn_outcome_unknown",
+            payload=TurnOutcomeUnknownPayload(turn_id=turn.id, message="ambiguous"),
+        ),
+    )
+    committed = await persistence.commit_recovery_batch(
+        state.conversation.id,
+        state.conversation.version,
+        next_state,
+        events,
+        (next_state.commands[command.id],),
+        interrupted_turn_id=turn.id,
+        attempt_id=attempt_id,
+        command_id=command.id,
+        turn_id=turn.id,
+        trigger=RecoveryTrigger.TAKEOVER.value,
+        observed_delivery_phase=ObservedDeliveryPhase.DELIVERY_STARTED.value,
+        action=RecoveryAction.OUTCOME_UNKNOWN.value,
+        result=RecoveryResultCode.SUCCESS.value,
+        reason_code=RecoveryReasonCode.DELIVERY_AMBIGUOUS.value,
+        completed_at=now,
+        worker_id="worker-a",
+        fence=1,
+    )
+    assert committed
+    attempt = await RecoveryAttemptRecord.objects.aget(attempt_id=attempt_id)
+    assert attempt.result == RecoveryResultCode.SUCCESS.value
+
+    with pytest.raises(DomainError) as done:
+        await persistence.complete_recovery_attempt(
+            attempt_id,
+            result=RecoveryResultCode.FAILED.value,
+            reason_code=RecoveryReasonCode.WORKER_LOST.value,
+            completed_at=now,
+        )
+    assert done.value.code is ErrorCode.INVALID_STATE
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_retention_preview_and_cleanup_listings() -> None:
+    now = datetime.now(UTC)
+    persistence = DjangoPersistence()
+    state = _bound_state("owner-ret", now)
+    await persistence.save_snapshot(state)
+    await persistence.replace_retention_policy("owner-ret", 1, now=now)
+    preview = await persistence.preview_retention("owner-ret", now=now)
+    assert preview.cutoff is not None
+    owners = await persistence.list_retention_owner_ids()
+    assert "owner-ret" in owners
+    cleanup = await persistence.list_cleanup_conversation_ids()
+    assert any(cid == state.conversation.id for cid, _ in cleanup)
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_update_and_get_open_recovery_attempt() -> None:
+    from talktoharnesses.django.models import ConversationAggregate, RecoveryAttemptRecord
+    from talktoharnesses.domain.enums import (
+        ObservedDeliveryPhase,
+        RecoveryAction,
+        RecoveryReasonCode,
+        RecoveryTrigger,
+    )
+
+    now = datetime.now(UTC)
+    persistence = DjangoPersistence()
+    state = _bound_state("owner", now)
+    assert state.binding is not None
+    await persistence.save_snapshot(state)
+    await ConversationAggregate.objects.filter(conversation_id=state.conversation.id).aupdate(
+        runtime_worker_id="worker-a",
+        runtime_fence=2,
+        runtime_lease_expires_at=now + timedelta(hours=1),
+    )
+    attempt_id = uuid4()
+    await RecoveryAttemptRecord.objects.acreate(
+        attempt_id=attempt_id,
+        conversation_id=state.conversation.id,
+        binding_id=state.binding.id,
+        worker_id="worker-a",
+        fence=2,
+        trigger=RecoveryTrigger.STARTUP.value,
+        observed_delivery_phase=ObservedDeliveryPhase.NONE.value,
+        action=RecoveryAction.NO_ACTION.value,
+        result=None,
+        reason_code=RecoveryReasonCode.NO_ACTION.value,
+        started_at=now,
+    )
+    open_attempt = await persistence.get_open_recovery_attempt(state.conversation.id, "worker-a", 2)
+    assert open_attempt is not None
+    assert open_attempt.id == attempt_id
+    command_id = uuid4()
+    turn_id = uuid4()
+    await persistence.update_recovery_attempt(
+        attempt_id,
+        command_id=command_id,
+        turn_id=turn_id,
+        trigger=RecoveryTrigger.TAKEOVER.value,
+        observed_delivery_phase=ObservedDeliveryPhase.DELIVERED.value,
+        action=RecoveryAction.NATIVE_RESUME.value,
+        reason_code=RecoveryReasonCode.UNCHANGED_LAUNCH.value,
+        worker_id="worker-a",
+        fence=2,
+    )
+    updated = await RecoveryAttemptRecord.objects.aget(attempt_id=attempt_id)
+    assert updated.command_id == command_id
+    assert updated.action == RecoveryAction.NATIVE_RESUME.value
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_suppressed_resolution_paging_purge_and_worker_lease() -> None:
+    from talktoharnesses.django.models import (
+        ActivityRecord,
+        ConversationAggregate,
+        InteractionAnswerRecord,
+        InteractionRecord,
+        MessageRecord,
+        PlanRecord,
+        ToolRecord,
+        TurnRecord,
+    )
+    from talktoharnesses.domain.enums import (
+        InteractionStatus,
+        MessageRole,
+        ToolOutcome,
+        TurnStatus,
+    )
+
+    now = datetime.now(UTC)
+    persistence = DjangoPersistence()
+    state = _bound_state("owner-page", now)
+    assert state.binding is not None
+    await persistence.save_snapshot(state)
+    cid = state.conversation.id
+
+    turn_ids = [uuid4() for _ in range(3)]
+    for index, turn_id in enumerate(turn_ids):
+        await TurnRecord.objects.acreate(
+            turn_id=turn_id,
+            conversation_id=cid,
+            status=TurnStatus.COMPLETED.value,
+            created_at=now,
+            started_at=now,
+            completed_at=now,
+            order_index=index + 1,
+        )
+        await MessageRecord.objects.acreate(
+            message_id=uuid4(),
+            conversation_id=cid,
+            turn_id=turn_id,
+            role=MessageRole.USER.value,
+            text=f"m{index}",
+            sequence=0,
+            interrupted=False,
+            completed=True,
+            created_at=now + timedelta(seconds=index),
+            order_index=index + 1,
+        )
+        await ToolRecord.objects.acreate(
+            tool_id=uuid4(),
+            conversation_id=cid,
+            turn_id=turn_id,
+            tool_name="shell",
+            arguments={},
+            outcome=ToolOutcome.SUCCESS.value,
+            order_index=index + 1,
+        )
+        await PlanRecord.objects.acreate(
+            plan_id=uuid4(),
+            conversation_id=cid,
+            turn_id=turn_id,
+            items=[],
+            order_index=index + 1,
+        )
+        await ActivityRecord.objects.acreate(
+            activity_id=uuid4(),
+            conversation_id=cid,
+            parent_turn_id=turn_id,
+            status="completed",
+            title=f"act-{index}",
+            created_at=now + timedelta(seconds=index),
+        )
+
+    interaction_ids = [uuid4() for _ in range(3)]
+    for index, interaction_id in enumerate(interaction_ids):
+        await InteractionRecord.objects.acreate(
+            interaction_id=interaction_id,
+            conversation_id=cid,
+            turn_id=turn_ids[0],
+            kind=InteractionKind.APPROVAL.value,
+            status=InteractionStatus.PENDING.value,
+            request={"tool_name": "shell", "available_decisions": ["allow_once", "deny", "cancel"]},
+            created_at=now + timedelta(seconds=index),
+        )
+
+    turns = await persistence.page_turns(cid, "owner-page", limit=2)
+    assert len(turns.items) == 2
+    assert turns.next_cursor is not None
+    turns2 = await persistence.page_turns(cid, "owner-page", cursor=turns.next_cursor, limit=2)
+    assert len(turns2.items) == 1
+
+    messages = await persistence.page_messages(cid, "owner-page", limit=2)
+    assert len(messages.items) == 2 and messages.next_cursor
+    tools = await persistence.page_tools(cid, "owner-page", limit=2)
+    assert len(tools.items) == 2 and tools.next_cursor
+    plans = await persistence.page_plans(cid, "owner-page", limit=2)
+    assert len(plans.items) == 2 and plans.next_cursor
+    activity = await persistence.page_activity(cid, "owner-page", limit=2)
+    assert len(activity.items) == 2 and activity.next_cursor
+    pending = await persistence.page_pending_interactions(cid, "owner-page", limit=2)
+    assert len(pending.items) == 2 and pending.next_cursor
+
+    # Suppressed interaction resolution completion.
+    suppressed_id = interaction_ids[0]
+    await InteractionAnswerRecord.objects.acreate(
+        interaction_id=suppressed_id,
+        conversation_id=cid,
+        data={"decision": "allow_once"},
+        answer_command_suppressed=True,
+        released_at=None,
+        submitted_at=now,
+    )
+    assert await persistence.complete_suppressed_interaction_resolution(suppressed_id, now) is True
+    assert await persistence.complete_suppressed_interaction_resolution(suppressed_id, now) is True
+    unsuppressed = uuid4()
+    await InteractionAnswerRecord.objects.acreate(
+        interaction_id=unsuppressed,
+        conversation_id=cid,
+        data={"decision": "deny"},
+        answer_command_suppressed=False,
+        released_at=None,
+        submitted_at=now,
+    )
+    assert await persistence.complete_suppressed_interaction_resolution(unsuppressed, now) is False
+    with pytest.raises(DomainError):
+        await persistence.complete_suppressed_interaction_resolution(uuid4(), now)
+
+    await persistence.mark_interaction_policy_evaluated(suppressed_id, now)
+    uneval = await persistence.list_unevaluated_open_interactions()
+    assert all(item[1] != suppressed_id for item in uneval)
+
+    # Soft-delete purge.
+    await ConversationAggregate.objects.filter(conversation_id=cid).aupdate(
+        deleted_at=now - timedelta(days=400)
+    )
+    await persistence.replace_retention_policy("owner-page", 1, now=now)
+    purged = await persistence.purge_soft_deleted(now)
+    assert purged >= 1
+
+    # Worker lease acquire/renew/drain/release on sqlite singleton slot.
+    await persistence.acquire_worker_lease("worker-z", lease_duration=30.0)
+    await persistence.acquire_worker_lease("worker-z", lease_duration=30.0)  # renew same
+    await persistence.renew_worker_lease("worker-z", lease_duration=30.0)
+    await persistence.mark_worker_draining("worker-z")
+    await persistence.release_worker_lease("worker-z")
+    with pytest.raises(DomainError):
+        await persistence.renew_worker_lease("worker-z", lease_duration=30.0)
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_interaction_event_lookup_harness_probe_and_search_phrase() -> None:
+    from talktoharnesses.django.models import ConversationEventRecord, InteractionRecord
+    from talktoharnesses.domain.enums import InteractionStatus
+    from talktoharnesses.domain.events import ConversationEvent, InteractionRequestedPayload
+    from talktoharnesses.domain.models import HarnessInstance
+
+    now = datetime.now(UTC)
+    persistence = DjangoPersistence()
+    state = _bound_state("owner-evt", now)
+    await persistence.save_snapshot(state)
+    cid = state.conversation.id
+    interaction_id = uuid4()
+
+    with pytest.raises(DomainError):
+        await persistence.get_interaction_request_event(cid, interaction_id)
+
+    await InteractionRecord.objects.acreate(
+        interaction_id=interaction_id,
+        conversation_id=cid,
+        turn_id=uuid4(),
+        kind=InteractionKind.APPROVAL.value,
+        status=InteractionStatus.PENDING.value,
+        request={"tool_name": "shell", "available_decisions": ["cancel"]},
+        created_at=now,
+        request_event_sequence=1,
+    )
+    with pytest.raises(DomainError):
+        await persistence.get_interaction_request_event(cid, interaction_id)
+
+    event = ConversationEvent(
+        conversation_id=cid,
+        sequence=1,
+        timestamp=now,
+        type="interaction_requested",
+        payload=InteractionRequestedPayload(
+            turn_id=uuid4(),
+            interaction_id=interaction_id,
+            kind=InteractionKind.APPROVAL,
+            request=ApprovalRequestPayload(tool_name="shell"),
+        ),
+    )
+    await ConversationEventRecord.objects.acreate(
+        event_id=uuid4(),
+        conversation_id=cid,
+        sequence=1,
+        timestamp=now,
+        type=event.type,
+        payload=event.model_dump(mode="json"),
+    )
+    loaded = await persistence.get_interaction_request_event(cid, interaction_id)
+    assert loaded.payload.interaction_id == interaction_id  # type: ignore[attr-defined]
+
+    harness = await persistence.create_harness(
+        HarnessInstance(
+            owner_id="owner-evt",
+            name="probe-me",
+            kind=HarnessKind.OPENCODE,
+            configuration=HarnessConfiguration(kind=HarnessKind.OPENCODE, working_directory="/tmp"),
+            created_at=now,
+        )
+    )
+    caps = HarnessCapabilities(kind=HarnessKind.OPENCODE, version="1.2.27")
+    probe = await persistence.save_harness_probe(harness.id, "owner-evt", caps, probed_at=now)
+    assert probe.capabilities.version == "1.2.27"
+    got = await persistence.get_harness_probe(harness.id, "owner-evt")
+    assert got.harness_id == probe.harness_id
+    listed = await persistence.list_harnesses("owner-evt", limit=10)
+    assert any(item.id == harness.id for item in listed.items)
+    assert await persistence.has_fresh_harness_probe(now=now, max_age_seconds=3600) is True
+    assert (
+        await persistence.has_fresh_harness_probe(now=now + timedelta(hours=2), max_age_seconds=1)
+        is False
+    )
+
+    from talktoharnesses.django.materialize import materialize_projections
+    from talktoharnesses.django.models import MessageRecord, TurnRecord
+    from talktoharnesses.domain.enums import MessageRole, TurnStatus
+
+    turn_id = uuid4()
+    await TurnRecord.objects.acreate(
+        turn_id=turn_id,
+        conversation_id=cid,
+        status=TurnStatus.COMPLETED.value,
+        created_at=now,
+        started_at=now,
+        completed_at=now,
+        order_index=1,
+    )
+    await MessageRecord.objects.acreate(
+        message_id=uuid4(),
+        conversation_id=cid,
+        turn_id=turn_id,
+        role=MessageRole.USER.value,
+        text='find this "exact phrase" needle',
+        sequence=0,
+        interrupted=False,
+        completed=True,
+        created_at=now,
+        order_index=1,
+    )
+    from asgiref.sync import sync_to_async
+
+    await sync_to_async(materialize_projections, thread_sensitive=True)(state, ())
+    hits = await persistence.search_conversations("owner-evt", '"exact phrase"', limit=10)
+    assert isinstance(hits.items, tuple)

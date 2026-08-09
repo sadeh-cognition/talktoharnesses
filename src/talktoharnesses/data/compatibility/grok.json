@@ -1,5 +1,5 @@
 {
-  "adapter_version": "2026.8.1.dev1",
+  "adapter_version": "2026.8.1",
   "releases": [
     {
       "id": "grok-1.0.0-3cd0d0cbce",
@@ -9,7 +9,11 @@
       "version_stdout_prefix": "grok 1.0.0 (3cd0d0cbce)",
       "agent_name": "grok",
       "acp_protocol_version": 1,
-      "platforms": ["linux", "darwin", "win32"],
+      "platforms": [
+        "linux",
+        "darwin",
+        "win32"
+      ],
       "capabilities": {
         "supports_resume": true,
         "supports_interrupt": true,
@@ -26,11 +30,23 @@
       "allowlisted_extensions": [
         "_x.ai/mcp/servers_updated",
         "_x.ai/settings/update",
-        "_x.ai/announcements/update"
+        "_x.ai/announcements/update",
+        "_x.ai/models/update",
+        "_x.ai/mcp_initialized"
       ],
-      "notes": "Implementation target; matrix rows published only after create/resume gates pass."
+      "notes": "Live create/resume/interaction proven on linux."
     }
   ],
-  "create_matrix": [],
-  "resume_matrix": []
+  "create_matrix": [
+    {
+      "release_id": "grok-1.0.0-3cd0d0cbce",
+      "platform": "linux"
+    }
+  ],
+  "resume_matrix": [
+    {
+      "release_id": "grok-1.0.0-3cd0d0cbce",
+      "platform": "linux"
+    }
+  ]
 }

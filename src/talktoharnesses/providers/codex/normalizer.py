@@ -7,7 +7,10 @@ from typing import Any
 from uuid import UUID, uuid5
 
 from talktoharnesses.domain.enums import (
+    ApprovalDecision,
     ErrorCode,
+    FileOperation,
+    InteractionKind,
     ToolOutcome,
 )
 from talktoharnesses.domain.errors import DomainError
@@ -16,6 +19,7 @@ from talktoharnesses.domain.events import (
     AssistantMessageDeltaPayload,
     AssistantMessageStartedPayload,
     HarnessEvent,
+    InteractionRequestedPayload,
     ReasoningCompletedPayload,
     ReasoningDeltaPayload,
     ReasoningStartedPayload,
@@ -27,8 +31,15 @@ from talktoharnesses.domain.events import (
     TurnInterruptedPayload,
     UsageUpdatedPayload,
 )
+from talktoharnesses.domain.models import (
+    ApprovalRequestPayload,
+    CommandApprovalAction,
+    FileApprovalAction,
+)
 from talktoharnesses.providers.codex.schemas import (
     CodexAgentMessageDelta,
+    CodexApprovalParams,
+    CodexCommandApprovalParams,
     CodexItemCompleted,
     CodexItemStarted,
     CodexNotification,
@@ -112,6 +123,65 @@ class CodexNormalizer:
         if isinstance(note, CodexTurnCompleted):
             return self._turn_completed(note)
         return []
+
+    def on_approval_request(
+        self,
+        *,
+        method: str,
+        params: CodexApprovalParams,
+        interaction_id: UUID,
+    ) -> list[HarnessEvent]:
+        if self._active_turn_id is None:
+            raise DomainError(ErrorCode.INVALID_STATE, "approval without active turn")
+        if isinstance(params, CodexCommandApprovalParams):
+            argv = tuple(params.command or ())
+            action = CommandApprovalAction(argv=argv) if argv else None
+            return [
+                InteractionRequestedPayload(
+                    turn_id=self._active_turn_id,
+                    interaction_id=interaction_id,
+                    kind=InteractionKind.APPROVAL,
+                    request=ApprovalRequestPayload(
+                        tool_name="commandExecution",
+                        command_args=argv or None,
+                        summary=params.reason or "Codex command approval",
+                        action=action,
+                        available_decisions=(
+                            ApprovalDecision.ALLOW_ONCE,
+                            ApprovalDecision.ALLOW_SESSION,
+                            ApprovalDecision.DENY,
+                            ApprovalDecision.CANCEL,
+                        ),
+                    ),
+                )
+            ]
+        first = (params.files or [None])[0]
+        path = first.path if first is not None else None
+        operation = _file_operation(first.kind if first is not None else None)
+        action = (
+            FileApprovalAction(path=path, operation=operation)
+            if path is not None and operation is not None
+            else None
+        )
+        return [
+            InteractionRequestedPayload(
+                turn_id=self._active_turn_id,
+                interaction_id=interaction_id,
+                kind=InteractionKind.APPROVAL,
+                request=ApprovalRequestPayload(
+                    tool_name="fileChange",
+                    path=path,
+                    operation=operation,
+                    summary=params.reason or "Codex file change approval",
+                    action=action,
+                    available_decisions=(
+                        ApprovalDecision.ALLOW_ONCE,
+                        ApprovalDecision.DENY,
+                        ApprovalDecision.CANCEL,
+                    ),
+                ),
+            )
+        ]
 
     def fail_active_turn(self, *, error_code: str, message: str) -> list[HarnessEvent]:
         if self._active_turn_id is None:
@@ -300,3 +370,18 @@ class CodexNormalizer:
             if pattern:
                 out = out.replace(pattern, "***")
         return out
+
+
+def _file_operation(kind: str | None) -> FileOperation | None:
+    if kind is None:
+        return FileOperation.MODIFY
+    normalized = kind.lower()
+    if normalized in {"create", "add", "write"}:
+        return FileOperation.CREATE
+    if normalized in {"delete", "remove", "unlink"}:
+        return FileOperation.DELETE
+    if normalized in {"read", "view"}:
+        return FileOperation.READ
+    if normalized in {"edit", "modify", "update", "patch"}:
+        return FileOperation.MODIFY
+    return FileOperation.MODIFY

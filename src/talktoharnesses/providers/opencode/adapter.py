@@ -49,6 +49,24 @@ def _allocate_loopback_port() -> int:
         return int(sock.getsockname()[1])
 
 
+def _opencode_model_ref(model: str) -> dict[str, str]:
+    """Map `provider/model` strings to OpenCode's prompt_async model object."""
+    if "/" not in model:
+        raise DomainError(
+            ErrorCode.PROVIDER_INCOMPATIBLE,
+            "opencode model must be providerID/modelID",
+            details={"model": model},
+        )
+    provider_id, model_id = model.split("/", 1)
+    if not provider_id or not model_id:
+        raise DomainError(
+            ErrorCode.PROVIDER_INCOMPATIBLE,
+            "opencode model must be providerID/modelID",
+            details={"model": model},
+        )
+    return {"providerID": provider_id, "modelID": model_id}
+
+
 class OpenCodeAdapter:
     """Process-bound OpenCode adapter. One instance per conversation runtime."""
 
@@ -68,7 +86,8 @@ class OpenCodeAdapter:
         self._event_q: asyncio.Queue[HarnessEvent | HarnessInteractionRequest | None] = (
             asyncio.Queue()
         )
-        self._pending_interactions: dict[UUID, str] = {}
+        # Values are ("permission"|"question", native request id).
+        self._pending_interactions: dict[UUID, tuple[str, str]] = {}
         self._closed = False
         self._connected_event = asyncio.Event()
 
@@ -175,13 +194,16 @@ class OpenCodeAdapter:
         if not session.native_session_id:
             raise DomainError(ErrorCode.INVALID_STATE, "session has no native_session_id")
         self._normalizer.begin_turn(request.turn_id)
-        message_id = str(uuid4())
-        payload = {
+        message_id = f"msg_{uuid4().hex}"
+        payload: dict[str, Any] = {
             "parts": [{"type": "text", "text": request.prompt}],
-            "model": request.model or session.model,
-            "agent": session.mode,
             "messageID": message_id,
         }
+        model = request.model or session.model
+        if model:
+            payload["model"] = _opencode_model_ref(model)
+        if session.mode:
+            payload["agent"] = session.mode
         response = await self._client.post(
             f"/session/{session.native_session_id}/prompt_async",
             json=payload,
@@ -197,12 +219,15 @@ class OpenCodeAdapter:
         self._require_session(session)
         assert self._client is not None
         for interaction_id in list(self._pending_interactions):
-            permission_id = self._pending_interactions.pop(interaction_id)
+            kind, request_id = self._pending_interactions.pop(interaction_id)
             with contextlib.suppress(Exception):
-                await self._client.post(
-                    f"/session/{session.native_session_id}/permissions/{permission_id}",
-                    json={"response": "reject", "remember": False},
-                )
+                if kind == "question":
+                    await self._client.post(f"/question/{request_id}/reject")
+                else:
+                    await self._client.post(
+                        f"/session/{session.native_session_id}/permissions/{request_id}",
+                        json={"response": "reject"},
+                    )
         if session.native_session_id:
             with contextlib.suppress(Exception):
                 await self._client.post(f"/session/{session.native_session_id}/abort")
@@ -214,24 +239,33 @@ class OpenCodeAdapter:
     ) -> None:
         self._require_session(session)
         assert self._client is not None
-        permission_id = self._pending_interactions.get(answer.interaction_id)
-        if permission_id is None:
+        pending = self._pending_interactions.get(answer.interaction_id)
+        if pending is None:
             raise DomainError(
                 ErrorCode.INVALID_STATE,
                 "no pending interaction for answer",
                 details={"interaction_id": str(answer.interaction_id)},
             )
+        kind, request_id = pending
+        del self._pending_interactions[answer.interaction_id]
+        if kind == "question":
+            answers = answer.answers.get("answers") if isinstance(answer.answers, dict) else None
+            if not isinstance(answers, list):
+                answers = [["yes"]]
+            response = await self._client.post(
+                f"/question/{request_id}/reply",
+                json={"answers": answers},
+            )
+            self._raise_http(response, "POST question reply")
+            return
         decision = answer.decision
         if decision in {ApprovalDecision.ALLOW_ONCE, ApprovalDecision.ALLOW_SESSION}:
             response_value = "once"
-        elif decision is ApprovalDecision.DENY:
-            response_value = "reject"
         else:
             response_value = "reject"
-        del self._pending_interactions[answer.interaction_id]
         response = await self._client.post(
-            f"/session/{session.native_session_id}/permissions/{permission_id}",
-            json={"response": response_value, "remember": False},
+            f"/session/{session.native_session_id}/permissions/{request_id}",
+            json={"response": response_value},
         )
         self._raise_http(response, "POST permissions")
 
@@ -409,7 +443,7 @@ class OpenCodeAdapter:
         if event_type == "server.connected":
             self._connected_event.set()
             return
-        if event_type == "permission.asked":
+        if event_type in {"permission.asked", "question.asked"}:
             props = raw.get("properties")
             props_map = (
                 {str(k): v for k, v in cast(dict[object, object], props).items()}
@@ -420,11 +454,14 @@ class OpenCodeAdapter:
             if not isinstance(session_id, str):
                 raise DomainError(
                     ErrorCode.PROTOCOL_ERROR,
-                    "permission event missing session id",
+                    f"{event_type} missing session id",
                 )
             if not self._normalizer.accepts_session(session_id):
                 return
-            await self._handle_permission(props_map)
+            if event_type == "question.asked":
+                await self._handle_question(props_map)
+            else:
+                await self._handle_permission(props_map)
             return
         # Normalize envelope: either flat or {type, properties}
         if "properties" not in raw and event_type:
@@ -444,10 +481,14 @@ class OpenCodeAdapter:
         if not permission_id:
             raise DomainError(ErrorCode.PROTOCOL_ERROR, "permission event missing id")
         interaction_id = uuid4()
-        self._pending_interactions[interaction_id] = permission_id
+        self._pending_interactions[interaction_id] = ("permission", permission_id)
+        tool = props.get("tool")
+        tool_name = tool if isinstance(tool, str) else None
+        if tool_name is None and isinstance(tool, dict):
+            tool_name = "tool"
         events = self._normalizer.on_permission(
             permission_id=permission_id,
-            tool=props.get("tool") if isinstance(props.get("tool"), str) else None,
+            tool=tool_name,
             title=props.get("title") if isinstance(props.get("title"), str) else None,
             interaction_id=interaction_id,
         )
@@ -457,6 +498,36 @@ class OpenCodeAdapter:
                     HarnessInteractionRequest(
                         payload=event,
                         provider_correlation={"permission_id": permission_id},
+                    )
+                )
+            else:
+                await self._event_q.put(event)
+
+    async def _handle_question(self, props: dict[str, Any]) -> None:
+        question_id = str(props.get("id") or "")
+        if not question_id:
+            raise DomainError(ErrorCode.PROTOCOL_ERROR, "question event missing id")
+        questions_obj = props.get("questions")
+        questions: list[dict[str, Any]] = []
+        if isinstance(questions_obj, list):
+            for item in cast(list[object], questions_obj):
+                if isinstance(item, dict):
+                    questions.append(
+                        {str(k): v for k, v in cast(dict[object, object], item).items()}
+                    )
+        interaction_id = uuid4()
+        self._pending_interactions[interaction_id] = ("question", question_id)
+        events = self._normalizer.on_question(
+            question_id=question_id,
+            questions=questions,
+            interaction_id=interaction_id,
+        )
+        for event in events:
+            if isinstance(event, InteractionRequestedPayload):
+                await self._event_q.put(
+                    HarnessInteractionRequest(
+                        payload=event,
+                        provider_correlation={"question_id": question_id},
                     )
                 )
             else:

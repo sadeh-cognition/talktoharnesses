@@ -15,9 +15,9 @@ from talktoharnesses.providers.compatibility import render_supported_harnesses_m
 
 def test_load_and_match_release() -> None:
     doc = load_codex_compatibility()
-    assert doc.adapter_version == "2026.8.1.dev1"
-    assert doc.create_matrix == []
-    assert doc.resume_matrix == []
+    assert doc.adapter_version == "2026.8.1"
+    assert doc.create_matrix
+    assert doc.resume_matrix
     release = match_release(sdk_version="0.144.4", runtime_version="0.144.4", platform="linux")
     assert release.id == "codex-openai-codex-0.144.4"
     assert release.capabilities.supports_steer is True
@@ -33,4 +33,4 @@ def test_markdown_includes_codex() -> None:
     md = render_supported_harnesses_markdown()
     assert "## Codex" in md
     assert "codex-openai-codex-0.144.4" in md
-    assert "deferred approval" in md.lower() or "AsyncCodex" in md
+    assert "approval" in md.lower()

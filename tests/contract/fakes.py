@@ -418,7 +418,11 @@ def config_for(kind: HarnessKind) -> HarnessConfiguration:
         kind=kind,
         executable_path=executable,
         working_directory="/tmp",
-        model=None if kind is HarnessKind.CURSOR else "default",
+        model=(
+            None
+            if kind is HarnessKind.CURSOR
+            else ("test/default" if kind is HarnessKind.OPENCODE else "default")
+        ),
         mode=None if kind is HarnessKind.CURSOR else "default",
     )
 

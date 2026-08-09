@@ -96,7 +96,7 @@ def _launch() -> LaunchSnapshot:
         resolved_executable="/bin/true",
         harness_version="1.2.27",
         working_directory="/tmp",
-        adapter_version="2026.8.1.dev1",
+        adapter_version="2026.8.1",
         capabilities=HarnessCapabilities(kind=HarnessKind.OPENCODE, version="1.2.27"),
     )
 
@@ -237,4 +237,320 @@ async def test_sse_disconnect_replaces_stream_task(monkeypatch: pytest.MonkeyPat
             break
         await asyncio.sleep(0.01)
     assert clients[0].stream_calls == 2
+    await adapter.close(session)
+
+
+@pytest.mark.asyncio
+async def test_answer_interaction_pending_permission(monkeypatch: pytest.MonkeyPatch) -> None:
+    from talktoharnesses.domain.enums import ApprovalDecision, ErrorCode
+    from talktoharnesses.domain.errors import DomainError
+    from talktoharnesses.domain.models import InteractionAnswer
+
+    async def fake_probe(config: HarnessConfiguration):
+        from talktoharnesses.providers.opencode.compatibility import match_release
+
+        release = match_release("1.2.27", platform="linux")
+        return release.to_harness_capabilities(), release
+
+    monkeypatch.setattr("talktoharnesses.providers.opencode.adapter.probe_opencode", fake_probe)
+    client = FakeHttpClient("http://127.0.0.1")
+    adapter = OpenCodeAdapter(http_client_factory=lambda base_url: client)
+    adapter.prepare_port(19504)
+    await adapter.probe(_config())
+    session = await adapter.start(
+        StartSessionRequest(
+            conversation_id=uuid4(),
+            binding_id=uuid4(),
+            configuration=_config(),
+            launch=_launch(),
+        )
+    )
+    await adapter.submit(session, TurnRequest(turn_id=uuid4(), prompt="hi"))
+    await adapter._dispatch_sse(  # pyright: ignore[reportPrivateUsage]
+        None,
+        json.dumps(
+            {
+                "type": "permission.asked",
+                "properties": {
+                    "sessionID": "sess-1",
+                    "permissionID": "perm-42",
+                    "tool": "shell",
+                    "title": "Run shell",
+                },
+            }
+        ),
+    )
+    event = await asyncio.wait_for(anext(adapter.events(session)), timeout=1.0)
+    assert isinstance(event, HarnessInteractionRequest)
+    interaction_id = event.payload.interaction_id
+
+    await adapter.answer_interaction(
+        session,
+        InteractionAnswer(interaction_id=interaction_id, decision=ApprovalDecision.ALLOW_ONCE),
+    )
+    assert any(
+        path.endswith("/permissions/perm-42") and body == {"response": "once"}
+        for path, body in client.posts
+    )
+
+    with pytest.raises(DomainError) as exc:
+        await adapter.answer_interaction(
+            session,
+            InteractionAnswer(interaction_id=uuid4(), decision=ApprovalDecision.DENY),
+        )
+    assert exc.value.code is ErrorCode.INVALID_STATE
+    await adapter.close(session)
+
+
+@pytest.mark.asyncio
+async def test_retry_startup_and_close_idempotent(monkeypatch: pytest.MonkeyPatch) -> None:
+    from talktoharnesses.domain.enums import ErrorCode
+    from talktoharnesses.domain.errors import DomainError
+
+    async def fake_probe(config: HarnessConfiguration):
+        from talktoharnesses.providers.opencode.compatibility import match_release
+
+        release = match_release("1.2.27", platform="linux")
+        return release.to_harness_capabilities(), release
+
+    monkeypatch.setattr("talktoharnesses.providers.opencode.adapter.probe_opencode", fake_probe)
+    client = FakeHttpClient("http://127.0.0.1")
+    adapter = OpenCodeAdapter(http_client_factory=lambda base_url: client)
+    adapter.prepare_port(19505)
+    await adapter.probe(_config())
+
+    # No dead process → no retry argv.
+    assert (
+        await adapter.retry_startup(
+            DomainError(ErrorCode.RUNTIME_TIMEOUT, "bind race"),
+        )
+        is None
+    )
+
+    class _DeadProcess:
+        returncode = 1
+
+    adapter._process = _DeadProcess()  # type: ignore[assignment]
+    argv = await adapter.retry_startup(DomainError(ErrorCode.RUNTIME_TIMEOUT, "bind race"))
+    assert argv is not None
+    assert any("--port" in part or part.isdigit() for part in argv)
+
+    # Wrong error code → no retry.
+    adapter._process = _DeadProcess()  # type: ignore[assignment]
+    assert await adapter.retry_startup(DomainError(ErrorCode.INVALID_STATE, "nope")) is None
+    adapter._process = None  # type: ignore[assignment]
+
+    session = await adapter.start(
+        StartSessionRequest(
+            conversation_id=uuid4(),
+            binding_id=uuid4(),
+            configuration=_config(),
+            launch=_launch(),
+        )
+    )
+    await adapter.close(session)
+    await adapter.close(session)
+
+
+def test_bind_process_redaction_seen_and_build_argv() -> None:
+    adapter = OpenCodeAdapter(http_client_factory=lambda base_url: FakeHttpClient(base_url))
+    handle = object()
+    adapter.bind_process(handle)  # type: ignore[arg-type]
+    assert adapter._process is handle  # pyright: ignore[reportPrivateUsage]
+    adapter.set_redaction_patterns(("SECRET",))
+    adapter.import_seen(frozenset({"n"}), frozenset({"o"}))
+    native, offsets = adapter.export_seen()
+    assert "n" in native and "o" in offsets
+    argv = adapter.build_argv(_config())
+    assert any(part.isdigit() or part.startswith("--") for part in argv)
+    assert adapter._port is not None  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.asyncio
+async def test_dispatch_sse_and_reconnect_edges(monkeypatch: pytest.MonkeyPatch) -> None:
+    from talktoharnesses.domain.enums import ErrorCode
+    from talktoharnesses.domain.errors import DomainError
+    from talktoharnesses.domain.events import TurnOutcomeUnknownPayload
+    from talktoharnesses.providers.adapter import HarnessSession
+
+    async def fake_probe(config: HarnessConfiguration):
+        from talktoharnesses.providers.opencode.compatibility import match_release
+
+        release = match_release("1.2.27", platform="linux")
+        return release.to_harness_capabilities(), release
+
+    monkeypatch.setattr("talktoharnesses.providers.opencode.adapter.probe_opencode", fake_probe)
+    client = FakeHttpClient("http://127.0.0.1")
+    adapter = OpenCodeAdapter(http_client_factory=lambda base_url: client)
+    adapter.prepare_port(19506)
+    await adapter.probe(_config())
+    session = await adapter.start(
+        StartSessionRequest(
+            conversation_id=uuid4(),
+            binding_id=uuid4(),
+            configuration=_config(),
+            launch=_launch(),
+        )
+    )
+    adapter._normalizer.begin_turn(uuid4())  # pyright: ignore[reportPrivateUsage]
+
+    await adapter._dispatch_sse("server.connected", "")  # pyright: ignore[reportPrivateUsage]
+    with pytest.raises(DomainError):
+        await adapter._dispatch_sse(None, "{not-json")  # pyright: ignore[reportPrivateUsage]
+    with pytest.raises(DomainError):
+        await adapter._dispatch_sse(None, "[]")  # pyright: ignore[reportPrivateUsage]
+    with pytest.raises(DomainError):
+        await adapter._dispatch_sse(  # pyright: ignore[reportPrivateUsage]
+            None,
+            json.dumps({"type": "permission.asked", "properties": {"permissionID": "p"}}),
+        )
+
+    # Flat envelope without properties.
+    await adapter._dispatch_sse(  # pyright: ignore[reportPrivateUsage]
+        None,
+        json.dumps(
+            {
+                "type": "message.part.delta",
+                "sessionID": "sess-1",
+                "messageID": "m1",
+                "partID": "p1",
+                "field": "text",
+                "delta": "hi",
+            }
+        ),
+    )
+
+    # Reconnect when process already dead → outcome unknown.
+    class _Dead:
+        returncode = 9
+
+    adapter._process = _Dead()  # type: ignore[assignment]
+    adapter._closed = False  # pyright: ignore[reportPrivateUsage]
+    await adapter._reconnect_resync()  # pyright: ignore[reportPrivateUsage]
+    drained: list[object] = []
+    while True:
+        try:
+            drained.append(adapter._event_q.get_nowait())  # pyright: ignore[reportPrivateUsage]
+        except Exception:
+            break
+    assert any(isinstance(item, TurnOutcomeUnknownPayload) for item in drained)
+
+    with pytest.raises(DomainError):
+        adapter._require_session(  # pyright: ignore[reportPrivateUsage]
+            HarnessSession(
+                conversation_id=uuid4(),
+                binding_id=uuid4(),
+                kind=HarnessKind.OPENCODE,
+            )
+        )
+    adapter._raise_http(FakeResponse(status_code=200), "ok")  # pyright: ignore[reportPrivateUsage]
+    with pytest.raises(DomainError) as http_exc:
+        adapter._raise_http(FakeResponse(status_code=500), "boom")  # pyright: ignore[reportPrivateUsage]
+    assert http_exc.value.code is ErrorCode.PROTOCOL_ERROR
+    await adapter.close(session)
+
+
+def test_opencode_model_ref_parsing() -> None:
+    from talktoharnesses.domain.enums import ErrorCode
+    from talktoharnesses.domain.errors import DomainError
+    from talktoharnesses.providers.opencode.adapter import (
+        _opencode_model_ref,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    assert _opencode_model_ref("openai/gpt-5") == {
+        "providerID": "openai",
+        "modelID": "gpt-5",
+    }
+    assert _opencode_model_ref("anthropic/claude-sonnet-4/extra") == {
+        "providerID": "anthropic",
+        "modelID": "claude-sonnet-4/extra",
+    }
+    with pytest.raises(DomainError) as missing:
+        _opencode_model_ref("gpt-5")
+    assert missing.value.code is ErrorCode.PROVIDER_INCOMPATIBLE
+    with pytest.raises(DomainError):
+        _opencode_model_ref("/only-model")
+    with pytest.raises(DomainError):
+        _opencode_model_ref("provider/")
+
+
+@pytest.mark.asyncio
+async def test_question_asked_and_submit_model_ref(monkeypatch: pytest.MonkeyPatch) -> None:
+    from talktoharnesses.domain.enums import ApprovalDecision, ErrorCode
+    from talktoharnesses.domain.errors import DomainError
+    from talktoharnesses.domain.models import InteractionAnswer
+    from talktoharnesses.providers.adapter import SteerRequest
+    from talktoharnesses.providers.opencode.compatibility import match_release
+
+    async def fake_probe(config: HarnessConfiguration):
+        release = match_release("1.2.27", platform="linux")
+        return release.to_harness_capabilities(), release
+
+    monkeypatch.setattr("talktoharnesses.providers.opencode.adapter.probe_opencode", fake_probe)
+    client = FakeHttpClient("http://127.0.0.1")
+    adapter = OpenCodeAdapter(http_client_factory=lambda base_url: client)
+    adapter.prepare_port(19507)
+    config = HarnessConfiguration(
+        kind=HarnessKind.OPENCODE,
+        executable_path="/bin/true",
+        working_directory="/tmp",
+        model="openai/gpt-test",
+        mode="build",
+    )
+    await adapter.probe(config)
+    launch = LaunchSnapshot(
+        resolved_executable="/bin/true",
+        harness_version="1.2.27",
+        working_directory="/tmp",
+        adapter_version="2026.8.1",
+        capabilities=HarnessCapabilities(kind=HarnessKind.OPENCODE, version="1.2.27"),
+        model="openai/gpt-test",
+        mode="build",
+    )
+    session = await adapter.start(
+        StartSessionRequest(
+            conversation_id=uuid4(),
+            binding_id=uuid4(),
+            configuration=config,
+            launch=launch,
+        )
+    )
+    turn_id = uuid4()
+    await adapter.submit(session, TurnRequest(turn_id=turn_id, prompt="hi"))
+    prompt_posts = [body for path, body in client.posts if path.endswith("/prompt_async")]
+    assert prompt_posts[-1] is not None
+    assert prompt_posts[-1]["model"] == {"providerID": "openai", "modelID": "gpt-test"}
+    assert prompt_posts[-1]["agent"] == "build"
+    assert await adapter.steer(session, SteerRequest(turn_id=turn_id, prompt="more")) is False
+
+    adapter._normalizer.begin_turn(turn_id)  # pyright: ignore[reportPrivateUsage]
+    await adapter._dispatch_sse(  # pyright: ignore[reportPrivateUsage]
+        None,
+        json.dumps(
+            {
+                "type": "question.asked",
+                "properties": {
+                    "sessionID": "sess-1",
+                    "id": "q-1",
+                    "questions": [{"header": "Pick", "options": [{"label": "A", "value": "a"}]}],
+                },
+            }
+        ),
+    )
+    item = adapter._event_q.get_nowait()  # pyright: ignore[reportPrivateUsage]
+    assert isinstance(item, HarnessInteractionRequest)
+    await adapter.answer_interaction(
+        session,
+        InteractionAnswer(
+            interaction_id=item.payload.interaction_id,
+            decision=ApprovalDecision.ALLOW_ONCE,
+            answers={"answers": [["a"]]},
+        ),
+    )
+    reply_posts = [body for path, body in client.posts if path.endswith("/question/q-1/reply")]
+    assert reply_posts
+
+    with pytest.raises(DomainError) as missing_id:
+        await adapter._handle_question({})  # pyright: ignore[reportPrivateUsage]
+    assert missing_id.value.code is ErrorCode.PROTOCOL_ERROR
     await adapter.close(session)

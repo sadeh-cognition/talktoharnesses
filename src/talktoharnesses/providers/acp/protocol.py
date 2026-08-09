@@ -26,6 +26,7 @@ class AcpProtocolConfig:
     control_notifications: frozenset[str]
     session_update_validator: ParamsValidator
     permission_request_validator: ParamsValidator
+    control_notification_prefix: str | None = None
 
     def is_outbound_method(self, method: str) -> bool:
         return method in self.outbound_methods
@@ -34,14 +35,17 @@ class AcpProtocolConfig:
         return method in self.inbound_request_methods
 
     def is_control_notification(self, method: str) -> bool:
-        return method in self.control_notifications
+        if method in self.control_notifications:
+            return True
+        prefix = self.control_notification_prefix
+        return bool(prefix and method.startswith(prefix))
 
     def is_inbound_method(self, method: str) -> bool:
         if method in self.inbound_request_methods:
             return True
         if method == "session/update":
             return True
-        return method in self.control_notifications
+        return self.is_control_notification(method)
 
 
 def grok_acp_protocol() -> AcpProtocolConfig:
@@ -52,6 +56,8 @@ def grok_acp_protocol() -> AcpProtocolConfig:
         control_notifications=GROK_CONTROL_NOTIFICATIONS,
         session_update_validator=is_allowlisted_session_update,
         permission_request_validator=is_allowlisted_permission_request,
+        # Grok emits additive `_x.ai/*` control notifications across CLI builds.
+        control_notification_prefix="_x.ai/",
     )
 
 

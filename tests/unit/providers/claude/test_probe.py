@@ -59,3 +59,129 @@ async def test_explicit_executable_requires_explicit_compatibility_row(
     assert exc_info.value.code is ErrorCode.PROVIDER_INCOMPATIBLE
     assert exc_info.value.details["cli_source"] == "explicit"
     assert called == [(str(executable), "--version")]
+
+
+@pytest.mark.asyncio
+async def test_bundled_cli_probe_success_and_import_edges(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from talktoharnesses.providers.claude import probe as probe_mod
+
+    monkeypatch.setattr(
+        probe_mod,
+        "_import_claude_sdk",
+        lambda: SimpleNamespace(__version__="0.1.53"),
+    )
+    monkeypatch.setattr(probe_mod, "_bundled_cli_version", lambda: "2.1.88")
+    caps, release = await probe_claude(
+        HarnessConfiguration(kind=HarnessKind.CLAUDE, working_directory="/tmp")
+    )
+    assert release.cli_source == "bundled"
+    assert caps.kind is HarnessKind.CLAUDE
+
+    def _import_fail() -> object:
+        raise DomainError(
+            ErrorCode.PROVIDER_INCOMPATIBLE,
+            "claude-agent-sdk extra is not installed",
+            details={"extra": "claude"},
+        )
+
+    monkeypatch.setattr(probe_mod, "_import_claude_sdk", _import_fail)
+    with pytest.raises(DomainError) as missing:
+        await probe_claude(HarnessConfiguration(kind=HarnessKind.CLAUDE, working_directory="/tmp"))
+    assert missing.value.code is ErrorCode.PROVIDER_INCOMPATIBLE
+
+    def _bundled_fail() -> str:
+        raise DomainError(
+            ErrorCode.PROVIDER_INCOMPATIBLE,
+            "unable to determine bundled Claude Code CLI version",
+        )
+
+    monkeypatch.setattr(
+        probe_mod,
+        "_import_claude_sdk",
+        lambda: SimpleNamespace(__version__="0.1.53"),
+    )
+    monkeypatch.setattr(probe_mod, "_bundled_cli_version", _bundled_fail)
+    with pytest.raises(DomainError):
+        await probe_claude(HarnessConfiguration(kind=HarnessKind.CLAUDE, working_directory="/tmp"))
+
+    monkeypatch.setattr(
+        probe_mod,
+        "_import_claude_sdk",
+        lambda: SimpleNamespace(__version__=""),
+    )
+    with pytest.raises(DomainError) as no_ver:
+        await probe_claude(HarnessConfiguration(kind=HarnessKind.CLAUDE, working_directory="/tmp"))
+    assert no_ver.value.code is ErrorCode.PROVIDER_INCOMPATIBLE
+
+
+@pytest.mark.asyncio
+async def test_explicit_version_oserror_and_bad_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from talktoharnesses.providers.claude import probe as probe_mod
+
+    executable = Path("/tmp/claude-bad")
+    monkeypatch.setattr(
+        probe_mod,
+        "_import_claude_sdk",
+        lambda: SimpleNamespace(__version__="0.1.53"),
+    )
+
+    def _resolve_executable(_path: Path) -> Path:
+        return executable
+
+    monkeypatch.setattr(probe_mod, "resolve_executable", _resolve_executable)
+
+    async def boom(*_a: object, **_k: object) -> _VersionProcess:
+        raise OSError("nope")
+
+    monkeypatch.setattr(probe_mod.asyncio, "create_subprocess_exec", boom)
+    with pytest.raises(DomainError) as os_exc:
+        await probe_claude(
+            HarnessConfiguration(
+                kind=HarnessKind.CLAUDE,
+                executable_path=str(executable),
+                working_directory="/tmp",
+            )
+        )
+    assert os_exc.value.code is ErrorCode.INVALID_EXECUTABLE
+
+    class _BadRc(_VersionProcess):
+        returncode = 2
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            return b"", b"failed"
+
+    async def bad_rc(*_a: object, **_k: object) -> _BadRc:
+        return _BadRc()
+
+    monkeypatch.setattr(probe_mod.asyncio, "create_subprocess_exec", bad_rc)
+    with pytest.raises(DomainError) as rc_exc:
+        await probe_claude(
+            HarnessConfiguration(
+                kind=HarnessKind.CLAUDE,
+                executable_path=str(executable),
+                working_directory="/tmp",
+            )
+        )
+    assert rc_exc.value.code is ErrorCode.PROVIDER_INCOMPATIBLE
+
+    class _Malformed(_VersionProcess):
+        async def communicate(self) -> tuple[bytes, bytes]:
+            return b"not-a-version\nwith-newline\n", b""
+
+    async def malformed(*_a: object, **_k: object) -> _Malformed:
+        return _Malformed()
+
+    monkeypatch.setattr(probe_mod.asyncio, "create_subprocess_exec", malformed)
+    with pytest.raises(DomainError) as malformed_exc:
+        await probe_claude(
+            HarnessConfiguration(
+                kind=HarnessKind.CLAUDE,
+                executable_path=str(executable),
+                working_directory="/tmp",
+            )
+        )
+    assert malformed_exc.value.code is ErrorCode.PROVIDER_INCOMPATIBLE
