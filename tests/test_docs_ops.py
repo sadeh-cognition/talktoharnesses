@@ -17,6 +17,7 @@ DOC_PATHS = [
     ROOT / "docs" / "live-testing.md",
     ROOT / "docs" / "releasing.md",
     ROOT / "docs" / "performance.md",
+    ROOT / "docs" / "search-retention-transcripts.md",
 ]
 
 

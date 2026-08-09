@@ -112,6 +112,7 @@ class Conversation(BaseModel):
     archived_at: UtcDateTime | None = None
     snoozed_until: UtcDateTime | None = None
     deleted_at: UtcDateTime | None = None
+    retention_exempt: bool = False
     version: int = 0
     next_event_sequence: int = 1
     active_turn_id: UUID | None = None
@@ -214,7 +215,21 @@ class Plan(BaseModel):
     items: tuple[PlanItem, ...] = ()
 
 
-_MAX_TOOL_TAIL_BYTES = 2048
+CANONICAL_TOOL_TAIL_BYTES = 2048
+
+
+def limit_tool_output_tail(value: str) -> str:
+    """Retain the newest canonical 2 KiB at a valid UTF-8 boundary."""
+    encoded = value.encode("utf-8")
+    if len(encoded) <= CANONICAL_TOOL_TAIL_BYTES:
+        return value
+    truncated = encoded[-CANONICAL_TOOL_TAIL_BYTES:]
+    while truncated:
+        try:
+            return truncated.decode("utf-8")
+        except UnicodeDecodeError:
+            truncated = truncated[1:]
+    return ""
 
 
 class CanonicalToolResult(BaseModel):
@@ -233,17 +248,7 @@ class CanonicalToolResult(BaseModel):
     @field_validator("output_tail")
     @classmethod
     def _limit_tail(cls, value: str) -> str:
-        encoded = value.encode("utf-8")
-        if len(encoded) <= _MAX_TOOL_TAIL_BYTES:
-            return value
-        # Retain the newest output and repair a leading partial UTF-8 character.
-        truncated = encoded[-_MAX_TOOL_TAIL_BYTES:]
-        while truncated:
-            try:
-                return truncated.decode("utf-8")
-            except UnicodeDecodeError:
-                truncated = truncated[1:]
-        return ""
+        return limit_tool_output_tail(value)
 
 
 class ToolOutputChunk(BaseModel):
@@ -654,6 +659,37 @@ class ConversationShell(BaseModel):
     snoozed_until: UtcDateTime | None = None
     updated_at: UtcDateTime
     latest_activity_at: UtcDateTime | None = None
+
+
+class SearchSnippet(BaseModel):
+    model_config = FROZEN
+
+    text: str
+    matched_terms: tuple[str, ...] = ()
+
+
+class ConversationSearchHit(BaseModel):
+    model_config = FROZEN
+
+    conversation: ConversationShell
+    snippet: SearchSnippet | None = None
+
+
+class RetentionPolicyProjection(BaseModel):
+    model_config = FROZEN
+
+    months: int = Field(ge=1, le=120)
+    updated_at: UtcDateTime | None = None
+
+
+class RetentionPreviewProjection(BaseModel):
+    model_config = FROZEN
+
+    cutoff: UtcDateTime
+    soft_deleted_conversations: int
+    history_conversations: int
+    terminal_turns: int
+    waiting_turns: int
 
 
 class HarnessProjection(BaseModel):

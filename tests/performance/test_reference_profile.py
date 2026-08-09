@@ -24,7 +24,7 @@ from talktoharnesses.django.models import (
 )
 from talktoharnesses.django.persistence import DjangoPersistence
 from talktoharnesses.domain.events import ConversationEvent, ConversationTitleUpdatedPayload
-from talktoharnesses.domain.models import ConversationShell, Page
+from talktoharnesses.domain.models import ConversationSearchHit, ConversationShell, Page
 from talktoharnesses.providers.registry import AdapterRegistry
 from talktoharnesses.runtime.manager import RuntimeManager
 
@@ -83,11 +83,15 @@ def _seed_shells(count: int, *, owner_id: str, title_prefix: str) -> None:
                 state=_empty_state_json(owner_id, conversation_id),
             )
         )
+        normalized = f"{title_prefix} alpha beta document {index:05d}"
         docs.append(
             SearchDocument(
                 conversation_id=conversation_id,
                 owner_id=owner_id,
-                normalized_text=f"{title_prefix} alpha beta document {index:05d}",
+                normalized_text=normalized,
+                search_title=f"{title_prefix}",
+                search_body=f"alpha beta document {index:05d}",
+                snippet_text=f"{title_prefix} alpha beta document {index:05d}",
                 updated_at=updated,
             )
         )
@@ -123,14 +127,14 @@ async def test_search_conversations_p95() -> None:
     await sync_to_async(_seed_shells)(100, owner_id=OTHER, title_prefix="search")
     persistence = DjangoPersistence()
 
-    def _search() -> Page[ConversationShell]:
+    def _search() -> Page[ConversationSearchHit]:
         with CaptureQueriesContext(connection) as ctx:
             page = persistence._search_conversations(OWNER, "alpha beta", None, 50)  # pyright: ignore[reportPrivateUsage]
         assert len(page.items) == 50
         assert len(ctx.captured_queries) <= 3
         return page
 
-    async def operation() -> Page[ConversationShell]:
+    async def operation() -> Page[ConversationSearchHit]:
         return await sync_to_async(_search)()
 
     p95, _ = await measure_p95_ns(operation)

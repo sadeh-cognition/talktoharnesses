@@ -15,8 +15,11 @@ from talktoharnesses.django.api.schemas import (
     CreateConversationBody,
     CreateHarnessBody,
     EditQueuedPromptBody,
+    ImportTranscriptBody,
     InteractionDraftBody,
     ResolveInteractionBody,
+    RetentionExemptionBody,
+    RetentionPolicyBody,
     SnoozeBody,
     SteerBody,
     SubmitTurnBody,
@@ -30,6 +33,7 @@ from talktoharnesses.domain.models import (
     ApprovalRule,
     ApprovalRuleProjection,
     CommandProjection,
+    ConversationSearchHit,
     ConversationShell,
     ConversationSnapshot,
     HarnessModeInfo,
@@ -42,11 +46,14 @@ from talktoharnesses.domain.models import (
     Page,
     PlanProjection,
     ReadinessProjection,
+    RetentionPolicyProjection,
+    RetentionPreviewProjection,
     SubmitTurnResult,
     TokenProjection,
     ToolProjection,
     TurnProjection,
 )
+from talktoharnesses.domain.transcripts import TranscriptDocument
 
 router = Router()
 
@@ -193,13 +200,25 @@ async def create_conversation(
     return 201, snap
 
 
-@router.get("/conversations/search", response=Page[ConversationShell])
+@router.post("/conversations/import", response={201: ConversationSnapshot})
+async def import_transcript(
+    request: HttpRequest, body: ImportTranscriptBody
+) -> tuple[int, ConversationSnapshot]:
+    snap = await get_service().import_transcript(
+        _owner(request),
+        body.harness_id,
+        body.document,
+    )
+    return 201, snap
+
+
+@router.get("/conversations/search", response=Page[ConversationSearchHit])
 async def search_conversations(
     request: HttpRequest,
     q: str,
     cursor: str | None = None,
     limit: int = 50,
-) -> Page[ConversationShell]:
+) -> Page[ConversationSearchHit]:
     return await get_service().search_conversations(_owner(request), q, cursor=cursor, limit=limit)
 
 
@@ -250,6 +269,50 @@ async def unsnooze_conversation(
 async def soft_delete_conversation(request: HttpRequest, conversation_id: UUID) -> tuple[int, None]:
     await get_service().soft_delete_conversation(_owner(request), conversation_id)
     return 204, None
+
+
+@router.put(
+    "/conversations/{conversation_id}/retention-exemption",
+    response=ConversationSnapshot,
+)
+async def set_retention_exemption(
+    request: HttpRequest,
+    conversation_id: UUID,
+    body: RetentionExemptionBody,
+) -> ConversationSnapshot:
+    return await get_service().set_retention_exemption(
+        _owner(request), conversation_id, exempt=body.exempt
+    )
+
+
+@router.get(
+    "/conversations/{conversation_id}/transcript",
+    response=TranscriptDocument,
+)
+async def export_transcript(request: HttpRequest, conversation_id: UUID) -> TranscriptDocument:
+    return await get_service().export_transcript(_owner(request), conversation_id)
+
+
+# ---------------------------------------------------------------------------
+# Retention policy
+# ---------------------------------------------------------------------------
+
+
+@router.get("/retention", response=RetentionPolicyProjection)
+async def get_retention_policy(request: HttpRequest) -> RetentionPolicyProjection:
+    return await get_service().get_retention_policy(_owner(request))
+
+
+@router.put("/retention", response=RetentionPolicyProjection)
+async def replace_retention_policy(
+    request: HttpRequest, body: RetentionPolicyBody
+) -> RetentionPolicyProjection:
+    return await get_service().replace_retention_policy(_owner(request), body.months)
+
+
+@router.get("/retention/preview", response=RetentionPreviewProjection)
+async def preview_retention(request: HttpRequest) -> RetentionPreviewProjection:
+    return await get_service().preview_retention(_owner(request))
 
 
 # ---------------------------------------------------------------------------

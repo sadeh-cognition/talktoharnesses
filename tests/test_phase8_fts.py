@@ -30,22 +30,22 @@ async def test_fts_matches_title_messages_tools_and_and_terms() -> None:
     )
 
     by_title = await persistence.search_conversations("owner", "Alpha Project")
-    assert [s.id for s in by_title.items] == [state.conversation.id]
+    assert [h.conversation.id for h in by_title.items] == [state.conversation.id]
 
     by_user = await persistence.search_conversations("owner", "WIDGET")
-    assert [s.id for s in by_user.items] == [state.conversation.id]
+    assert [h.conversation.id for h in by_user.items] == [state.conversation.id]
 
     by_assistant = await persistence.search_conversations("owner", "gasket")
-    assert [s.id for s in by_assistant.items] == [state.conversation.id]
+    assert [h.conversation.id for h in by_assistant.items] == [state.conversation.id]
 
     by_tool = await persistence.search_conversations("owner", "bash listing")
-    assert [s.id for s in by_tool.items] == [state.conversation.id]
+    assert [h.conversation.id for h in by_tool.items] == [state.conversation.id]
 
     both = await persistence.search_conversations("owner", "widget missingterm")
     assert both.items == ()
 
     punct = await persistence.search_conversations("owner", "widget-assembly!")
-    assert [s.id for s in punct.items] == [state.conversation.id]
+    assert [h.conversation.id for h in punct.items] == [state.conversation.id]
 
 
 @pytest.mark.django_db(transaction=True)
@@ -60,7 +60,7 @@ async def test_fts_owner_isolation_soft_delete_and_removed_content() -> None:
     await commit_turn(persistence, b, prompt="other owner", key="b1", now=NOW)
 
     a_hits = await persistence.search_conversations("owner-a", "shared-token")
-    assert {s.id for s in a_hits.items} == {a.conversation.id}
+    assert {h.conversation.id for h in a_hits.items} == {a.conversation.id}
 
     deleted = soft_delete_conversation(a, now=NOW + timedelta(minutes=1))
     await persistence.commit_facade_mutation(
@@ -88,12 +88,43 @@ async def test_fts_keyset_order_matches_list_order() -> None:
     await persistence.save_snapshot(second)
 
     page = await persistence.search_conversations("owner", "order-token", limit=1)
-    assert [s.id for s in page.items] == [second.conversation.id]
+    assert [h.conversation.id for h in page.items] == [second.conversation.id]
     assert page.next_cursor is not None
     page2 = await persistence.search_conversations(
         "owner", "order-token", cursor=page.next_cursor, limit=1
     )
-    assert [s.id for s in page2.items] == [first.conversation.id]
+    assert [h.conversation.id for h in page2.items] == [first.conversation.id]
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_fts_uses_fixed_rank_and_database_exclusions() -> None:
+    persistence = DjangoPersistence()
+    title_match = idle_state(title="alpha")
+    body_match = idle_state(title="other")
+    body_match = body_match.model_copy(
+        update={
+            "conversation": body_match.conversation.model_copy(
+                update={"updated_at": NOW + timedelta(days=1)}
+            )
+        }
+    )
+    await persistence.save_snapshot(title_match)
+    await persistence.save_snapshot(body_match)
+    body_document = await SearchDocument.objects.aget(conversation_id=body_match.conversation.id)
+    body_document.normalized_text = "alpha alpha alpha alpha alpha alpha alpha alpha blocked"
+    body_document.search_title = ""
+    body_document.search_body = "alpha alpha alpha alpha alpha alpha alpha alpha blocked"
+    body_document.snippet_text = "alpha alpha alpha alpha alpha alpha alpha alpha blocked"
+    await body_document.asave()
+
+    ranked = await persistence.search_conversations("owner", "alpha")
+    assert [hit.conversation.id for hit in ranked.items] == [
+        title_match.conversation.id,
+        body_match.conversation.id,
+    ]
+    excluded = await persistence.search_conversations("owner", "alpha -blocked")
+    assert [hit.conversation.id for hit in excluded.items] == [title_match.conversation.id]
 
 
 @pytest.mark.django_db(transaction=True)
@@ -102,18 +133,25 @@ async def test_fts_empty_query_and_content_update_sync() -> None:
     persistence = DjangoPersistence()
     state = idle_state(title="trigger-sync-token")
     await persistence.save_snapshot(state)
-    empty = await persistence.search_conversations("owner", "   !!! ")
-    assert empty.items == ()
+    from talktoharnesses.domain.enums import ErrorCode
+    from talktoharnesses.domain.errors import DomainError
+
+    with pytest.raises(DomainError) as empty_exc:
+        await persistence.search_conversations("owner", "   !!! ")
+    assert empty_exc.value.code is ErrorCode.INVALID_SEARCH_QUERY
 
     hits = await persistence.search_conversations("owner", "trigger-sync-token")
-    assert [s.id for s in hits.items] == [state.conversation.id]
+    assert [h.conversation.id for h in hits.items] == [state.conversation.id]
 
     doc = await SearchDocument.objects.aget(conversation_id=state.conversation.id)
     doc.normalized_text = "brand new indexed phrase"
+    doc.search_title = ""
+    doc.search_body = "brand new indexed phrase"
+    doc.snippet_text = "brand new indexed phrase"
     doc.updated_at = datetime.now(UTC)
     await doc.asave()
     updated = await persistence.search_conversations("owner", "brand new")
-    assert [s.id for s in updated.items] == [state.conversation.id]
+    assert [h.conversation.id for h in updated.items] == [state.conversation.id]
     stale = await persistence.search_conversations("owner", "trigger-sync-token")
     assert stale.items == ()
 
@@ -126,7 +164,7 @@ async def test_fts_preserves_diacritics_as_literal_terms() -> None:
     await persistence.save_snapshot(state)
 
     accented = await persistence.search_conversations("owner", "café")
-    assert [shell.id for shell in accented.items] == [state.conversation.id]
+    assert [hit.conversation.id for hit in accented.items] == [state.conversation.id]
     unaccented = await persistence.search_conversations("owner", "cafe")
     assert unaccented.items == ()
 
@@ -144,7 +182,7 @@ def test_fts_migration_reverse_preserves_search_document() -> None:
     async_to_sync(persistence_setup.save_snapshot)(state)
     assert SearchDocument.objects.filter(conversation_id=state.conversation.id).exists()
 
-    call_command("migrate", "talktoharnesses", "0005_phase8_backfill", verbosity=0)
+    call_command("migrate", "talktoharnesses", "0007_phase9_recovery", verbosity=0)
     assert SearchDocument.objects.filter(conversation_id=state.conversation.id).exists()
     if db.vendor == "sqlite":
         with db.cursor() as cursor:
@@ -152,7 +190,13 @@ def test_fts_migration_reverse_preserves_search_document() -> None:
                 "SELECT name FROM sqlite_master WHERE type='table' "
                 "AND name='talktoharnesses_search_document_fts'"
             )
-            assert cursor.fetchone() is None
+            assert cursor.fetchone() is not None
+            cursor.execute(
+                "SELECT conversation_id FROM talktoharnesses_search_document_fts "
+                "WHERE talktoharnesses_search_document_fts MATCH %s",
+                ["retain"],
+            )
+            assert cursor.fetchone() is not None
     elif db.vendor == "postgresql":
         with db.cursor() as cursor:
             cursor.execute(
@@ -160,8 +204,16 @@ def test_fts_migration_reverse_preserves_search_document() -> None:
                 "WHERE table_name=%s AND column_name='search_vector'",
                 ["talktoharnesses_search_document"],
             )
+            assert cursor.fetchone() is not None
+    call_command("migrate", "talktoharnesses", "0005_phase8_backfill", verbosity=0)
+    if db.vendor == "sqlite":
+        with db.cursor() as cursor:
+            cursor.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' "
+                "AND name='talktoharnesses_search_document_fts'"
+            )
             assert cursor.fetchone() is None
-    call_command("migrate", "talktoharnesses", "0007_phase9_recovery", verbosity=0)
+    call_command("migrate", "talktoharnesses", "0008_phase11_search_retention", verbosity=0)
     if connection.vendor == "sqlite":
         with connection.cursor() as cursor:
             cursor.execute(

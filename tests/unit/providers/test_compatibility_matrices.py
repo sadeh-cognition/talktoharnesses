@@ -51,7 +51,7 @@ PROVIDERS = (
 def test_packaged_documents_load_with_empty_matrices(label: str, loader: Any) -> None:
     del label
     doc = loader()
-    assert doc.adapter_version == "2026.8.0.dev9"
+    assert doc.adapter_version == "2026.8.1.dev1"
     assert doc.create_matrix == []
     assert doc.resume_matrix == []
     assert doc.releases
@@ -147,7 +147,7 @@ def test_membership_allows_empty_matrix_on_dev_version() -> None:
         matrix=[],
         mode="create",
         harness_label="test",
-        package_version="2026.8.0.dev9",
+        package_version="2026.8.1.dev1",
     )
 
 
@@ -198,7 +198,7 @@ def test_membership_bypass_for_fixtures() -> None:
 
 
 def test_is_development_version() -> None:
-    assert is_development_version("2026.8.0.dev9") is True
+    assert is_development_version("2026.8.1.dev1") is True
     assert is_development_version("2026.8.0") is False
 
 

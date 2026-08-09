@@ -57,10 +57,29 @@ class CreateConversationBody(BaseModel):
     title: str | None = None
 
 
+class ImportTranscriptBody(BaseModel):
+    model_config = _REQUEST
+
+    harness_id: UUID
+    document: dict[str, Any]
+
+
 class SnoozeBody(BaseModel):
     model_config = _REQUEST
 
     until: datetime
+
+
+class RetentionPolicyBody(BaseModel):
+    model_config = _REQUEST
+
+    months: int = Field(ge=1, le=120)
+
+
+class RetentionExemptionBody(BaseModel):
+    model_config = _REQUEST
+
+    exempt: bool
 
 
 class SubmitTurnBody(BaseModel):

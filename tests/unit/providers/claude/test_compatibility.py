@@ -15,7 +15,7 @@ from talktoharnesses.providers.compatibility import render_supported_harnesses_m
 
 def test_load_and_match_release() -> None:
     doc = load_claude_compatibility()
-    assert doc.adapter_version == "2026.8.0.dev9"
+    assert doc.adapter_version == "2026.8.1.dev1"
     release = match_release(
         sdk_version="0.1.53",
         cli_version="2.1.88",

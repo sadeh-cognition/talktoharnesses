@@ -14,6 +14,7 @@ create/resume support claims are generated in
 - [`docs/live-testing.md`](docs/live-testing.md)
 - [`docs/releasing.md`](docs/releasing.md)
 - [`docs/performance.md`](docs/performance.md)
+- [`docs/search-retention-transcripts.md`](docs/search-retention-transcripts.md)
 
 ## Install
 

@@ -1,7 +1,8 @@
-"""Six-month retention cutoff and cleanup orchestration entry point.
+"""Owner-scoped retention cutoff, eligibility, and cleanup orchestration.
 
-``six_months_before`` is the one pure calendar calculation used by both the
-cutoff and eligibility checks in ``docs/phase8.md`` Work Package 5.
+``months_before`` is the one pure calendar calculation used by policy preview
+and cleanup. ``classify_history_eligibility`` is shared by read-only preview
+and mutating prune so both agree on exempt / running / waiting rules.
 ``run_cleanup`` is the async orchestration the ``talktoharnesses_cleanup``
 management command calls; every transaction it drives lives in ``Persistence``
 so the same pass runs against Django or the in-memory store.
@@ -20,26 +21,102 @@ from talktoharnesses.application.observability import get_observability
 from talktoharnesses.application.persistence import Persistence, PruneResult
 from talktoharnesses.application.publisher import CommittedEventPublisher
 from talktoharnesses.domain._base import require_utc
+from talktoharnesses.domain.enums import ActivityStatus, TurnStatus
+from talktoharnesses.domain.models import Turn
+from talktoharnesses.domain.transitions import ConversationState
 from talktoharnesses.runtime.manager import RuntimeManager
 
 logger = logging.getLogger(__name__)
 
-_MONTHS_RETAINED = 6
+DEFAULT_RETENTION_MONTHS = 6
+
+_TERMINAL_TURN_STATUSES = frozenset(
+    {
+        TurnStatus.COMPLETED,
+        TurnStatus.INTERRUPTED,
+        TurnStatus.FAILED,
+        TurnStatus.OUTCOME_UNKNOWN,
+    }
+)
 
 
-def six_months_before(now: datetime) -> datetime:
-    """Return ``now`` shifted back six calendar months.
+def months_before(now: datetime, months: int) -> datetime:
+    """Return ``now`` shifted back ``months`` calendar months.
 
     Preserves the time-of-day and UTC offset; the day is clamped to the last
     day of the target month (e.g. Aug 31 -> Feb 28/29). No ``dateutil``.
     """
     ts = require_utc(now)
-    total_months = ts.year * 12 + (ts.month - 1) - _MONTHS_RETAINED
+    total_months = ts.year * 12 + (ts.month - 1) - months
     year, month0 = divmod(total_months, 12)
     month = month0 + 1
     last_day = calendar.monthrange(year, month)[1]
     day = min(ts.day, last_day)
     return ts.replace(year=year, month=month, day=day)
+
+
+def six_months_before(now: datetime) -> datetime:
+    """Return ``now`` shifted back six calendar months (default policy)."""
+    return months_before(now, DEFAULT_RETENTION_MONTHS)
+
+
+def soft_delete_purge_eligible(deleted_at: datetime | None, cutoff: datetime) -> bool:
+    """True when a soft-deleted conversation is past the owner's cutoff."""
+    return deleted_at is not None and deleted_at <= cutoff
+
+
+def is_terminal_turn_expired(
+    status: TurnStatus,
+    completed_at: datetime | None,
+    cutoff: datetime,
+) -> bool:
+    """True when a terminal turn's ``completed_at`` is at or before ``cutoff``."""
+    return status in _TERMINAL_TURN_STATUSES and completed_at is not None and completed_at <= cutoff
+
+
+def is_waiting_turn_expired(active: Turn | None, cutoff: datetime) -> bool:
+    """True when the active turn is ``WAITING`` and started/created at or before cutoff."""
+    return (
+        active is not None
+        and active.status is TurnStatus.WAITING
+        and (active.started_at or active.created_at) <= cutoff
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class HistoryEligibility:
+    """Shared history-prune decision for one conversation at one cutoff.
+
+    ``blocked`` means preview/cleanup skip the conversation entirely (exempt,
+    no binding, background-active, or a non-expired active turn). When not
+    blocked, ``waiting_expired`` marks an active WAITING turn that cleanup
+    cancels before pruning.
+    """
+
+    blocked: bool
+    waiting_expired: bool = False
+
+
+def classify_history_eligibility(
+    state: ConversationState,
+    cutoff: datetime,
+) -> HistoryEligibility:
+    """Classify whether history prune may run for ``state`` at ``cutoff``.
+
+    Exemption skips history prune/rotation. Soft-delete purge is separate and
+    ignores exemption. Running turns and running background activities skip
+    exactly as Phase 8 cleanup does.
+    """
+    if state.conversation.retention_exempt:
+        return HistoryEligibility(blocked=True)
+    if state.binding is None:
+        return HistoryEligibility(blocked=True)
+    if any(activity.status is ActivityStatus.RUNNING for activity in state.activities.values()):
+        return HistoryEligibility(blocked=True)
+    waiting_expired = is_waiting_turn_expired(state.active_turn, cutoff)
+    if state.active_turn is not None and not waiting_expired:
+        return HistoryEligibility(blocked=True)
+    return HistoryEligibility(blocked=False, waiting_expired=waiting_expired)
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,6 +130,40 @@ class CleanupCounts:
     bindings_requiring_recreation: int = 0
 
 
+@dataclass(frozen=True, slots=True)
+class DryRunCounts:
+    """Aggregate read-only preview fields across owners for ``--dry-run``."""
+
+    soft_deleted_conversations: int = 0
+    history_conversations: int = 0
+    terminal_turns: int = 0
+    waiting_turns: int = 0
+
+
+async def preview_cleanup(
+    persistence: Persistence,
+    clock: Callable[[], datetime],
+) -> DryRunCounts:
+    """Aggregate ``preview_retention`` across every owner with conversations."""
+    now = clock()
+    soft_deleted = 0
+    history = 0
+    terminal = 0
+    waiting = 0
+    for owner_id in await persistence.list_retention_owner_ids():
+        preview = await persistence.preview_retention(owner_id, now=now)
+        soft_deleted += preview.soft_deleted_conversations
+        history += preview.history_conversations
+        terminal += preview.terminal_turns
+        waiting += preview.waiting_turns
+    return DryRunCounts(
+        soft_deleted_conversations=soft_deleted,
+        history_conversations=history,
+        terminal_turns=terminal,
+        waiting_turns=waiting,
+    )
+
+
 async def run_cleanup(
     persistence: Persistence,
     runtime_manager: RuntimeManager,
@@ -61,21 +172,27 @@ async def run_cleanup(
 ) -> CleanupCounts:
     """Run one retention pass and return counts for the caller to print.
 
-    Captures one UTC ``now``/cutoff, then processes short per-conversation
-    transactions: soft-delete purge, terminal-turn pruning, waiting-turn
-    cancellation, and candidate-runtime session rotation. Pruning already
-    committed the ``session_rotated`` event and cleared the native session ID,
-    so a failed replacement session only marks the binding for recreation.
+    Captures one UTC ``now``, resolves each owner's effective month count, then
+    processes short per-conversation transactions: soft-delete purge,
+    terminal-turn pruning, waiting-turn cancellation, and candidate-runtime
+    session rotation. Pruning already committed the ``session_rotated`` event
+    and cleared the native session ID, so a failed replacement session only
+    marks the binding for recreation.
     """
     now = clock()
-    cutoff = six_months_before(now)
-    purged = await persistence.purge_soft_deleted(cutoff)
+    purged = await persistence.purge_soft_deleted(now)
 
     pruned_turns = 0
     cancelled_waiting = 0
     rotated = 0
     requires_recreation = 0
-    for conversation_id in await persistence.list_cleanup_conversation_ids():
+    policy_months: dict[str, int] = {}
+    for conversation_id, owner_id in await persistence.list_cleanup_conversation_ids():
+        months = policy_months.get(owner_id)
+        if months is None:
+            months = (await persistence.get_retention_policy(owner_id)).months
+            policy_months[owner_id] = months
+        cutoff = months_before(now, months)
         result = await persistence.prune_expired_history(conversation_id, cutoff)
         if result is None:
             continue

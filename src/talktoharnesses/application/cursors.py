@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import base64
 import json
+from datetime import datetime
 from typing import cast
 from uuid import UUID
 
+from talktoharnesses.domain._base import require_utc
 from talktoharnesses.domain.enums import ErrorCode
 from talktoharnesses.domain.errors import DomainError
 
@@ -56,3 +58,50 @@ def decode_cursor(cursor: str) -> tuple[str, UUID]:
     except ValueError as exc:
         raise DomainError(ErrorCode.INVALID_CURSOR, "invalid cursor") from exc
     return sort, item_id
+
+
+def encode_search_cursor(
+    *,
+    rank: int,
+    updated_at: str,
+    id: UUID,
+    digest: str,
+) -> str:
+    """Encode a ranked-search keyset cursor with query digest."""
+    payload = {"r": rank, "s": updated_at, "i": str(id), "d": digest}
+    raw = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def decode_search_cursor(cursor: str, *, digest: str) -> tuple[int, datetime, UUID]:
+    """Decode a search cursor; reject digest mismatch as ``invalid_cursor``."""
+    if not cursor:
+        raise DomainError(ErrorCode.INVALID_CURSOR, "invalid cursor")
+    padded = cursor + "=" * (-len(cursor) % 4)
+    try:
+        raw = base64.urlsafe_b64decode(padded.encode("ascii"))
+        data: object = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeError, json.JSONDecodeError) as exc:
+        raise DomainError(ErrorCode.INVALID_CURSOR, "invalid cursor") from exc
+    if not isinstance(data, dict):
+        raise DomainError(ErrorCode.INVALID_CURSOR, "invalid cursor")
+    payload = cast(dict[str, object], data)
+    rank = payload.get("r")
+    sort = payload.get("s")
+    raw_id = payload.get("i")
+    cursor_digest = payload.get("d")
+    if (
+        type(rank) is not int
+        or not isinstance(sort, str)
+        or not isinstance(raw_id, str)
+        or not isinstance(cursor_digest, str)
+    ):
+        raise DomainError(ErrorCode.INVALID_CURSOR, "invalid cursor")
+    if cursor_digest != digest:
+        raise DomainError(ErrorCode.INVALID_CURSOR, "cursor query digest mismatch")
+    try:
+        item_id = UUID(raw_id)
+        updated_at = require_utc(sort)
+    except ValueError as exc:
+        raise DomainError(ErrorCode.INVALID_CURSOR, "invalid cursor") from exc
+    return rank, updated_at, item_id

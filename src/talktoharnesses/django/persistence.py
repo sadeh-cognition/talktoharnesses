@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
-from typing import TypeVar, cast
+from typing import Any, TypeVar, cast
 from uuid import UUID, uuid4
 
 from asgiref.sync import sync_to_async
@@ -13,7 +13,12 @@ from django.db import connection, models, transaction
 from django.utils.dateparse import parse_datetime
 from pydantic import BaseModel
 
-from talktoharnesses.application.cursors import clamp_page_limit, encode_cursor
+from talktoharnesses.application.cursors import (
+    clamp_page_limit,
+    decode_search_cursor,
+    encode_cursor,
+    encode_search_cursor,
+)
 from talktoharnesses.application.handoff import (
     HandoffDocument,
     HandoffMessage,
@@ -28,14 +33,25 @@ from talktoharnesses.application.persistence import (
     RecoveryAttempt,
     SwitchPreparation,
 )
-from talktoharnesses.application.search_documents import normalize_search_terms
+from talktoharnesses.application.search_query import (
+    BODY_PHRASE_CAP,
+    BODY_PHRASE_POINTS,
+    BODY_TERM_CAP,
+    BODY_TERM_POINTS,
+    TITLE_CLAUSE_POINTS,
+    TITLE_TERM_CAP,
+    TITLE_TERM_POINTS,
+    SearchQuery,
+    build_snippet,
+    escape_fts5_token,
+    parse_search_query,
+)
 from talktoharnesses.domain.approval_matching import (
     InteractionMatchContext,
     rule_matches_request,
     select_matching_rule,
 )
 from talktoharnesses.domain.enums import (
-    ActivityStatus,
     ApprovalDecision,
     ApprovalRuleDecision,
     CommandStatus,
@@ -67,6 +83,7 @@ from talktoharnesses.domain.models import (
     CanonicalToolResult,
     Command,
     ConversationDetail,
+    ConversationSearchHit,
     ConversationShell,
     ConversationSnapshot,
     HarnessCapabilities,
@@ -82,6 +99,8 @@ from talktoharnesses.domain.models import (
     Page,
     PlanProjection,
     ProcessRecord,
+    RetentionPolicyProjection,
+    RetentionPreviewProjection,
     ToolProjection,
     TurnProjection,
 )
@@ -107,7 +126,9 @@ from .models import (
     MessageRecord,
     PlanRecord,
     RecoveryAttemptRecord,
+    RetentionPolicyRecord,
     RuntimeProcess,
+    SearchDocument,
     ToolRecord,
     TurnRecord,
     WorkerLeaseRecord,
@@ -189,30 +210,30 @@ def _insert_events(
     )
 
 
-def _full_text_matches(terms: tuple[str, ...]) -> list[object]:
-    """Return conversation IDs whose search document contains every term.
+def _sql_occurrences(column: str, value: str, params: list[Any]) -> str:
+    """Compile the shared complete-token occurrence definition."""
+    target = f" {value} "
+    params.extend((target, target))
+    padded = f"(' ' || COALESCE({column}, '') || ' ')"
+    return f"((LENGTH({padded}) - LENGTH(REPLACE({padded}, %s, ''))) / LENGTH(%s))"
 
-    Both backends query the private index built by ``0006_phase8_fts`` from the
-    same normalized term stream; owner, soft-delete, cursor, and limit
-    predicates stay on ``ConversationAggregate``. The PostgreSQL column and
-    SQLite virtual table are private to this module so a SQLite install never
-    imports ``django.contrib.postgres`` or Psycopg.
-    """
-    if connection.vendor == "postgresql":
-        sql = (
-            "SELECT conversation_id FROM talktoharnesses_search_document "
-            "WHERE search_vector @@ plainto_tsquery('simple', %s)"
-        )
-        parameter = " ".join(terms)
-    else:
-        sql = (
-            "SELECT conversation_id FROM talktoharnesses_search_document_fts "
-            "WHERE talktoharnesses_search_document_fts MATCH %s"
-        )
-        parameter = " AND ".join(f'"{term}"' for term in terms)
-    with connection.cursor() as cursor:
-        cursor.execute(sql, [parameter])
-        return [row[0] for row in cursor.fetchall()]
+
+def _sql_rank(query: SearchQuery, params: list[Any]) -> str:
+    """Compile the fixed public rank formula from its shared constants."""
+    cap = "LEAST" if connection.vendor == "postgresql" else "MIN"
+    terms: list[str] = []
+    for clause in query.positive:
+        title_clause = _sql_occurrences("d.search_title", clause.normalized, params)
+        terms.append(f"CASE WHEN {title_clause} > 0 THEN {TITLE_CLAUSE_POINTS} ELSE 0 END")
+        for token in clause.tokens:
+            title_term = _sql_occurrences("d.search_title", token, params)
+            terms.append(f"{TITLE_TERM_POINTS} * {cap}({TITLE_TERM_CAP}, {title_term})")
+            body_term = _sql_occurrences("d.search_body", token, params)
+            terms.append(f"{BODY_TERM_POINTS} * {cap}({BODY_TERM_CAP}, {body_term})")
+        if clause.is_phrase:
+            body_phrase = _sql_occurrences("d.search_body", clause.normalized, params)
+            terms.append(f"{BODY_PHRASE_POINTS} * {cap}({BODY_PHRASE_CAP}, {body_phrase})")
+    return " + ".join(terms)
 
 
 def _conflict(expected: int, actual: int) -> DomainError:
@@ -1556,6 +1577,175 @@ class DjangoPersistence:
             )
         return HandoffDocument(entries=tuple(sorted(entries, key=handoff_sort_key)))
 
+    async def read_retained_export(
+        self,
+        conversation_id: UUID,
+        owner_id: str,
+    ) -> tuple[HandoffDocument, str]:
+        return await sync_to_async(self._read_retained_export, thread_sensitive=True)(
+            conversation_id, owner_id
+        )
+
+    @transaction.atomic
+    def _read_retained_export(
+        self,
+        conversation_id: UUID,
+        owner_id: str,
+    ) -> tuple[HandoffDocument, str]:
+        row = (
+            ConversationAggregate.objects.select_for_update()
+            .filter(
+                conversation_id=conversation_id,
+                owner_id=owner_id,
+                deleted_at__isnull=True,
+            )
+            .first()
+        )
+        if row is None:
+            raise not_found("conversation")
+        state = _load(ConversationState, row.state)
+        return self._read_retained_handoff(conversation_id, None), state.conversation.display_title
+
+    async def commit_transcript_import(
+        self,
+        state: ConversationState,
+        handoff: HandoffDocument,
+        events: Sequence[ConversationEvent],
+        *,
+        process: ProcessRecord | None = None,
+        launch_history_entry: LaunchSnapshot | None = None,
+    ) -> Sequence[ConversationEvent]:
+        return await sync_to_async(self._commit_transcript_import, thread_sensitive=True)(
+            state,
+            handoff,
+            tuple(events),
+            process,
+            launch_history_entry,
+        )
+
+    @transaction.atomic
+    def _commit_transcript_import(
+        self,
+        state: ConversationState,
+        handoff: HandoffDocument,
+        events: tuple[ConversationEvent, ...],
+        process: ProcessRecord | None,
+        launch_history_entry: LaunchSnapshot | None,
+    ) -> tuple[ConversationEvent, ...]:
+        cid = state.conversation.id
+        if ConversationAggregate.objects.filter(conversation_id=cid).exists():
+            raise DomainError(ErrorCode.INVALID_STATE, "conversation already exists")
+        expected_sequence = 1
+        for event in events:
+            if event.conversation_id != cid or event.sequence != expected_sequence:
+                raise DomainError(ErrorCode.OPTIMISTIC_CONFLICT, "event sequence conflict")
+            expected_sequence += 1
+        if state.conversation.next_event_sequence != expected_sequence:
+            raise DomainError(ErrorCode.OPTIMISTIC_CONFLICT, "aggregate sequence conflict")
+
+        ConversationAggregate.objects.create(**self._aggregate_values(state))
+        self._materialize_imported_handoff(cid, handoff, at=state.conversation.created_at)
+
+        if process is not None:
+            process_row, _ = RuntimeProcess.objects.update_or_create(
+                process_id=process.id,
+                defaults={
+                    "conversation_id": process.conversation_id,
+                    "binding_id": process.binding_id,
+                    "status": process.status.value,
+                    "pid": process.pid,
+                    "started_at": process.started_at,
+                    "exited_at": process.exited_at,
+                    "orphaned_at": process.orphaned_at,
+                    "exit_code": process.exit_code,
+                    "redacted_stderr_tail": process.redacted_stderr_tail,
+                },
+            )
+            if launch_history_entry is not None:
+                launch_json = _json(launch_history_entry)
+                launch, created = LaunchHistory.objects.get_or_create(
+                    process=process_row,
+                    defaults={
+                        "conversation_id": cid,
+                        "launch": launch_json,
+                    },
+                )
+                if not created and launch.launch != launch_json:
+                    raise DomainError(ErrorCode.INVALID_STATE, "launch history is immutable")
+        elif launch_history_entry is not None:
+            raise DomainError(ErrorCode.INVALID_STATE, "launch history requires a process")
+
+        _insert_events(cid, events, state)
+        from talktoharnesses.django.materialize import materialize_projections
+
+        materialize_projections(state, events)
+        return events
+
+    def _materialize_imported_handoff(
+        self,
+        conversation_id: UUID,
+        handoff: HandoffDocument,
+        *,
+        at: datetime,
+    ) -> None:
+        """Write completed turn/message/tool rows from an imported handoff."""
+        turns: dict[UUID, list[HandoffMessage | HandoffTool]] = {}
+        turn_order: list[UUID] = []
+        for entry in sorted(handoff.entries, key=handoff_sort_key):
+            if entry.turn_id not in turns:
+                turns[entry.turn_id] = []
+                turn_order.append(entry.turn_id)
+            turns[entry.turn_id].append(entry)
+
+        for turn_id in turn_order:
+            entries = turns[turn_id]
+            turn_order_index = entries[0].turn_order_index
+            user_message_id = next(
+                (
+                    entry.id
+                    for entry in entries
+                    if isinstance(entry, HandoffMessage) and entry.role is MessageRole.USER
+                ),
+                None,
+            )
+            TurnRecord.objects.create(
+                turn_id=turn_id,
+                conversation_id=conversation_id,
+                status=TurnStatus.COMPLETED.value,
+                user_message_id=user_message_id,
+                created_at=at,
+                started_at=at,
+                completed_at=at,
+                order_index=turn_order_index,
+            )
+            for entry in entries:
+                if isinstance(entry, HandoffMessage):
+                    MessageRecord.objects.create(
+                        message_id=entry.id,
+                        conversation_id=conversation_id,
+                        turn_id=turn_id,
+                        role=entry.role.value,
+                        text=entry.text,
+                        sequence=0,
+                        interrupted=entry.interrupted,
+                        completed=True,
+                        created_at=at,
+                        order_index=entry.order_index,
+                    )
+                else:
+                    ToolRecord.objects.create(
+                        tool_id=entry.id,
+                        conversation_id=conversation_id,
+                        turn_id=turn_id,
+                        tool_name=entry.tool_name,
+                        arguments=dict(entry.arguments),
+                        outcome=entry.outcome.value,
+                        exit_status=entry.exit_status,
+                        paths=list(entry.paths),
+                        output_tail=entry.output_tail,
+                        order_index=entry.order_index,
+                    )
+
     async def prepare_harness_switch(self, conversation_id: UUID) -> SwitchPreparation:
         return await sync_to_async(self._prepare_harness_switch, thread_sensitive=True)(
             conversation_id
@@ -1661,14 +1851,112 @@ class DjangoPersistence:
                 details={"command_id": str(command.id)},
             )
 
-    async def list_cleanup_conversation_ids(self) -> Sequence[UUID]:
+    async def get_retention_policy(self, owner_id: str) -> RetentionPolicyProjection:
+        return await sync_to_async(self._get_retention_policy, thread_sensitive=True)(owner_id)
+
+    def _get_retention_policy(self, owner_id: str) -> RetentionPolicyProjection:
+        from talktoharnesses.application.retention import DEFAULT_RETENTION_MONTHS
+
+        row = RetentionPolicyRecord.objects.filter(owner_id=owner_id).first()
+        if row is None:
+            return RetentionPolicyProjection(months=DEFAULT_RETENTION_MONTHS, updated_at=None)
+        return RetentionPolicyProjection(months=row.months, updated_at=row.updated_at)
+
+    async def replace_retention_policy(
+        self,
+        owner_id: str,
+        months: int,
+        *,
+        now: datetime,
+    ) -> RetentionPolicyProjection:
+        return await sync_to_async(self._replace_retention_policy, thread_sensitive=True)(
+            owner_id, months, now
+        )
+
+    def _replace_retention_policy(
+        self,
+        owner_id: str,
+        months: int,
+        now: datetime,
+    ) -> RetentionPolicyProjection:
+        policy = RetentionPolicyProjection(months=months, updated_at=now)
+        RetentionPolicyRecord.objects.update_or_create(
+            owner_id=owner_id,
+            defaults={"months": policy.months, "updated_at": policy.updated_at},
+        )
+        return policy
+
+    async def preview_retention(
+        self,
+        owner_id: str,
+        *,
+        now: datetime,
+    ) -> RetentionPreviewProjection:
+        return await sync_to_async(self._preview_retention, thread_sensitive=True)(owner_id, now)
+
+    def _preview_retention(self, owner_id: str, now: datetime) -> RetentionPreviewProjection:
+        from talktoharnesses.application.retention import (
+            classify_history_eligibility,
+            is_terminal_turn_expired,
+            months_before,
+            soft_delete_purge_eligible,
+        )
+
+        policy = self._get_retention_policy(owner_id)
+        cutoff = months_before(now, policy.months)
+        soft_deleted = 0
+        history_conversations = 0
+        terminal_turns = 0
+        waiting_turns = 0
+        for row in ConversationAggregate.objects.filter(owner_id=owner_id).iterator():
+            state = _load(ConversationState, row.state)
+            if soft_delete_purge_eligible(state.conversation.deleted_at, cutoff):
+                soft_deleted += 1
+                continue
+            if state.conversation.deleted_at is not None:
+                continue
+            eligibility = classify_history_eligibility(state, cutoff)
+            if eligibility.blocked:
+                continue
+            terminal = 0
+            for turn_row in TurnRecord.objects.filter(conversation_id=row.conversation_id).only(
+                "turn_id", "status", "completed_at"
+            ):
+                status = TurnStatus(turn_row.status)
+                if is_terminal_turn_expired(status, turn_row.completed_at, cutoff):
+                    terminal += 1
+            waiting = 1 if eligibility.waiting_expired else 0
+            if terminal == 0 and waiting == 0:
+                continue
+            history_conversations += 1
+            terminal_turns += terminal
+            waiting_turns += waiting
+        return RetentionPreviewProjection(
+            cutoff=cutoff,
+            soft_deleted_conversations=soft_deleted,
+            history_conversations=history_conversations,
+            terminal_turns=terminal_turns,
+            waiting_turns=waiting_turns,
+        )
+
+    async def list_retention_owner_ids(self) -> Sequence[str]:
+        return await sync_to_async(self._list_retention_owner_ids, thread_sensitive=True)()
+
+    def _list_retention_owner_ids(self) -> Sequence[str]:
+        return list(
+            ConversationAggregate.objects.order_by("owner_id")
+            .values_list("owner_id", flat=True)
+            .distinct()
+        )
+
+    async def list_cleanup_conversation_ids(self) -> Sequence[tuple[UUID, str]]:
         return await sync_to_async(self._list_cleanup_conversation_ids, thread_sensitive=True)()
 
-    def _list_cleanup_conversation_ids(self) -> Sequence[UUID]:
+    def _list_cleanup_conversation_ids(self) -> Sequence[tuple[UUID, str]]:
         return list(
             ConversationAggregate.objects.filter(deleted_at__isnull=True)
             .order_by("conversation_id")
-            .values_list("conversation_id", flat=True)
+            .values_list("conversation_id", "owner_id")
         )
 
     async def prune_expired_history(
@@ -1686,6 +1974,7 @@ class DjangoPersistence:
         conversation_id: UUID,
         cutoff: datetime,
     ) -> PruneResult | None:
+        from talktoharnesses.application.retention import classify_history_eligibility
         from talktoharnesses.django.materialize import materialize_projections
 
         row = (
@@ -1696,18 +1985,11 @@ class DjangoPersistence:
         if row is None:
             return None
         state = _load(ConversationState, row.state)
-        if state.binding is None:
+        eligibility = classify_history_eligibility(state, cutoff)
+        if eligibility.blocked:
             return None
-        if any(activity.status is ActivityStatus.RUNNING for activity in state.activities.values()):
-            return None
+        waiting_expired = eligibility.waiting_expired
         active = state.active_turn
-        waiting_expired = (
-            active is not None
-            and active.status is TurnStatus.WAITING
-            and (active.started_at or active.created_at) <= cutoff
-        )
-        if active is not None and not waiting_expired:
-            return None
 
         expired = set(
             TurnRecord.objects.filter(
@@ -1921,16 +2203,31 @@ class DjangoPersistence:
         self._store_aggregate(row, state)
         sync_active_binding(state)
 
-    async def purge_soft_deleted(self, cutoff: datetime) -> int:
-        return await sync_to_async(self._purge_soft_deleted, thread_sensitive=True)(cutoff)
+    async def purge_soft_deleted(self, now: datetime) -> int:
+        return await sync_to_async(self._purge_soft_deleted, thread_sensitive=True)(now)
 
-    def _purge_soft_deleted(self, cutoff: datetime) -> int:
-        # ``<=`` so a boundary row is purged the run its cutoff equals it, and
-        # a rerun with the same cutoff stays idempotent.
-        rows = ConversationAggregate.objects.filter(deleted_at__lte=cutoff)
-        count = rows.count()
-        rows.delete()
-        return count
+    def _purge_soft_deleted(self, now: datetime) -> int:
+        from talktoharnesses.application.retention import months_before
+
+        # Per-owner cutoffs; ``<=`` keeps boundary rows idempotent on rerun.
+        # Exemption never blocks soft-delete purge.
+        owners = (
+            ConversationAggregate.objects.filter(deleted_at__isnull=False)
+            .values_list("owner_id", flat=True)
+            .distinct()
+        )
+        total = 0
+        for owner_id in owners:
+            cutoff = months_before(now, self._get_retention_policy(owner_id).months)
+            rows = ConversationAggregate.objects.filter(
+                owner_id=owner_id,
+                deleted_at__lte=cutoff,
+            )
+            count = rows.count()
+            if count:
+                rows.delete()
+                total += count
+        return total
 
     @staticmethod
     def _aggregate_values(state: ConversationState) -> dict[str, object]:
@@ -1958,6 +2255,7 @@ class DjangoPersistence:
             "pinned_at": conversation.pinned_at,
             "archived_at": conversation.archived_at,
             "snoozed_until": conversation.snoozed_until,
+            "retention_exempt": conversation.retention_exempt,
             "latest_activity_at": conversation.updated_at,
             "state": _json(state),
         }
@@ -1987,6 +2285,7 @@ class DjangoPersistence:
                 "pinned_at",
                 "archived_at",
                 "snoozed_until",
+                "retention_exempt",
                 "latest_activity_at",
                 "state",
             )
@@ -2841,7 +3140,7 @@ class DjangoPersistence:
         *,
         cursor: str | None = None,
         limit: int = 50,
-    ) -> Page[ConversationShell]:
+    ) -> Page[ConversationSearchHit]:
         return await sync_to_async(self._search_conversations, thread_sensitive=True)(
             owner_id, query, cursor, limit
         )
@@ -2852,24 +3151,140 @@ class DjangoPersistence:
         query: str,
         cursor: str | None,
         limit: int,
-    ) -> Page[ConversationShell]:
+    ) -> Page[ConversationSearchHit]:
         page_size = clamp_page_limit(limit)
-        terms = normalize_search_terms(query)
-        if not terms:
+        parsed = parse_search_query(query)
+        cursor_values = (
+            decode_search_cursor(cursor, digest=parsed.digest) if cursor is not None else None
+        )
+
+        score_params: list[Any] = []
+        score_sql = _sql_rank(parsed, score_params)
+        joins = ""
+        predicates = [
+            "c.owner_id = %s",
+            "d.owner_id = %s",
+            "c.deleted_at IS NULL",
+        ]
+        predicate_params: list[Any] = [owner_id, owner_id]
+        if connection.vendor == "postgresql":
+            for clause in parsed.positive:
+                function = (
+                    "phraseto_tsquery"
+                    if clause.is_phrase or len(clause.tokens) > 1
+                    else "plainto_tsquery"
+                )
+                predicates.append(f"d.search_vector @@ {function}('simple', %s)")
+                predicate_params.append(clause.normalized)
+        else:
+            joins = " JOIN talktoharnesses_search_document_fts f ON f.rowid = d.rowid"
+            fts_terms: list[str] = []
+            for clause in parsed.positive:
+                if clause.is_phrase or len(clause.tokens) > 1:
+                    fts_terms.append(escape_fts5_token(clause.normalized))
+                else:
+                    fts_terms.extend(escape_fts5_token(token) for token in clause.tokens)
+            predicates.append("talktoharnesses_search_document_fts MATCH %s")
+            predicate_params.append(" AND ".join(fts_terms))
+
+        filters = parsed.filters
+        if filters.pinned is True:
+            predicates.append("c.pinned_at IS NOT NULL")
+        if filters.archived is True:
+            predicates.append("c.archived_at IS NOT NULL")
+        if filters.has_interaction is True:
+            predicates.append("c.has_pending_interactions = %s")
+            predicate_params.append(True)
+        if filters.harness is not None:
+            predicates.append("c.harness_kind = %s")
+            predicate_params.append(filters.harness.value)
+        if filters.before is not None:
+            predicates.append("c.updated_at < %s")
+            predicate_params.append(filters.before)
+        if filters.after is not None:
+            predicates.append("c.updated_at >= %s")
+            predicate_params.append(filters.after)
+        for clause in parsed.exclusions:
+            exclusion = _sql_occurrences("d.normalized_text", clause.normalized, predicate_params)
+            predicates.append(f"{exclusion} = 0")
+
+        inner_sql = (
+            "SELECT c.conversation_id, c.updated_at, "
+            f"{score_sql} AS search_rank "
+            "FROM talktoharnesses_search_document d "
+            "JOIN talktoharnesses_conversation c "
+            f"ON c.conversation_id = d.conversation_id{joins} "
+            f"WHERE {' AND '.join(predicates)}"
+        )
+        params = score_params + predicate_params
+        outer_predicate = ""
+        if cursor_values is not None:
+            cursor_rank, cursor_updated, cursor_id = cursor_values
+            database_cursor_updated = connection.ops.adapt_datetimefield_value(cursor_updated)
+            database_cursor_id: Any = (
+                cursor_id if connection.vendor == "postgresql" else cursor_id.hex
+            )
+            outer_predicate = (
+                "WHERE (search_rank < %s "
+                "OR (search_rank = %s AND updated_at < %s) "
+                "OR (search_rank = %s AND updated_at = %s AND conversation_id < %s)) "
+            )
+            params.extend(
+                (
+                    cursor_rank,
+                    cursor_rank,
+                    database_cursor_updated,
+                    cursor_rank,
+                    database_cursor_updated,
+                    database_cursor_id,
+                )
+            )
+        sql = (
+            "SELECT conversation_id, search_rank "
+            f"FROM ({inner_sql}) ranked {outer_predicate}"
+            "ORDER BY search_rank DESC, updated_at DESC, conversation_id DESC "
+            "LIMIT %s"
+        )
+        params.append(page_size + 1)
+        with connection.cursor() as db_cursor:
+            db_cursor.execute(sql, params)
+            ranked_ids = [(UUID(str(row[0])), int(row[1])) for row in db_cursor.fetchall()]
+        if not ranked_ids:
             return Page(items=(), next_cursor=None)
-        qs = ConversationAggregate.objects.filter(
-            conversation_id__in=_full_text_matches(terms),
-            owner_id=owner_id,
-            deleted_at__isnull=True,
-        ).order_by("-updated_at", "-conversation_id")
-        qs = apply_desc_datetime_cursor(qs, cursor, "updated_at", "conversation_id")
-        rows = list(qs[: page_size + 1])
-        items = rows[:page_size]
+
+        selected = ranked_ids[:page_size]
+        selected_ids = [conversation_id for conversation_id, _score in selected]
+        rows = {
+            row.conversation_id: row
+            for row in ConversationAggregate.objects.filter(conversation_id__in=selected_ids)
+        }
+        docs = {
+            cast(UUID, doc.pk): doc
+            for doc in SearchDocument.objects.filter(conversation_id__in=selected_ids)
+        }
+        page_rows = [
+            (score, rows[conversation_id], docs[conversation_id])
+            for conversation_id, score in selected
+        ]
         next_cursor = None
-        if len(rows) > page_size and items:
-            last = items[-1]
-            next_cursor = encode_cursor(sort=last.updated_at.isoformat(), id=last.conversation_id)
-        return Page(items=tuple(shell_from_row(r) for r in items), next_cursor=next_cursor)
+        if len(ranked_ids) > page_size and page_rows:
+            last_score, last_row, _ = page_rows[-1]
+            next_cursor = encode_search_cursor(
+                rank=last_score,
+                updated_at=last_row.updated_at.isoformat(),
+                id=last_row.conversation_id,
+                digest=parsed.digest,
+            )
+
+        hits: list[ConversationSearchHit] = []
+        for _score, row, doc in page_rows:
+            hits.append(
+                ConversationSearchHit(
+                    conversation=shell_from_row(row),
+                    snippet=build_snippet(parsed, doc.snippet_text),
+                )
+            )
+        return Page(items=tuple(hits), next_cursor=next_cursor)
 
     async def get_conversation_snapshot(
         self,

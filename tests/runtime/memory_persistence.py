@@ -7,7 +7,13 @@ from datetime import UTC, datetime, timedelta
 from typing import cast
 from uuid import UUID, uuid4
 
-from talktoharnesses.application.cursors import clamp_page_limit, decode_cursor, encode_cursor
+from talktoharnesses.application.cursors import (
+    clamp_page_limit,
+    decode_cursor,
+    decode_search_cursor,
+    encode_cursor,
+    encode_search_cursor,
+)
 from talktoharnesses.application.handoff import (
     HandoffDocument,
     HandoffMessage,
@@ -23,15 +29,21 @@ from talktoharnesses.application.persistence import (
     SwitchPreparation,
 )
 from talktoharnesses.application.search_documents import (
+    SearchDocumentFields,
     build_search_document_from_parts,
-    normalize_search_terms,
+)
+from talktoharnesses.application.search_query import (
+    build_snippet,
+    count_token_occurrences,
+    document_matches_exclusions,
+    parse_search_query,
+    rank_document,
 )
 from talktoharnesses.domain.approval_matching import (
     InteractionMatchContext,
     select_matching_rule,
 )
 from talktoharnesses.domain.enums import (
-    ActivityStatus,
     ApprovalDecision,
     ApprovalRuleDecision,
     CommandStatus,
@@ -75,6 +87,7 @@ from talktoharnesses.domain.models import (
     Command,
     CommandProjection,
     ConversationDetail,
+    ConversationSearchHit,
     ConversationShell,
     ConversationSnapshot,
     HarnessCapabilities,
@@ -93,6 +106,8 @@ from talktoharnesses.domain.models import (
     Plan,
     PlanProjection,
     ProcessRecord,
+    RetentionPolicyProjection,
+    RetentionPreviewProjection,
     ToolProjection,
     Turn,
     TurnProjection,
@@ -105,12 +120,6 @@ from talktoharnesses.domain.transitions import (
     submit_interaction_answer,
 )
 
-_TERMINAL_TURN_STATUSES = (
-    TurnStatus.COMPLETED,
-    TurnStatus.INTERRUPTED,
-    TurnStatus.FAILED,
-    TurnStatus.OUTCOME_UNKNOWN,
-)
 _SQLITE_SUPERVISOR_SLOT = "sqlite-supervisor"
 _ACTIVE_RECOVERY_STATUSES = {
     ConversationStatus.RUNNING,
@@ -158,12 +167,15 @@ class MemoryPersistence:
         self.interaction_meta: dict[UUID, dict[str, object]] = {}
         self.approval_rules: dict[UUID, ApprovalRule] = {}
         self.interaction_audits: dict[UUID, InteractionAuditProjection] = {}
-        self.search_docs: dict[UUID, str] = {}
+        self.search_docs: dict[UUID, SearchDocumentFields] = {}
         self.turn_order: dict[UUID, list[UUID]] = {}
+        # Retained item order for handoff export (message/tool id -> order_index).
+        self.item_order_index: dict[UUID, dict[UUID, int]] = {}
         # Phase 9 ownership / recovery doubles.
         self.ownership: dict[UUID, tuple[str, int, datetime]] = {}
         self.worker_leases: dict[str, dict[str, object]] = {}
         self.recovery_attempts: dict[UUID, RecoveryAttempt] = {}
+        self.retention_policies: dict[str, RetentionPolicyProjection] = {}
         self._sqlite_mode: bool = True
 
     def seed(self, state: ConversationState) -> None:
@@ -866,6 +878,7 @@ class MemoryPersistence:
             turn_id: index
             for index, turn_id in enumerate(self.turn_order.get(conversation_id, []), start=1)
         }
+        item_order = self.item_order_index.get(conversation_id, {})
         entries: list[HandoffMessage | HandoffTool] = []
         for index, message in enumerate(self.messages.get(conversation_id, {}).values(), start=1):
             entries.append(
@@ -876,7 +889,7 @@ class MemoryPersistence:
                     text=message.text,
                     interrupted=message.interrupted,
                     turn_order_index=turn_order.get(message.turn_id, 0),
-                    order_index=index,
+                    order_index=item_order.get(message.id, index),
                 )
             )
         for index, tool in enumerate(self.tools.get(conversation_id, {}).values(), start=1):
@@ -884,10 +897,97 @@ class MemoryPersistence:
                 HandoffTool(
                     **tool.model_dump(exclude={"full_output"}),
                     turn_order_index=turn_order.get(tool.turn_id, 0),
-                    order_index=index,
+                    order_index=item_order.get(tool.id, index),
                 )
             )
         return HandoffDocument(entries=tuple(sorted(entries, key=handoff_sort_key)))
+
+    async def read_retained_export(
+        self,
+        conversation_id: UUID,
+        owner_id: str,
+    ) -> tuple[HandoffDocument, str]:
+        state = await self._require_owned(conversation_id, owner_id)
+        handoff = await self.read_retained_handoff(conversation_id)
+        return handoff, state.conversation.display_title
+
+    async def commit_transcript_import(
+        self,
+        state: ConversationState,
+        handoff: HandoffDocument,
+        events: Sequence[ConversationEvent],
+        *,
+        process: ProcessRecord | None = None,
+        launch_history_entry: LaunchSnapshot | None = None,
+    ) -> Sequence[ConversationEvent]:
+        cid = state.conversation.id
+        if cid in self.states:
+            raise DomainError(ErrorCode.INVALID_STATE, "conversation already exists")
+        await self.save_snapshot(state)
+        turns = self.turns.setdefault(cid, {})
+        order = self.turn_order.setdefault(cid, [])
+        messages = self.messages.setdefault(cid, {})
+        tools = self.tools.setdefault(cid, {})
+        item_order = self.item_order_index.setdefault(cid, {})
+        grouped: dict[UUID, list[HandoffMessage | HandoffTool]] = {}
+        turn_ids: list[UUID] = []
+        for entry in sorted(handoff.entries, key=handoff_sort_key):
+            if entry.turn_id not in grouped:
+                grouped[entry.turn_id] = []
+                turn_ids.append(entry.turn_id)
+            grouped[entry.turn_id].append(entry)
+        for turn_id in turn_ids:
+            entries = grouped[turn_id]
+            user_message_id = next(
+                (
+                    entry.id
+                    for entry in entries
+                    if isinstance(entry, HandoffMessage) and entry.role is MessageRole.USER
+                ),
+                None,
+            )
+            turns[turn_id] = Turn(
+                id=turn_id,
+                conversation_id=cid,
+                status=TurnStatus.COMPLETED,
+                user_message_id=user_message_id,
+                created_at=state.conversation.created_at,
+                started_at=state.conversation.created_at,
+                completed_at=state.conversation.created_at,
+            )
+            if turn_id not in order:
+                order.append(turn_id)
+            for entry in entries:
+                item_order[entry.id] = entry.order_index
+                if isinstance(entry, HandoffMessage):
+                    messages[entry.id] = Message(
+                        id=entry.id,
+                        turn_id=turn_id,
+                        role=entry.role,
+                        text=entry.text,
+                        interrupted=entry.interrupted,
+                        completed=True,
+                        created_at=state.conversation.created_at,
+                    )
+                else:
+                    tools[entry.id] = CanonicalToolResult(
+                        id=entry.id,
+                        turn_id=turn_id,
+                        tool_name=entry.tool_name,
+                        arguments=dict(entry.arguments),
+                        outcome=entry.outcome,
+                        exit_status=entry.exit_status,
+                        paths=entry.paths,
+                        output_tail=entry.output_tail,
+                    )
+        event_list = self.events.setdefault(cid, [])
+        event_list.extend(events)
+        if process is not None:
+            self.processes[process.id] = process
+        if launch_history_entry is not None:
+            self.launch_history.setdefault(cid, []).append(launch_history_entry)
+        self._refresh_search(state)
+        return tuple(events)
 
     async def prepare_harness_switch(self, conversation_id: UUID) -> SwitchPreparation:
         state = self.states.get(conversation_id)
@@ -945,35 +1045,109 @@ class MemoryPersistence:
             fence=fence,
         )
 
-    async def list_cleanup_conversation_ids(self) -> Sequence[UUID]:
-        return [cid for cid, state in self.states.items() if state.conversation.deleted_at is None]
+    async def get_retention_policy(self, owner_id: str) -> RetentionPolicyProjection:
+        from talktoharnesses.application.retention import DEFAULT_RETENTION_MONTHS
+
+        return self.retention_policies.get(
+            owner_id,
+            RetentionPolicyProjection(months=DEFAULT_RETENTION_MONTHS, updated_at=None),
+        )
+
+    async def replace_retention_policy(
+        self,
+        owner_id: str,
+        months: int,
+        *,
+        now: datetime,
+    ) -> RetentionPolicyProjection:
+        policy = RetentionPolicyProjection(months=months, updated_at=now)
+        self.retention_policies[owner_id] = policy
+        return policy
+
+    async def preview_retention(
+        self,
+        owner_id: str,
+        *,
+        now: datetime,
+    ) -> RetentionPreviewProjection:
+        from talktoharnesses.application.retention import (
+            classify_history_eligibility,
+            is_terminal_turn_expired,
+            months_before,
+            soft_delete_purge_eligible,
+        )
+
+        policy = await self.get_retention_policy(owner_id)
+        cutoff = months_before(now, policy.months)
+        soft_deleted = 0
+        history_conversations = 0
+        terminal_turns = 0
+        waiting_turns = 0
+        for state in self.states.values():
+            if state.conversation.owner_id != owner_id:
+                continue
+            if soft_delete_purge_eligible(state.conversation.deleted_at, cutoff):
+                soft_deleted += 1
+                continue
+            if state.conversation.deleted_at is not None:
+                continue
+            eligibility = classify_history_eligibility(state, cutoff)
+            if eligibility.blocked:
+                continue
+            turns = self.turns.get(state.conversation.id, {})
+            terminal = sum(
+                1
+                for turn in turns.values()
+                if is_terminal_turn_expired(turn.status, turn.completed_at, cutoff)
+            )
+            waiting = 1 if eligibility.waiting_expired else 0
+            if terminal == 0 and waiting == 0:
+                continue
+            history_conversations += 1
+            terminal_turns += terminal
+            waiting_turns += waiting
+        return RetentionPreviewProjection(
+            cutoff=cutoff,
+            soft_deleted_conversations=soft_deleted,
+            history_conversations=history_conversations,
+            terminal_turns=terminal_turns,
+            waiting_turns=waiting_turns,
+        )
+
+    async def list_retention_owner_ids(self) -> Sequence[str]:
+        return sorted({state.conversation.owner_id for state in self.states.values()})
+
+    async def list_cleanup_conversation_ids(self) -> Sequence[tuple[UUID, str]]:
+        return [
+            (cid, state.conversation.owner_id)
+            for cid, state in self.states.items()
+            if state.conversation.deleted_at is None
+        ]
 
     async def prune_expired_history(
         self,
         conversation_id: UUID,
         cutoff: datetime,
     ) -> PruneResult | None:
-        state = self.states.get(conversation_id)
-        if state is None or state.binding is None:
-            return None
-        if any(a.status is ActivityStatus.RUNNING for a in state.activities.values()):
-            return None
-        active = state.active_turn
-        waiting_expired = (
-            active is not None
-            and active.status is TurnStatus.WAITING
-            and (active.started_at or active.created_at) <= cutoff
+        from talktoharnesses.application.retention import (
+            classify_history_eligibility,
+            is_terminal_turn_expired,
         )
-        if active is not None and not waiting_expired:
+
+        state = self.states.get(conversation_id)
+        if state is None:
             return None
+        eligibility = classify_history_eligibility(state, cutoff)
+        if eligibility.blocked:
+            return None
+        waiting_expired = eligibility.waiting_expired
+        active = state.active_turn
 
         turns = self.turns.get(conversation_id, {})
         expired = {
             turn_id
             for turn_id, turn in turns.items()
-            if turn.status in _TERMINAL_TURN_STATUSES
-            and turn.completed_at is not None
-            and turn.completed_at <= cutoff
+            if is_terminal_turn_expired(turn.status, turn.completed_at, cutoff)
         }
         if active is not None and waiting_expired:
             expired.add(active.id)
@@ -1575,12 +1749,17 @@ class MemoryPersistence:
             raise DomainError(ErrorCode.INVALID_STATE, "no binding to rotate")
         return state
 
-    async def purge_soft_deleted(self, cutoff: datetime) -> int:
-        to_delete = [
-            cid
-            for cid, state in self.states.items()
-            if state.conversation.deleted_at is not None and state.conversation.deleted_at <= cutoff
-        ]
+    async def purge_soft_deleted(self, now: datetime) -> int:
+        from talktoharnesses.application.retention import months_before, soft_delete_purge_eligible
+
+        to_delete: list[UUID] = []
+        for cid, state in self.states.items():
+            if state.conversation.deleted_at is None:
+                continue
+            policy = await self.get_retention_policy(state.conversation.owner_id)
+            cutoff = months_before(now, policy.months)
+            if soft_delete_purge_eligible(state.conversation.deleted_at, cutoff):
+                to_delete.append(cid)
         for cid in to_delete:
             del self.states[cid]
             self.events.pop(cid, None)
@@ -1708,35 +1887,86 @@ class MemoryPersistence:
         *,
         cursor: str | None = None,
         limit: int = 50,
-    ) -> Page[ConversationShell]:
+    ) -> Page[ConversationSearchHit]:
         page_size = clamp_page_limit(limit)
-        terms = normalize_search_terms(query)
-        if not terms:
-            return Page(items=(), next_cursor=None)
-        matches: list[ConversationShell] = []
+        parsed = parse_search_query(query)
+        ranked: list[tuple[int, ConversationState, SearchDocumentFields]] = []
         for cid, doc in self.search_docs.items():
             state = self.states.get(cid)
             if state is None or state.conversation.owner_id != owner_id:
                 continue
-            if state.conversation.deleted_at is not None:
+            conversation = state.conversation
+            if conversation.deleted_at is not None:
                 continue
-            if all(term in doc for term in terms):
-                matches.append(self._shell(state))
-        matches.sort(key=lambda s: (s.updated_at, s.id), reverse=True)
+            filters = parsed.filters
+            if filters.pinned is True and conversation.pinned_at is None:
+                continue
+            if filters.archived is True and conversation.archived_at is None:
+                continue
+            if filters.has_interaction is True:
+                pending = any(
+                    i.status in {InteractionStatus.PENDING, InteractionStatus.DRAFT}
+                    for i in state.interactions.values()
+                )
+                if not pending:
+                    continue
+            if filters.harness is not None and (
+                state.binding is None or state.binding.kind != filters.harness
+            ):
+                continue
+            if filters.before is not None and not (conversation.updated_at < filters.before):
+                continue
+            if filters.after is not None and not (conversation.updated_at >= filters.after):
+                continue
+            if not all(
+                count_token_occurrences(doc.normalized_text, clause.normalized)
+                for clause in parsed.positive
+            ):
+                continue
+            if document_matches_exclusions(parsed, normalized_text=doc.normalized_text):
+                continue
+            score = rank_document(
+                parsed, search_title=doc.search_title, search_body=doc.search_body
+            )
+            ranked.append((score, state, doc))
+        ranked.sort(
+            key=lambda item: (item[0], item[1].conversation.updated_at, item[1].conversation.id),
+            reverse=True,
+        )
         if cursor is not None:
-            sort, item_id = decode_cursor(cursor)
-            sort_dt = datetime.fromisoformat(sort)
-            matches = [
-                s
-                for s in matches
-                if s.updated_at < sort_dt or (s.updated_at == sort_dt and s.id < item_id)
+            cursor_rank, cursor_updated, cursor_id = decode_search_cursor(
+                cursor, digest=parsed.digest
+            )
+            ranked = [
+                item
+                for item in ranked
+                if (
+                    item[0],
+                    item[1].conversation.updated_at,
+                    item[1].conversation.id,
+                )
+                < (cursor_rank, cursor_updated, cursor_id)
             ]
-        page = matches[:page_size]
+        page = ranked[:page_size]
         next_cursor = None
-        if len(matches) > page_size and page:
-            last = page[-1]
-            next_cursor = encode_cursor(sort=last.updated_at.isoformat(), id=last.id)
-        return Page(items=tuple(page), next_cursor=next_cursor)
+        if len(ranked) > page_size and page:
+            last_score, last_state, _ = page[-1]
+            next_cursor = encode_search_cursor(
+                rank=last_score,
+                updated_at=last_state.conversation.updated_at.isoformat(),
+                id=last_state.conversation.id,
+                digest=parsed.digest,
+            )
+        return Page(
+            items=tuple(
+                ConversationSearchHit(
+                    conversation=self._shell(state),
+                    snippet=build_snippet(parsed, doc.snippet_text),
+                )
+                for _score, state, doc in page
+            ),
+            next_cursor=next_cursor,
+        )
 
     async def get_conversation_snapshot(
         self,
