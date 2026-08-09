@@ -2,16 +2,23 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
+import time
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime
 from typing import Any, cast
 from uuid import UUID, uuid4
 
 from talktoharnesses.application.command_processor import CommandProcessor
+from talktoharnesses.application.faults import FaultCallback
 from talktoharnesses.application.interaction_broker import InteractionBroker
+from talktoharnesses.application.observability import get_observability
 from talktoharnesses.application.persistence import Persistence
 from talktoharnesses.application.publisher import CommittedEventPublisher
+from talktoharnesses.application.readiness import ReadinessProbeMonitor
+from talktoharnesses.application.worker_coordinator import WorkerCoordinator
 from talktoharnesses.domain.approval_matching import normalize_approval_rule
 from talktoharnesses.domain.enums import (
     ActivityStatus,
@@ -113,12 +120,16 @@ class TalkToHarnessesService:
         publisher: CommittedEventPublisher,
         clock: Callable[[], datetime],
         runtime_manager: RuntimeManager,
+        *,
+        fault_callback: FaultCallback = None,
     ) -> None:
         self._persistence = persistence
         self._registry = registry
         self._publisher = publisher
         self._clock = clock
         self._runtime = runtime_manager
+        # Propagate into a pre-built runtime (production ASGI constructs it first).
+        runtime_manager._fault_callback = fault_callback  # pyright: ignore[reportPrivateUsage]
         self._broker = InteractionBroker(persistence, publisher, clock=clock)
         self._processor = CommandProcessor(
             persistence,
@@ -126,7 +137,19 @@ class TalkToHarnessesService:
             runtime_manager,
             clock=clock,
             interaction_broker=self._broker,
+            lease_seconds=runtime_manager._policy.lease_duration,  # pyright: ignore[reportPrivateUsage]
+            fault_callback=fault_callback,
         )
+        self._coordinator = WorkerCoordinator(
+            persistence,
+            runtime_manager,
+            publisher,
+            self._processor,
+            clock,
+            runtime_manager._policy,  # pyright: ignore[reportPrivateUsage]
+            fault_callback=fault_callback,
+        )
+        self._readiness = ReadinessProbeMonitor(persistence, registry, clock)
         self._started = False
         self._worker_id: str | None = None
 
@@ -134,6 +157,11 @@ class TalkToHarnessesService:
     def processor(self) -> CommandProcessor:
         """Test/introspection access to the owned command processor."""
         return self._processor
+
+    @property
+    def coordinator(self) -> WorkerCoordinator:
+        """Test/introspection access to the owned worker coordinator."""
+        return self._coordinator
 
     @property
     def publisher(self) -> CommittedEventPublisher:
@@ -144,26 +172,92 @@ class TalkToHarnessesService:
     def started(self) -> bool:
         return self._started
 
+    def readiness_snapshot(self) -> dict[str, bool]:
+        """Worker readiness bits for the /ready route (WP5)."""
+        snap = dict(self._coordinator.readiness_snapshot())
+        snap["probe_fresh"] = self._readiness.is_fresh(self._clock())
+        return snap
+
+    async def is_ready(self) -> bool:
+        """True when the worker is healthy and a harness probe is fresh."""
+        if not self._started:
+            return False
+        snap = self._coordinator.readiness_snapshot()
+        if not snap["ready_for_work"] or snap["draining"]:
+            return False
+        return await self._readiness.has_fresh_probe(self._clock())
+
     async def start(self, worker_id: str) -> None:
         """Start the durable command worker (idempotent)."""
         if self._started:
             return
-        start = getattr(self._publisher, "start", None)
-        if callable(start):
-            await cast(Awaitable[None], start())
-        await self._broker.reconcile_on_startup()
-        await self._processor.start(worker_id)
-        self._worker_id = worker_id
-        self._started = True
+        try:
+            start = getattr(self._publisher, "start", None)
+            if callable(start):
+                await cast(Awaitable[None], start())
+            await self._coordinator.acquire_and_heartbeat(worker_id)
+            await self._broker.reconcile_on_startup()
+            await self._coordinator.run_initial_recovery()
+            await self._readiness.start()
+            self._processor.set_claims_enabled(True)
+            await self._processor.start(worker_id)
+            self._worker_id = worker_id
+            self._started = True
+        except BaseException:
+            deadline = time.monotonic() + self._runtime._policy.shutdown_budget  # pyright: ignore[reportPrivateUsage]
+            await self._shutdown_components(deadline)
+            raise
 
     async def stop(self) -> None:
         """Stop claims, then processor/runtime, then broker resources (idempotent)."""
-        await self._processor.stop()
-        await self._runtime.shutdown()
+        deadline = time.monotonic() + self._runtime._policy.shutdown_budget  # pyright: ignore[reportPrivateUsage]
+        await self._shutdown_components(deadline)
+        self._started = False
+        self._worker_id = None
+
+    async def _shutdown_components(self, deadline: float) -> None:
+        await self._run_shutdown_step(
+            self._coordinator.begin_shutdown(deadline), deadline, "coordinator_begin"
+        )
+        await self._run_shutdown_step(self._readiness.shutdown(deadline), deadline, "readiness")
+        await self._run_shutdown_step(self._processor.stop(), deadline, "processor")
+        await self._run_shutdown_step(
+            self._coordinator.begin_shutdown(deadline),
+            deadline,
+            "coordinator_finalize_commands",
+        )
+        await self._run_shutdown_step(
+            self._runtime.shutdown(deadline=deadline), deadline, "runtime"
+        )
         stop = getattr(self._publisher, "stop", None)
         if callable(stop):
-            await cast(Awaitable[None], stop())
-        self._started = False
+            await self._run_shutdown_step(cast(Awaitable[None], stop()), deadline, "publisher")
+        await self._run_shutdown_step(
+            self._coordinator.finish_shutdown(), deadline, "coordinator_finish"
+        )
+
+    @staticmethod
+    async def _run_shutdown_step(
+        awaitable: Awaitable[None],
+        deadline: float,
+        component: str,
+    ) -> None:
+        remaining = max(0.0, deadline - time.monotonic())
+        task = asyncio.ensure_future(awaitable)
+        try:
+            await asyncio.wait_for(task, timeout=remaining)
+        except TimeoutError:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+            logger.warning("shutdown_component_incomplete component=%s", component)
+        except asyncio.CancelledError:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+            raise
+        except Exception:
+            logger.warning("shutdown_component_failed component=%s", component)
 
     # ------------------------------------------------------------------
     # Harnesses
@@ -213,12 +307,15 @@ class TalkToHarnessesService:
                 "harness probe failed",
                 details={"harness_id": str(harness_id)},
             ) from exc
-        return await self._persistence.save_harness_probe(
+        probed_at = self._clock()
+        projection = await self._persistence.save_harness_probe(
             harness_id,
             owner_id,
             capabilities,
-            probed_at=self._clock(),
+            probed_at=probed_at,
         )
+        self._readiness.notify_success(probed_at, harness_id)
+        return projection
 
     async def get_harness_capabilities(
         self, owner_id: str, harness_id: UUID
@@ -920,6 +1017,7 @@ class TalkToHarnessesService:
 
     async def _publish(self, events: Sequence[ConversationEvent]) -> None:
         if events:
+            get_observability().observe_committed_events(events)
             await self._publisher.publish(events)
 
     @staticmethod

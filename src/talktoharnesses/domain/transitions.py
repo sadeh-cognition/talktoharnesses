@@ -607,6 +607,28 @@ def complete_activity(
     return TransitionResult(state=new_state, events=events)
 
 
+def fail_running_activities(
+    state: ConversationState,
+    *,
+    now: datetime,
+    summary: str = "worker_lost",
+) -> TransitionResult:
+    """Fail every running background activity with a fixed summary code."""
+    current = state
+    events: list[ConversationEvent] = []
+    for activity in list(_running_activities(current)):
+        result = complete_activity(
+            current,
+            activity_id=activity.id,
+            now=now,
+            status=ActivityStatus.FAILED,
+            summary=summary,
+        )
+        current = result.state
+        events.extend(result.events)
+    return TransitionResult(state=current, events=tuple(events))
+
+
 def _open_interactions(state: ConversationState) -> list[PendingInteraction]:
     return [
         i
@@ -1132,7 +1154,6 @@ def mark_outcome_unknown(
         commands[cmd.id] = cmd.model_copy(
             update={
                 "status": CommandStatus.OUTCOME_UNKNOWN,
-                "recovery_result": message,
             }
         )
 
@@ -1522,6 +1543,7 @@ __all__ = [
     "complete_activity",
     "complete_turn",
     "edit_queued_prompt",
+    "fail_running_activities",
     "fail_session",
     "fail_switch",
     "fail_turn",

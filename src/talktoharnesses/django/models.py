@@ -48,6 +48,16 @@ class ConversationAggregate(models.Model):
     latest_activity_at: models.DateTimeField[datetime | None, datetime | None] = (
         models.DateTimeField(null=True, blank=True)
     )
+    # Private worker ownership / fencing (never copied into aggregate JSON).
+    runtime_worker_id: models.CharField[str | None, str | None] = models.CharField(
+        max_length=255, null=True, blank=True
+    )
+    runtime_lease_expires_at: models.DateTimeField[datetime | None, datetime | None] = (
+        models.DateTimeField(null=True, blank=True)
+    )
+    runtime_fence: models.PositiveBigIntegerField[int, int] = models.PositiveBigIntegerField(
+        default=0
+    )
     state: models.JSONField[dict[str, object], dict[str, object]] = models.JSONField()
 
     class Meta:
@@ -60,6 +70,10 @@ class ConversationAggregate(models.Model):
             models.Index(
                 fields=["owner_id", "deleted_at"],
                 name="tth_conv_owner_del_idx",
+            ),
+            models.Index(
+                fields=["status", "runtime_lease_expires_at"],
+                name="tth_conv_recovery_scan_idx",
             ),
         ]
 
@@ -133,6 +147,7 @@ class MessageRecord(models.Model):
     text: models.TextField[str, str] = models.TextField(default="")
     sequence: models.PositiveIntegerField[int, int] = models.PositiveIntegerField(default=0)
     interrupted: models.BooleanField[bool, bool] = models.BooleanField(default=False)
+    completed: models.BooleanField[bool, bool] = models.BooleanField(default=False)
     created_at: models.DateTimeField[datetime, datetime] = models.DateTimeField()
     # Conversation-wide canonical order (message.sequence is chunk order within
     # the message, not conversation order). Populated from the first canonical
@@ -424,6 +439,9 @@ class RuntimeProcess(models.Model):
     exited_at: models.DateTimeField[datetime | None, datetime | None] = models.DateTimeField(
         null=True, blank=True
     )
+    orphaned_at: models.DateTimeField[datetime | None, datetime | None] = models.DateTimeField(
+        null=True, blank=True
+    )
     exit_code: models.IntegerField[int | None, int | None] = models.IntegerField(
         null=True, blank=True
     )
@@ -479,6 +497,7 @@ class CommandRecord(models.Model):
     conversation: models.ForeignKey[ConversationAggregate, ConversationAggregate] = (
         models.ForeignKey(ConversationAggregate, on_delete=models.CASCADE)
     )
+    conversation_id: UUID
     idempotency_key: models.CharField[str, str] = models.CharField(max_length=255)
     status: models.CharField[str, str] = models.CharField(max_length=32)
     worker_id: models.CharField[str | None, str | None] = models.CharField(
@@ -493,6 +512,15 @@ class CommandRecord(models.Model):
     target_turn_id: models.UUIDField[UUID | None, UUID | None] = models.UUIDField(
         null=True, blank=True, db_index=True
     )
+    recovery_attempt: models.ForeignKey[
+        RecoveryAttemptRecord | None, RecoveryAttemptRecord | None
+    ] = models.ForeignKey(
+        "RecoveryAttemptRecord",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="commands",
+    )
 
     class Meta:
         db_table = "talktoharnesses_command"
@@ -501,6 +529,55 @@ class CommandRecord(models.Model):
                 fields=("conversation", "idempotency_key"),
                 name="talktoharnesses_unique_command_key",
             )
+        ]
+
+
+class WorkerLeaseRecord(models.Model):
+    """Process-wide worker lease slot (SQLite singleton or per-worker on PG)."""
+
+    slot: models.CharField[str, str] = models.CharField(max_length=255, primary_key=True)
+    worker_id: models.CharField[str, str] = models.CharField(max_length=255)
+    started_at: models.DateTimeField[datetime, datetime] = models.DateTimeField()
+    heartbeat_at: models.DateTimeField[datetime, datetime] = models.DateTimeField()
+    expires_at: models.DateTimeField[datetime, datetime] = models.DateTimeField()
+    draining: models.BooleanField[bool, bool] = models.BooleanField(default=False)
+
+    class Meta:
+        db_table = "talktoharnesses_worker_lease"
+
+
+class RecoveryAttemptRecord(models.Model):
+    """Append-only recovery attempt with fixed codes (no free-text diagnostics)."""
+
+    attempt_id: models.UUIDField[UUID, UUID] = models.UUIDField(primary_key=True, editable=False)
+    conversation: models.ForeignKey[ConversationAggregate, ConversationAggregate] = (
+        models.ForeignKey(ConversationAggregate, on_delete=models.CASCADE)
+    )
+    conversation_id: UUID
+    binding_id: models.UUIDField[UUID, UUID] = models.UUIDField()
+    command_id: models.UUIDField[UUID | None, UUID | None] = models.UUIDField(null=True, blank=True)
+    turn_id: models.UUIDField[UUID | None, UUID | None] = models.UUIDField(null=True, blank=True)
+    worker_id: models.CharField[str, str] = models.CharField(max_length=255)
+    fence: models.PositiveBigIntegerField[int, int] = models.PositiveBigIntegerField()
+    trigger: models.CharField[str, str] = models.CharField(max_length=32)
+    observed_delivery_phase: models.CharField[str, str] = models.CharField(max_length=32)
+    action: models.CharField[str, str] = models.CharField(max_length=32)
+    result: models.CharField[str | None, str | None] = models.CharField(
+        max_length=32, null=True, blank=True
+    )
+    reason_code: models.CharField[str, str] = models.CharField(max_length=64)
+    started_at: models.DateTimeField[datetime, datetime] = models.DateTimeField()
+    completed_at: models.DateTimeField[datetime | None, datetime | None] = models.DateTimeField(
+        null=True, blank=True
+    )
+
+    class Meta:
+        db_table = "talktoharnesses_recovery_attempt"
+        indexes = [
+            models.Index(
+                fields=["conversation", "-started_at"],
+                name="tth_recovery_conv_started_idx",
+            ),
         ]
 
 

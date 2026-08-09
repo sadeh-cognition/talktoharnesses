@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from talktoharnesses.application.handoff import render_handoff
+from talktoharnesses.application.observability import get_observability
 from talktoharnesses.application.persistence import Persistence, PruneResult
 from talktoharnesses.application.publisher import CommittedEventPublisher
 from talktoharnesses.domain._base import require_utc
@@ -80,6 +81,7 @@ async def run_cleanup(
             continue
         pruned_turns += result.pruned_turn_count
         cancelled_waiting += result.cancelled_waiting_count
+        get_observability().observe_committed_events(result.session_rotated_events)
         if publisher is not None and result.session_rotated_events:
             await publisher.publish(result.session_rotated_events)
         if not result.handoff.entries:

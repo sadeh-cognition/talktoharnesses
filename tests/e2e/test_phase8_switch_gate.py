@@ -100,8 +100,12 @@ def _create_probed_harness(client: Client, header: str, name: str, kind: str) ->
 def _run_switch_worker(service: TalkToHarnessesService) -> None:
     async def _run() -> None:
         persistence = service._persistence  # pyright: ignore[reportPrivateUsage]
-        claimed = await persistence.claim_commands("e2e-p8", 8)
-        command = next(c for c in claimed if c.kind is CommandKind.SWITCH_HARNESS)
+        claimed = await persistence.claim_commands("e2e-p8", 8, lease_duration=30.0)
+        command = next(
+            item.command
+            for item in claimed
+            if item.command.kind is CommandKind.SWITCH_HARNESS
+        )
         service.processor._worker_id = "e2e-p8"  # pyright: ignore[reportPrivateUsage]
         await service.processor._execute_command(command)  # pyright: ignore[reportPrivateUsage]
 

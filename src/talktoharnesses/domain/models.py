@@ -176,6 +176,7 @@ class Message(BaseModel):
     text: str = ""
     sequence: int = 0
     interrupted: bool = False
+    completed: bool = False
     created_at: UtcDateTime
 
 
@@ -349,7 +350,7 @@ class Command(BaseModel):
     delivered_at: UtcDateTime | None = None
     settled_at: UtcDateTime | None = None
     native_session_id: str | None = None
-    recovery_result: str | None = None
+    recovery_attempt_id: UUID | None = None
     payload: CommandPayload
     created_at: UtcDateTime
 
@@ -604,6 +605,7 @@ class ProcessRecord(BaseModel):
     pid: int | None = None
     started_at: UtcDateTime | None = None
     exited_at: UtcDateTime | None = None
+    orphaned_at: UtcDateTime | None = None
     exit_code: int | None = None
     redacted_stderr_tail: str = ""
 
@@ -818,3 +820,10 @@ class ErrorProjection(BaseModel):
 
     code: str
     message: str
+
+
+class ReadinessProjection(BaseModel):
+    model_config = FROZEN
+
+    ready: bool
+    reason: Literal["ready", "not_ready"]

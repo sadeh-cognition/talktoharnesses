@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
 
+from talktoharnesses.application.observability import get_observability
 from talktoharnesses.application.persistence import Persistence
 from talktoharnesses.application.publisher import CommittedEventPublisher
 from talktoharnesses.domain.approval_matching import (
@@ -79,6 +80,8 @@ class InteractionBroker:
         interaction: PendingInteraction,
         *,
         provider_correlation: Mapping[str, str] | None = None,
+        worker_id: str | None = None,
+        fence: int | None = None,
     ) -> None:
         """Force-commit a request, publish, then evaluate automatic policy."""
         state = await self._persistence.get_worker_snapshot(conversation_id)
@@ -114,13 +117,21 @@ class InteractionBroker:
             interaction_id=interaction.id,
             provider_correlation=dict(provider_correlation or {}),
             request_event_sequence=request_seq,
+            worker_id=worker_id,
+            fence=fence,
         )
+        get_observability().observe_committed_events(committed, state=result.state)
         try:
             await self._publisher.publish(committed)
         except Exception:
             logger.exception("failed to publish interaction request; leave unevaluated")
             return
-        await self._evaluate_policy(conversation_id, interaction.id)
+        await self._evaluate_policy(
+            conversation_id,
+            interaction.id,
+            worker_id=worker_id,
+            fence=fence,
+        )
 
     async def update_draft(
         self,
@@ -146,6 +157,7 @@ class InteractionBroker:
             result.state,
             result.events,
         )
+        get_observability().observe_committed_events(events, state=result.state)
         await self._publisher.publish(events)
         interaction = result.state.interactions[interaction_id]
         return InteractionProjection(
@@ -231,7 +243,9 @@ class InteractionBroker:
             deciding_rule=create_rule,
             resolution_event_sequence=resolution_seq,
         )
-        await self._publish_resolution(conversation_id, interaction_id)
+        await self._publish_resolution(
+            conversation_id, interaction_id, committed_state=result.state
+        )
         state = await self._persistence.get_snapshot(conversation_id, owner_id)
         existing = self._find_answer_command(state, interaction_id)
         if existing is not None:
@@ -244,7 +258,13 @@ class InteractionBroker:
             idempotency_key=idempotency_key,
         )
 
-    async def cancel_open_for_interrupt(self, conversation_id: UUID) -> None:
+    async def cancel_open_for_interrupt(
+        self,
+        conversation_id: UUID,
+        *,
+        worker_id: str | None = None,
+        fence: int | None = None,
+    ) -> None:
         """Durably cancel open interactions and publish before adapter interrupt."""
         state = await self._persistence.get_worker_snapshot(conversation_id)
         owner_id = state.conversation.owner_id
@@ -271,9 +291,13 @@ class InteractionBroker:
                 automatic=False,
                 resolution_event_sequence=result.events[-1].sequence,
                 suppress_answer_command=True,
+                worker_id=worker_id,
+                fence=fence,
             )
             if resolution.was_first_write:
-                await self._publish_resolution(conversation_id, interaction_id)
+                await self._publish_resolution(
+                    conversation_id, interaction_id, committed_state=result.state
+                )
                 await self._persistence.complete_suppressed_interaction_resolution(
                     interaction_id,
                     self._clock(),
@@ -317,7 +341,14 @@ class InteractionBroker:
                     conversation_id,
                 )
 
-    async def _evaluate_policy(self, conversation_id: UUID, interaction_id: UUID) -> None:
+    async def _evaluate_policy(
+        self,
+        conversation_id: UUID,
+        interaction_id: UUID,
+        *,
+        worker_id: str | None = None,
+        fence: int | None = None,
+    ) -> None:
         state = await self._persistence.get_worker_snapshot(conversation_id)
         interaction = state.interactions.get(interaction_id)
         if interaction is None:
@@ -336,18 +367,35 @@ class InteractionBroker:
             automatic=True,
             resolution_event_sequence=0,
             mark_policy_evaluated=True,
+            worker_id=worker_id,
+            fence=fence,
         )
         if not resolution.was_first_write:
             return
-        await self._publish_resolution(conversation_id, interaction_id)
         state_after = await self._persistence.get_worker_snapshot(conversation_id)
-        await self._release_for(conversation_id, owner_id, interaction_id, state_after)
+        await self._publish_resolution(conversation_id, interaction_id, committed_state=state_after)
+        await self._release_for(
+            conversation_id,
+            owner_id,
+            interaction_id,
+            state_after,
+            worker_id=worker_id,
+            fence=fence,
+        )
 
-    async def _publish_resolution(self, conversation_id: UUID, interaction_id: UUID) -> None:
+    async def _publish_resolution(
+        self,
+        conversation_id: UUID,
+        interaction_id: UUID,
+        *,
+        committed_state: Any | None = None,
+    ) -> None:
         event = await self._persistence.get_interaction_resolution_event(
             conversation_id,
             interaction_id,
         )
+        if committed_state is not None:
+            get_observability().observe_committed_events((event,), state=committed_state)
         await self._publisher.publish((event,))
 
     async def _publish_request(self, conversation_id: UUID, interaction_id: UUID) -> None:
@@ -371,6 +419,8 @@ class InteractionBroker:
         state: Any,
         *,
         idempotency_key: str | None = None,
+        worker_id: str | None = None,
+        fence: int | None = None,
     ) -> CommandProjection:
         existing = self._find_answer_command(state, interaction_id)
         if existing is not None:
@@ -398,6 +448,8 @@ class InteractionBroker:
             command,
             expected_version=state.conversation.version,
             state=released_state,
+            worker_id=worker_id,
+            fence=fence,
         )
         return _command_projection(released)
 

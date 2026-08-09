@@ -88,7 +88,7 @@ def _launch() -> LaunchSnapshot:
     return LaunchSnapshot(
         harness_version="0.1.53+cli-2.1.88",
         working_directory="/tmp",
-        adapter_version="2026.8.0.dev8",
+        adapter_version="2026.8.0.dev9",
         capabilities=HarnessCapabilities(kind=HarnessKind.CLAUDE, version="0.1.53+cli-2.1.88"),
     )
 

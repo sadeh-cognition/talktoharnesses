@@ -93,9 +93,12 @@ jobs:
           tests/test_phase8_persistence.py
           tests/test_phase8_fts.py
           tests/e2e/test_phase6_approvals_gate.py
+          tests/e2e/test_phase9_recovery_gate.py
           tests/unit/django/test_approval_api.py
           tests/unit/application/test_interaction_broker.py
           tests/unit/application/test_command_processor_interactions.py
+          tests/unit/application/test_fencing.py
+          tests/unit/application/test_worker_coordinator.py
           tests/unit/domain/test_interaction_answers.py
           tests/unit/domain/test_approval_matching.py
           tests/unit/providers/grok/test_permission_fixtures.py

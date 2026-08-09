@@ -130,8 +130,8 @@ def _seed_retained_turn(persistence: MemoryPersistence, conversation_id: UUID) -
 
 
 async def _claim(persistence: MemoryPersistence, kind: CommandKind) -> Command:
-    claimed = await persistence.claim_commands("worker-1", 8)
-    return next(command for command in claimed if command.kind is kind)
+    claimed = await persistence.claim_commands("worker-1", 8, lease_duration=30.0)
+    return next(item.command for item in claimed if item.command.kind is kind)
 
 
 # ---------------------------------------------------------------------------
@@ -361,10 +361,21 @@ async def test_switch_renews_lease_during_slow_candidate_seed(
     original_renew = persistence.renew_command_lease
     original_seed = service._runtime.seed_candidate  # pyright: ignore[reportPrivateUsage]
 
-    async def count_renewal(command_id: UUID, worker_id: str, expires_at: datetime) -> None:
+    async def count_renewal(
+        command_id: UUID,
+        worker_id: str,
+        *,
+        lease_duration: float,
+        fence: int | None = None,
+    ) -> None:
         nonlocal renewals
         renewals += 1
-        await original_renew(command_id, worker_id, expires_at)
+        await original_renew(
+            command_id,
+            worker_id,
+            lease_duration=lease_duration,
+            fence=fence,
+        )
 
     async def slow_seed(candidate: object, handoff: str) -> None:
         await asyncio.sleep(0.22)
@@ -405,10 +416,12 @@ async def test_switch_sanitizes_unexpected_failure_details(
     await service.processor._execute_command(claimed)  # pyright: ignore[reportPrivateUsage]
 
     failure = next(event for event in publisher.events if event.type == "harness_switch_failed")
-    assert failure.payload.message == "harness switch failed"  # type: ignore[union-attr]
+    assert failure.payload.message == "invalid state"  # type: ignore[union-attr]
     settled = persistence.commands[claimed.id]
-    assert settled.recovery_result == "invalid_state: harness switch failed"
+    assert settled.status is CommandStatus.SETTLED
+    assert settled.recovery_attempt_id is None
     assert "/secret" not in failure.model_dump_json()
+    assert "raw payload" not in failure.model_dump_json()
     await service.stop()
 
 

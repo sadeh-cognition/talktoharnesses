@@ -6,7 +6,7 @@ Do not edit provider tables by hand; regenerate via
 
 ## Grok
 
-- Adapter version: `2026.8.0.dev8`
+- Adapter version: `2026.8.0.dev9`
 
 ### Known releases (implementation targets)
 
@@ -24,7 +24,7 @@ _No published resume combinations yet. Resume rows are added only after the opt-
 
 ## Cursor
 
-- Adapter version: `2026.8.0.dev8`
+- Adapter version: `2026.8.0.dev9`
 
 ### Known releases (implementation targets)
 
@@ -42,7 +42,7 @@ _No published resume combinations yet. Resume rows are added only after the opt-
 
 ## Codex
 
-- Adapter version: `2026.8.0.dev8`
+- Adapter version: `2026.8.0.dev9`
 
 ### Known releases (implementation targets)
 
@@ -64,7 +64,7 @@ _No published resume combinations yet. Resume rows are added only after the opt-
 
 ## Claude Code
 
-- Adapter version: `2026.8.0.dev8`
+- Adapter version: `2026.8.0.dev9`
 
 ### Known releases (implementation targets)
 
@@ -86,7 +86,7 @@ _No published resume combinations yet. Resume rows are added only after the opt-
 
 ## OpenCode
 
-- Adapter version: `2026.8.0.dev8`
+- Adapter version: `2026.8.0.dev9`
 
 ### Known releases (implementation targets)
 

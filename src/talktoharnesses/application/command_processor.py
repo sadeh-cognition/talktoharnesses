@@ -6,8 +6,8 @@ import asyncio
 import contextlib
 import logging
 from collections.abc import Callable, Sequence
-from datetime import UTC, datetime, timedelta
-from typing import Protocol, runtime_checkable
+from datetime import UTC, datetime
+from typing import Protocol, TypedDict, runtime_checkable
 from uuid import UUID, uuid4
 
 from talktoharnesses.application.delta_batcher import DeltaBatcher
@@ -17,11 +17,13 @@ from talktoharnesses.application.event_dispatcher import (
     mark_command_delivered,
     mark_command_delivery_started,
 )
+from talktoharnesses.application.faults import FaultCallback, FaultPoint, checkpoint
 from talktoharnesses.application.handoff import render_handoff
+from talktoharnesses.application.observability import get_observability
 from talktoharnesses.application.persistence import Persistence
 from talktoharnesses.application.publisher import CommittedEventPublisher
 from talktoharnesses.domain.enums import ActivityStatus, CommandKind, CommandStatus, ErrorCode
-from talktoharnesses.domain.errors import DomainError
+from talktoharnesses.domain.errors import DomainError, public_message
 from talktoharnesses.domain.events import (
     ConversationEvent,
     HarnessEvent,
@@ -56,6 +58,11 @@ from talktoharnesses.runtime.manager import ManagedRuntime, RuntimeManager
 logger = logging.getLogger(__name__)
 
 
+class _FenceCommitKwargs(TypedDict, total=False):
+    worker_id: str
+    fence: int
+
+
 @runtime_checkable
 class _NativeDedupeAdapter(Protocol):
     def import_seen(
@@ -85,6 +92,7 @@ class CommandProcessor:
         poll_interval: float = 0.05,
         clock: Callable[[], datetime] | None = None,
         interaction_broker: object | None = None,
+        fault_callback: FaultCallback = None,
     ) -> None:
         self._persistence = persistence
         self._publisher = publisher
@@ -94,9 +102,14 @@ class CommandProcessor:
         self._poll_interval = poll_interval
         self._clock = clock or (lambda: datetime.now(UTC))
         self._broker = interaction_broker
+        self._fault_callback = fault_callback
 
         self._worker_id: str | None = None
         self._running = False
+        self._draining = False
+        # Coordinator disables claims until initial recovery finishes.
+        self._claims_enabled = True
+        self._fences: dict[UUID, int] = {}
         self._claim_task: asyncio.Task[None] | None = None
         self._command_tasks: set[asyncio.Task[None]] = set()
         self._conv_locks: dict[UUID, asyncio.Lock] = {}
@@ -106,12 +119,25 @@ class CommandProcessor:
     async def start(self, worker_id: str) -> None:
         if self._running:
             return
-        self._worker_id = worker_id
+        self.initialize_worker(worker_id)
         self._running = True
+        self._draining = False
         self._claim_task = asyncio.create_task(self._claim_loop(), name=f"claim-{worker_id}")
+
+    def initialize_worker(self, worker_id: str) -> None:
+        """Install ownership before recovery can create event pumps."""
+        if self._running and self._worker_id != worker_id:
+            raise DomainError(ErrorCode.INVALID_STATE, "command worker already started")
+        self._worker_id = worker_id
+
+    @property
+    def claim_loop_healthy(self) -> bool:
+        task = self._claim_task
+        return self._running and task is not None and not task.done()
 
     async def stop(self) -> None:
         self._running = False
+        self._claims_enabled = False
         if self._claim_task is not None:
             self._claim_task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
@@ -132,6 +158,31 @@ class CommandProcessor:
                 await batcher.close()
         self._batchers.clear()
 
+    def set_claims_enabled(self, enabled: bool) -> None:
+        self._claims_enabled = enabled
+
+    def begin_shutdown(self) -> None:
+        self._draining = True
+        self._claims_enabled = False
+
+    def set_fence(self, conversation_id: UUID, fence: int) -> None:
+        self._fences[conversation_id] = fence
+
+    def drop_fence(self, conversation_id: UUID) -> None:
+        self._fences.pop(conversation_id, None)
+
+    def ensure_pump(self, conversation_id: UUID) -> None:
+        self._ensure_pump(conversation_id)
+
+    async def cancel_pump(self, conversation_id: UUID) -> None:
+        await self._quiesce_pump(conversation_id)
+
+    def _fence_kwargs(self, conversation_id: UUID) -> _FenceCommitKwargs:
+        fence = self._fences.get(conversation_id)
+        if self._worker_id is None or fence is None:
+            return {}
+        return {"worker_id": self._worker_id, "fence": fence}
+
     def _lock_for(self, conversation_id: UUID) -> asyncio.Lock:
         lock = self._conv_locks.get(conversation_id)
         if lock is None:
@@ -143,17 +194,22 @@ class CommandProcessor:
         assert self._worker_id is not None
         while self._running:
             try:
-                claimed = await self._persistence.claim_commands(
-                    self._worker_id,
-                    self._claim_limit,
-                )
-                for command in claimed:
-                    task = asyncio.create_task(
-                        self._handle_command(command),
-                        name=f"cmd-{command.id}",
+                if self._claims_enabled:
+                    claimed = await self._persistence.claim_commands(
+                        self._worker_id,
+                        self._claim_limit,
+                        lease_duration=self._lease_seconds,
                     )
-                    self._command_tasks.add(task)
-                    task.add_done_callback(self._command_tasks.discard)
+                    for claimed_command in claimed:
+                        command = claimed_command.command
+                        self.set_fence(command.conversation_id, claimed_command.fence)
+                        await checkpoint(self._fault_callback, FaultPoint.AFTER_CLAIM_COMMIT)
+                        task = asyncio.create_task(
+                            self._handle_command(command),
+                            name=f"cmd-{command.id}",
+                        )
+                        self._command_tasks.add(task)
+                        task.add_done_callback(self._command_tasks.discard)
             except Exception:
                 logger.exception("command claim failed")
             await asyncio.sleep(self._poll_interval)
@@ -162,6 +218,15 @@ class CommandProcessor:
         async with self._lock_for(command.conversation_id):
             try:
                 await self._execute_command(command)
+            except DomainError as exc:
+                if exc.code is ErrorCode.STALE_OWNER:
+                    await self._on_stale_owner(command.conversation_id)
+                    return
+                logger.exception(
+                    "command execution failed conversation=%s command=%s",
+                    command.conversation_id,
+                    command.id,
+                )
             except Exception:
                 logger.exception(
                     "command execution failed conversation=%s command=%s",
@@ -169,7 +234,15 @@ class CommandProcessor:
                     command.id,
                 )
 
+    async def _on_stale_owner(self, conversation_id: UUID) -> None:
+        await self._quiesce_pump(conversation_id)
+        with contextlib.suppress(Exception):
+            await self._runtime.close(conversation_id, reason="stale_owner")
+        self.drop_fence(conversation_id)
+
     async def _execute_command(self, command: Command) -> None:
+        if self._draining:
+            return
         state = await self._persistence.get_worker_snapshot(command.conversation_id)
         now = self._clock()
 
@@ -213,6 +286,7 @@ class CommandProcessor:
                 state,
                 (),
                 (command,),
+                **self._fence_kwargs(command.conversation_id),
             )
             await self._renew_lease(command)
             return
@@ -231,13 +305,20 @@ class CommandProcessor:
                 result.state,
                 result.events,
                 tuple(result.state.commands.values()),
+                **self._fence_kwargs(command.conversation_id),
             )
-            await self._safe_publish(committed)
+            await self._safe_publish(committed, state=result.state)
             state = await self._persistence.get_worker_snapshot(command.conversation_id)
 
         now = self._clock()
         state, started_cmd = mark_command_delivery_started(state, command.id, now=now)
-        await self._persistence.update_command(started_cmd)
+        await self._persistence.update_command(
+            started_cmd,
+            **self._fence_kwargs(command.conversation_id),
+        )
+        await checkpoint(self._fault_callback, FaultPoint.AFTER_DELIVERY_STARTED)
+        if self._draining:
+            return
 
         adapter = managed.adapter
         session = managed.session
@@ -289,7 +370,10 @@ class CommandProcessor:
             if batcher is not None:
                 await batcher.flush()
             if self._broker is not None:
-                await self._broker.cancel_open_for_interrupt(command.conversation_id)  # type: ignore[attr-defined]
+                await self._broker.cancel_open_for_interrupt(  # type: ignore[attr-defined]
+                    command.conversation_id,
+                    **self._fence_kwargs(command.conversation_id),
+                )
             await adapter.interrupt(session)
         else:
             logger.warning("command kind %s not executable by worker", command.kind)
@@ -301,7 +385,15 @@ class CommandProcessor:
                     "lease_expires_at": None,
                 }
             )
-            await self._persistence.update_command(settled)
+            await self._persistence.update_command(
+                settled,
+                **self._fence_kwargs(command.conversation_id),
+            )
+            return
+
+        await checkpoint(self._fault_callback, FaultPoint.AFTER_NATIVE_ACK)
+
+        if self._draining:
             return
 
         now = self._clock()
@@ -312,7 +404,15 @@ class CommandProcessor:
             delivered_cmd = started_cmd.model_copy(
                 update={"status": CommandStatus.DELIVERED, "delivered_at": now}
             )
-        await self._persistence.update_command(delivered_cmd)
+        await self._persistence.update_command(
+            delivered_cmd,
+            **self._fence_kwargs(command.conversation_id),
+        )
+        await checkpoint(self._fault_callback, FaultPoint.AFTER_DELIVERED)
+        get_observability().record_command(
+            kind=command.kind,
+            outcome=CommandStatus.DELIVERED.value,
+        )
 
         self._ensure_pump(command.conversation_id)
 
@@ -333,6 +433,10 @@ class CommandProcessor:
                     submitted_at=self._clock(),
                 )
             await adapter.answer_interaction(session, answer)
+            await checkpoint(self._fault_callback, FaultPoint.AFTER_NATIVE_ACK)
+
+            if self._draining:
+                return
 
             now = self._clock()
             latest = await self._persistence.get_worker_snapshot(command.conversation_id)
@@ -359,7 +463,9 @@ class CommandProcessor:
                 settled_state,
                 (),
                 (settled,),
+                **self._fence_kwargs(command.conversation_id),
             )
+            await checkpoint(self._fault_callback, FaultPoint.AFTER_DELIVERED)
         except BaseException as exc:
             await asyncio.shield(self._mark_answer_outcome_unknown(command, exc))
             raise
@@ -369,6 +475,7 @@ class CommandProcessor:
         command: Command,
         exc: BaseException,
     ) -> None:
+        _ = exc
         state = await self._persistence.get_worker_snapshot(command.conversation_id)
         current = state.commands.get(command.id, command)
         if current.status in {CommandStatus.SETTLED, CommandStatus.OUTCOME_UNKNOWN}:
@@ -376,7 +483,7 @@ class CommandProcessor:
         failed = current.model_copy(
             update={
                 "status": CommandStatus.OUTCOME_UNKNOWN,
-                "recovery_result": str(exc) or type(exc).__name__,
+                "recovery_attempt_id": None,
                 "worker_id": None,
                 "lease_expires_at": None,
             }
@@ -390,6 +497,7 @@ class CommandProcessor:
             failed_state,
             (),
             (failed,),
+            **self._fence_kwargs(command.conversation_id),
         )
 
     async def _fallback_failed_steer(self, command: Command) -> None:
@@ -424,8 +532,9 @@ class CommandProcessor:
             next_state,
             result.events,
             (released,),
+            **self._fence_kwargs(command.conversation_id),
         )
-        await self._safe_publish(committed)
+        await self._safe_publish(committed, state=next_state)
 
     async def _execute_switch(self, command: Command, _state: ConversationState) -> None:
         """Durable harness switch: candidate first, current binding until commit."""
@@ -451,7 +560,9 @@ class CommandProcessor:
             await self._release_to_accepted(command, state)
             return
 
-        configuration = command.payload.configuration
+        switch_payload = command.payload
+        configuration = switch_payload.configuration
+        harness_instance_id = switch_payload.harness_instance_id
         binding_id = uuid4()
         quiesced = False
         lease_task: asyncio.Task[None] | None = None
@@ -460,11 +571,11 @@ class CommandProcessor:
         async def renew_lease() -> None:
             assert self._worker_id is not None
             while True:
-                expires = self._clock() + timedelta(seconds=self._lease_seconds)
                 await self._persistence.renew_command_lease(
                     command.id,
                     self._worker_id,
-                    expires,
+                    lease_duration=self._lease_seconds,
+                    fence=self._fences.get(conversation_id),
                 )
                 await asyncio.sleep(max(0.01, self._lease_seconds / 3))
 
@@ -480,13 +591,46 @@ class CommandProcessor:
                     name=f"switch-lease-{command.id}",
                 )
                 lease_task.add_done_callback(stop_on_lost_lease)
+
+            now = self._clock()
+            state, started_cmd = mark_command_delivery_started(state, command.id, now=now)
+            await self._persistence.update_command(
+                started_cmd,
+                **self._fence_kwargs(conversation_id),
+            )
+            await checkpoint(self._fault_callback, FaultPoint.AFTER_DELIVERY_STARTED)
+            command = started_cmd
+            if self._draining:
+                return
+
             candidate = await self._runtime.start_candidate(
                 conversation_id=conversation_id,
                 owner_id=state.conversation.owner_id,
                 binding_id=binding_id,
                 configuration=configuration,
+                **self._fence_kwargs(conversation_id),
             )
             await self._runtime.seed_candidate(candidate, render_handoff(prepared.handoff))
+            await checkpoint(self._fault_callback, FaultPoint.AFTER_NATIVE_ACK)
+
+            if self._draining:
+                await self._runtime.close_candidate(binding_id)
+                return
+
+            now = self._clock()
+            # Update the durable command row only — keep prepared aggregate
+            # version so commit_harness_switch still observes OCC conflicts.
+            state, delivered_cmd = mark_command_delivered(state, command.id, now=now)
+            await self._persistence.update_command(
+                delivered_cmd,
+                **self._fence_kwargs(conversation_id),
+            )
+            await checkpoint(self._fault_callback, FaultPoint.AFTER_DELIVERED)
+            command = delivered_cmd
+            get_observability().record_command(
+                kind=command.kind,
+                outcome=CommandStatus.DELIVERED.value,
+            )
 
             await self._quiesce_pump(conversation_id)
             quiesced = True
@@ -499,7 +643,8 @@ class CommandProcessor:
                 await self._persistence.renew_command_lease(
                     command.id,
                     self._worker_id,
-                    self._clock() + timedelta(seconds=self._lease_seconds),
+                    lease_duration=self._lease_seconds,
+                    fence=self._fences.get(conversation_id),
                 )
 
             now = self._clock()
@@ -510,7 +655,7 @@ class CommandProcessor:
                     conversation_id=conversation_id,
                     kind=configuration.kind,
                     configuration=configuration,
-                    harness_instance_id=command.payload.harness_instance_id,
+                    harness_instance_id=harness_instance_id,
                     native_session_id=candidate.session.native_session_id,
                     launch_snapshot=candidate.launch,
                     created_at=now,
@@ -535,6 +680,7 @@ class CommandProcessor:
                 command=settled,
                 process=candidate.process_record,
                 launch_history_entry=candidate.launch,
+                **self._fence_kwargs(conversation_id),
             )
         except asyncio.CancelledError:
             # Closing the candidate is non-negotiable even during shutdown.
@@ -557,7 +703,7 @@ class CommandProcessor:
                 lease_task.cancel()
                 await asyncio.gather(lease_task, return_exceptions=True)
 
-        await self._safe_publish(committed)
+        await self._safe_publish(committed, state=result.state)
         previous = self._runtime.get_runtime(conversation_id)
         await self._runtime.promote_candidate(conversation_id, binding_id)
         if previous is not None:
@@ -572,16 +718,21 @@ class CommandProcessor:
 
     async def _fail_switch(self, command: Command, exc: BaseException) -> None:
         """Settle the switch command and publish only harness_switch_failed."""
-        logger.warning("harness switch failed conversation=%s: %s", command.conversation_id, exc)
-        code = exc.code.value if isinstance(exc, DomainError) else ErrorCode.INVALID_STATE.value
-        message = exc.message if isinstance(exc, DomainError) else "harness switch failed"
+        err = exc.code if isinstance(exc, DomainError) else ErrorCode.INVALID_STATE
+        logger.warning(
+            "harness switch failed code=%s",
+            err.value,
+        )
+        code = err.value
+        message = public_message(err)
         state = await self._persistence.get_worker_snapshot(command.conversation_id)
         now = self._clock()
         result = fail_switch(state, now=now, message=message, error_code=code)
+        get_observability().record_command(kind=command.kind, outcome="failed")
         settled = self._settled(
             state.commands.get(command.id, command),
             now=now,
-        ).model_copy(update={"recovery_result": f"{code}: {message}"})
+        )
         commands = dict(result.state.commands)
         commands[settled.id] = settled
         committed = await self._persistence.commit_harness_switch_failure(
@@ -590,8 +741,9 @@ class CommandProcessor:
             result.state.model_copy(update={"commands": commands}),
             result.events,
             command=settled,
+            **self._fence_kwargs(command.conversation_id),
         )
-        await self._safe_publish(committed)
+        await self._safe_publish(committed, state=result.state)
 
     def _settled(self, command: Command, *, now: datetime) -> Command:
         return command.model_copy(
@@ -622,6 +774,7 @@ class CommandProcessor:
             state.model_copy(update={"commands": commands}),
             (),
             (released,),
+            **self._fence_kwargs(command.conversation_id),
         )
 
     async def _quiesce_pump(self, conversation_id: UUID) -> None:
@@ -648,6 +801,7 @@ class CommandProcessor:
                 configuration=config,
                 native_session_id=native,
                 argv=(),
+                **self._fence_kwargs(state.conversation.id),
             )
         else:
             await self._runtime.start(
@@ -655,9 +809,12 @@ class CommandProcessor:
                 owner_id=state.conversation.owner_id,
                 configuration=config,
                 argv=(),
+                **self._fence_kwargs(state.conversation.id),
             )
 
     def _ensure_pump(self, conversation_id: UUID) -> None:
+        if self._draining:
+            return
         existing = self._pumps.get(conversation_id)
         if existing is not None and not existing.done():
             return
@@ -677,14 +834,22 @@ class CommandProcessor:
             events: Sequence[ConversationEvent],
             commands: Sequence[Command],
         ) -> Sequence[ConversationEvent]:
-            committed = await self._persistence.commit_turn_batch(
-                conversation_id,
-                base_version,
-                state,
-                events,
-                commands,
-            )
-            await self._safe_publish(committed)
+            try:
+                committed = await self._persistence.commit_turn_batch(
+                    conversation_id,
+                    base_version,
+                    state,
+                    events,
+                    commands,
+                    **self._fence_kwargs(conversation_id),
+                )
+            except DomainError as exc:
+                if exc.code is ErrorCode.STALE_OWNER:
+                    await self._on_stale_owner(conversation_id)
+                    raise
+                raise
+            await checkpoint(self._fault_callback, FaultPoint.AFTER_EVENT_COMMIT)
+            await self._safe_publish(committed, state=state)
             return committed
 
         batcher = DeltaBatcher(conversation_id=conversation_id, flush=flush)
@@ -723,7 +888,7 @@ class CommandProcessor:
                 self._pumps.pop(conversation_id, None)
             if self._batchers.get(conversation_id) is batcher:
                 self._batchers.pop(conversation_id, None)
-            if stale_runtime and self._running:
+            if stale_runtime and self._running and not self._draining:
                 try:
                     snapshot = await self._persistence.get_worker_snapshot(conversation_id)
                     current = await self._runtime.ensure_binding_current(
@@ -735,7 +900,7 @@ class CommandProcessor:
                     self._ensure_pump(conversation_id)
                 except Exception:
                     logger.exception("failed to replace stale runtime for %s", conversation_id)
-            elif stream_ended and self._running:
+            elif stream_ended and self._running and not self._draining:
                 with contextlib.suppress(Exception):
                     await self._runtime.close(conversation_id, reason="event_stream_closed")
 
@@ -800,6 +965,7 @@ class CommandProcessor:
                         if isinstance(event, HarnessInteractionRequest)
                         else None
                     ),
+                    **self._fence_kwargs(conversation_id),
                 )
                 return True
 
@@ -819,14 +985,14 @@ class CommandProcessor:
                     stream_offsets=stream_offsets,
                 )
             except DomainError as exc:
-                logger.warning("dispatch failed: %s", exc)
+                logger.warning("dispatch failed code=%s", exc.code.value)
                 db_state = await self._persistence.get_worker_snapshot(conversation_id)
                 if db_state.active_turn is not None:
                     ou = apply_outcome_unknown(
                         db_state,
                         now=now,
                         delivery_phase="event_dispatch",
-                        message=exc.message,
+                        message=public_message(exc.code),
                     )
                     committed = await self._persistence.commit_turn_batch(
                         conversation_id,
@@ -838,8 +1004,9 @@ class CommandProcessor:
                             for c in ou.state.commands.values()
                             if c.status.value == "outcome_unknown"
                         ),
+                        **self._fence_kwargs(conversation_id),
                     )
-                    await self._safe_publish(committed)
+                    await self._safe_publish(committed, state=ou.state)
                 await self._runtime.close(conversation_id, reason="protocol_error")
                 return True
 
@@ -886,23 +1053,31 @@ class CommandProcessor:
             next_state,
             (),
             (released,),
+            **self._fence_kwargs(conversation_id),
         )
 
     async def _renew_lease(self, command: Command) -> None:
         if self._worker_id is None:
             return
-        expires = self._clock() + timedelta(seconds=self._lease_seconds)
         with contextlib.suppress(Exception):
             await self._persistence.renew_command_lease(
                 command.id,
                 self._worker_id,
-                expires,
+                lease_duration=self._lease_seconds,
+                fence=self._fences.get(command.conversation_id),
             )
 
-    async def _safe_publish(self, events: Sequence[ConversationEvent]) -> None:
+    async def _safe_publish(
+        self,
+        events: Sequence[ConversationEvent],
+        *,
+        state: ConversationState | None = None,
+    ) -> None:
         if not events:
             return
+        get_observability().observe_committed_events(events, state=state)
         try:
             await self._publisher.publish(events)
+            await checkpoint(self._fault_callback, FaultPoint.AFTER_PUBLICATION)
         except Exception:
             logger.exception("publisher failed after commit; events remain durable")
