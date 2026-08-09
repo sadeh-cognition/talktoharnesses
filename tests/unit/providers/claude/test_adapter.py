@@ -157,11 +157,26 @@ async def test_start_submit_no_steer(monkeypatch: pytest.MonkeyPatch) -> None:
 async def test_response_protocol_error_fails_turn_and_ends_stream(
     responses: list[dict[str, object]],
     error_code: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    async def fake_probe(config: HarnessConfiguration):
+        from talktoharnesses.providers.claude.compatibility import match_release
+
+        release = match_release(
+            sdk_version="0.1.53",
+            cli_version="2.1.88",
+            cli_source="bundled",
+            platform="linux",
+        )
+        return release.to_harness_capabilities(), release
+
+    monkeypatch.setattr("talktoharnesses.providers.claude.adapter.probe_claude", fake_probe)
+
     def factory(options: object) -> FakeClaudeClient:
         return FakeClaudeClient(options=options, responses=responses)
 
     adapter = ClaudeAdapter(client_factory=factory)
+    await adapter.probe(_config())
     session = await adapter.start(
         StartSessionRequest(
             conversation_id=uuid4(),

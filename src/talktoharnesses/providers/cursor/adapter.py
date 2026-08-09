@@ -6,9 +6,10 @@ import asyncio
 import contextlib
 import logging
 from collections.abc import AsyncIterator
-from typing import Any, cast
+from typing import Any, Literal, cast
 from uuid import UUID, uuid4
 
+from talktoharnesses import __version__
 from talktoharnesses.domain.enums import ErrorCode, HarnessKind
 from talktoharnesses.domain.errors import DomainError
 from talktoharnesses.domain.events import HarnessEvent, InteractionRequestedPayload
@@ -31,14 +32,17 @@ from talktoharnesses.providers.adapter import (
     TurnRequest,
 )
 from talktoharnesses.providers.cursor.argv import build_cursor_argv
-from talktoharnesses.providers.cursor.compatibility import CursorReleaseRecord
+from talktoharnesses.providers.cursor.compatibility import (
+    CursorReleaseRecord,
+    enforce_published_operation,
+)
 from talktoharnesses.providers.cursor.normalizer import CursorNormalizer
 from talktoharnesses.providers.cursor.probe import probe_cursor
 from talktoharnesses.runtime.handle import ProcessHandle
 
 logger = logging.getLogger(__name__)
 
-CLIENT_INFO = {"name": "talktoharnesses", "version": "2026.8.0.dev9"}
+CLIENT_INFO = {"name": "talktoharnesses", "version": __version__}
 
 
 def _map_dict(value: object) -> dict[str, Any]:
@@ -95,7 +99,15 @@ class CursorAdapter:
         self._release = release
         return caps
 
+    def preflight_operation(self, mode: Literal["create", "resume"]) -> None:
+        if self._release is None:
+            raise DomainError(
+                ErrorCode.INVALID_STATE, "cursor adapter must be probed before operation"
+            )
+        enforce_published_operation(self._release, mode=mode)
+
     async def start(self, request: StartSessionRequest) -> HarnessSession:
+        self.preflight_operation("create")
         await self._ensure_connection()
         assert self._connection is not None
         await self._initialize()
@@ -119,6 +131,7 @@ class CursorAdapter:
         return session
 
     async def resume(self, request: ResumeSessionRequest) -> HarnessSession:
+        self.preflight_operation("resume")
         await self._ensure_connection()
         assert self._connection is not None
         await self._initialize()

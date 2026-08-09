@@ -1,22 +1,9 @@
-"""Internal ACP/JSON-RPC connection (not a public generic client)."""
+"""Internal ACP/JSON-RPC transport (not a public generic client).
+
+Implementation modules remain importable by path for adapters and tests.
+Nothing is exported as a supported public surface.
+"""
 
 from __future__ import annotations
 
-from talktoharnesses.providers.acp.connection import AcpConnection, Delivered
-from talktoharnesses.providers.acp.jsonrpc import (
-    JsonRpcError,
-    JsonRpcErrorResponse,
-    JsonRpcNotification,
-    JsonRpcRequest,
-    JsonRpcSuccessResponse,
-)
-
-__all__ = [
-    "AcpConnection",
-    "Delivered",
-    "JsonRpcError",
-    "JsonRpcErrorResponse",
-    "JsonRpcNotification",
-    "JsonRpcRequest",
-    "JsonRpcSuccessResponse",
-]
+__all__: list[str] = []

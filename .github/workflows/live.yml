@@ -1,0 +1,109 @@
+name: Live harnesses
+
+on:
+  workflow_dispatch:
+    inputs:
+      providers:
+        description: Comma-separated providers to run (grok,cursor,codex,claude,opencode) or all
+        required: true
+        default: all
+
+env:
+  UV_VERSION: "0.12.3"
+  PYTHON_VERSION: "3.11"
+
+jobs:
+  live-grok:
+    name: Live Grok
+    if: ${{ inputs.providers == 'all' || contains(inputs.providers, 'grok') }}
+    runs-on: [self-hosted, talktoharnesses-live, grok]
+    environment: live-grok
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: ${{ env.UV_VERSION }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: uv sync --locked --extra django --extra grok
+      - name: Create/resume gate
+        env:
+          TALKTOHARNESSES_LIVE_GROK: "1"
+        run: uv run pytest tests/live/test_grok_live.py -q --tb=short
+
+  live-cursor:
+    name: Live Cursor
+    if: ${{ inputs.providers == 'all' || contains(inputs.providers, 'cursor') }}
+    runs-on: [self-hosted, talktoharnesses-live, cursor]
+    environment: live-cursor
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: ${{ env.UV_VERSION }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: uv sync --locked --extra django --extra cursor
+      - name: Create/resume gate
+        env:
+          TALKTOHARNESSES_LIVE_CURSOR: "1"
+        run: uv run pytest tests/live/test_cursor_live.py -q --tb=short
+
+  live-codex:
+    name: Live Codex
+    if: ${{ inputs.providers == 'all' || contains(inputs.providers, 'codex') }}
+    runs-on: [self-hosted, talktoharnesses-live, codex]
+    environment: live-codex
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: ${{ env.UV_VERSION }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: uv sync --locked --extra django --extra codex
+      - name: Create/resume gate
+        env:
+          TALKTOHARNESSES_LIVE_CODEX: "1"
+        run: uv run pytest tests/live/test_codex_live.py -q --tb=short
+
+  live-claude:
+    name: Live Claude
+    if: ${{ inputs.providers == 'all' || contains(inputs.providers, 'claude') }}
+    runs-on: [self-hosted, talktoharnesses-live, claude]
+    environment: live-claude
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: ${{ env.UV_VERSION }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: uv sync --locked --extra django --extra claude
+      - name: Create/resume gate
+        env:
+          TALKTOHARNESSES_LIVE_CLAUDE: "1"
+        run: uv run pytest tests/live/test_claude_live.py -q --tb=short
+
+  live-opencode:
+    name: Live OpenCode
+    if: ${{ inputs.providers == 'all' || contains(inputs.providers, 'opencode') }}
+    runs-on: [self-hosted, talktoharnesses-live, opencode]
+    environment: live-opencode
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: ${{ env.UV_VERSION }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: uv sync --locked --extra django --extra opencode
+      - name: Create/resume gate
+        env:
+          TALKTOHARNESSES_LIVE_OPENCODE: "1"
+        run: uv run pytest tests/live/test_opencode_live.py -q --tb=short

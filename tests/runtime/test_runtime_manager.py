@@ -6,6 +6,8 @@ import asyncio
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import Literal
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
@@ -28,6 +30,14 @@ from talktoharnesses.runtime.supervisor import ProcessSupervisor
 
 def _argv(*modes: str) -> tuple[str, ...]:
     return (str(child_modes_path()), *modes)
+
+
+class _RejectingPreflightAdapter(FakeAdapter):
+    def preflight_operation(self, mode: Literal["create", "resume"]) -> None:
+        raise DomainError(
+            ErrorCode.PROVIDER_INCOMPATIBLE,
+            f"{mode} matrix rejected",
+        )
 
 
 @pytest.mark.asyncio
@@ -61,6 +71,34 @@ async def test_start_and_close(
     assert "session_started" in types
     assert "session_closed" in types
     assert types & {"process_exited", "process_forced_termination"}
+
+
+@pytest.mark.asyncio
+async def test_process_matrix_preflight_rejects_before_spawn(
+    persistence: MemoryPersistence,
+    short_policy: RuntimePolicy,
+    owned_python: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = AdapterRegistry()
+    registry.register(HarnessKind.OPENCODE, _RejectingPreflightAdapter)
+    mgr = RuntimeManager(persistence, registry, policy=short_policy)
+    spawn = AsyncMock()
+    monkeypatch.setattr(mgr, "_spawn_process", spawn)
+    cid = conversation_id_of(persistence)
+    config = persistence.states[cid].binding.configuration  # type: ignore[union-attr]
+
+    with pytest.raises(DomainError) as exc:
+        await mgr.start(
+            conversation_id=cid,
+            owner_id="owner-1",
+            configuration=config,
+            argv=_argv("silence", "1"),
+            executable_path=str(owned_python),
+        )
+
+    assert exc.value.code is ErrorCode.PROVIDER_INCOMPATIBLE
+    spawn.assert_not_awaited()
 
 
 @pytest.mark.asyncio

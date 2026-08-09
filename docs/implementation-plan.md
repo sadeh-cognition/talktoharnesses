@@ -3,9 +3,9 @@
 ## Summary
 
 - Build on the existing clean Phase 0 package skeleton and accepted ADRs.
-- Implement phases sequentially; each phase is a separate mergeable increment with applicable tests, Ruff, formatting, Pyright, packaging, and migrations green. Versions remain `*.devN` until Phase 10.
+- Implement phases sequentially; each phase is a separate mergeable increment with applicable tests, Ruff, formatting, Pyright, packaging, and migrations green. Versions remain `*.devN` until Phase 12 publishes `2026.8.0`.
 - Phase 7 is split into independently mergeable 7A–7D adapter increments.
-- Keep one distribution with feature extras: `django`, `postgres`, `grok`, `cursor`, `codex`, `claude`, `opencode`, `otel`, and `all`. Grok/Cursor extras may contain no Python runtime dependency because their adapters supervise external executables.
+- Keep one distribution with feature extras: `django`, `postgres`, `grok`, `cursor`, `codex`, `claude`, `opencode`, and `all`. There is no package-owned `otel` extra — `opentelemetry-api` is a core dependency and hosts install their own SDK/exporters. Grok/Cursor extras may contain no Python runtime dependency because their adapters supervise external executables.
 - Core imports remain Django-free. All execution paths require an injected persistence implementation.
 - Do not add temporary public stubs, plugin discovery, synchronous wrappers, or speculative abstractions.
 
@@ -345,25 +345,37 @@ Each subphase adds one adapter, its feature extra, strict schemas, manifest entr
 
 ### Implementation
 
-- Finalize machine-readable compatibility entries for all five adapters, including exact tested create/resume combinations.
-- Generate and check in `SUPPORTED_HARNESSES.md`; CI fails if regeneration changes the file.
-- Document installation extras, Django setup, ASGI lifespan integration, JWT issuance, owner scoping, PostgreSQL/SQLite operation, retention scheduling, recovery limitations, and opt-in real-harness tests.
-- Document forward migration and upgrade procedures without promising backward migration compatibility.
-- Audit public exports and remove implementation-only symbols from package `__all__` declarations.
-- Enforce over 90% aggregate coverage in the dedicated coverage job; keep OS/provider/database jobs focused on their behavior.
-- Add locked build and publish workflows using `uv build` and `uv publish`, distribution-content tests, and a release-tag check.
-- Change `2026.8.0.devN` to `2026.8.0` only after every milestone gate and configured real-harness suite passes.
+- Land exact matrix-entry schema/enforcement, live create/resume/interaction modules for all five adapters, generated `SUPPORTED_HARNESSES.md` drift checks, operator docs, public-export audit, packaging/install matrix, split CI, performance budgets, and tag/publish workflow machinery.
+- Keep `2026.8.0.dev9` while matrices may still be empty and aggregate coverage may still be below the release fail-under.
+- Detailed plan: [`docs/phase10.md`](phase10.md).
 
 ### Final acceptance
 
 - Install the built wheel with `all`, and separately test minimal core and Django-only installs.
-- Run Ruff, format check, strict Pyright, unit/property/contract/transcript/integration suites, PostgreSQL/SQLite suites, and manually configured real-harness tests.
-- Verify all five adapters appear identically in the JSON and generated Markdown compatibility manifests.
-- Execute the definition-of-done journey through both the Python facade and authenticated HTTP/SSE API.
+- Run Ruff, format check, strict Pyright, unit/property/contract/transcript/integration suites, PostgreSQL/SQLite suites, and the (still empty-matrix-tolerant) development compatibility validation.
+- Execute the fake-adapter definition-of-done journey through both the Python facade and authenticated HTTP/SSE API.
+- Leave live evidence, 91% coverage closeout, stable cut, and PyPI publication to Phase 12.
+
+## Phase 12 — First stable publication
+
+### Implementation
+
+- Run configured live create/resume/interaction gates; publish only exact proven matrix rows.
+- Close aggregate coverage to `--cov-fail-under=91` with meaningful tests only.
+- Resolve any remaining adapter contract defects (notably Codex deferred approval) without private SDK patches or auto-approval.
+- Change `2026.8.0.dev9` to `2026.8.0`, regenerate support docs, tag `v2026.8.0`, and publish the exact verified artifacts through trusted publishing.
+- Detailed plan: [`docs/phase12.md`](phase12.md).
+
+### Final acceptance
+
+- Links to passing live runs exist for every published create/resume row.
+- Coverage, performance, OS/database, packaging, stable validation, built-wheel journeys, tag consistency, and post-publish index smoke checks all pass for `2026.8.0`.
 
 ## Phase 11 — Search, retention, and transcript product extensions
 
-Owns product topics explicitly excluded from Phases 8–10 (recovery and release readiness do not cover them):
+Owns product topics explicitly excluded from Phases 8–10 and 12 (recovery, release readiness, and first publication do not cover them):
+
+- Detailed technical plan and selected scope: [`docs/phase11.md`](phase11.md).
 
 - **Search product:** ranking, snippets/highlighting, fuzzy search, stemming / per-language indexes, prefix/autocomplete, query operators, saved searches, or an external search service.
 - **Retention product:** user-configurable retention periods, per-conversation exemptions, dry-run/report APIs, in-process scheduler, workspace cleanup, provider-side session deletion, or approval-audit deletion.

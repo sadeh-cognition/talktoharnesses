@@ -25,7 +25,10 @@ from talktoharnesses.providers.adapter import (
     SteerRequest,
     TurnRequest,
 )
-from talktoharnesses.providers.claude.compatibility import ClaudeReleaseRecord
+from talktoharnesses.providers.claude.compatibility import (
+    ClaudeReleaseRecord,
+    enforce_published_operation,
+)
 from talktoharnesses.providers.claude.normalizer import ClaudeNormalizer
 from talktoharnesses.providers.claude.probe import probe_claude
 from talktoharnesses.providers.claude.schemas import parse_claude_message
@@ -78,6 +81,9 @@ class ClaudeAdapter:
         return caps
 
     async def start(self, request: StartSessionRequest) -> HarnessSession:
+        if self._release is None:
+            raise DomainError(ErrorCode.INVALID_STATE, "claude adapter must be probed before start")
+        enforce_published_operation(self._release, mode="create")
         cwd = request.launch.working_directory or request.configuration.working_directory
         session_id = str(uuid4())
         await self._connect(
@@ -100,6 +106,11 @@ class ClaudeAdapter:
         return session
 
     async def resume(self, request: ResumeSessionRequest) -> HarnessSession:
+        if self._release is None:
+            raise DomainError(
+                ErrorCode.INVALID_STATE, "claude adapter must be probed before resume"
+            )
+        enforce_published_operation(self._release, mode="resume")
         cwd = request.launch.working_directory or request.configuration.working_directory
         self._normalizer.set_session(request.native_session_id, resync=True)
         await self._connect(

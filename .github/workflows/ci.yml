@@ -4,51 +4,61 @@ on:
   push:
   pull_request:
 
+env:
+  UV_VERSION: "0.12.3"
+  PYTHON_VERSION: "3.11"
+
 jobs:
-  test:
-    name: ${{ matrix.os }} / Python ${{ matrix.python-version }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-        python-version: ["3.11"]
-
+  static:
+    name: Static checks
+    runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v5
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
         with:
-          python-version: ${{ matrix.python-version }}
-
-      - name: Sync dependencies (locked + django extra)
+          version: ${{ env.UV_VERSION }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Sync dependencies
         run: uv sync --locked --extra django
+      - name: Static gate
+        run: bash scripts/ci/run.sh static
 
-      - name: Check lockfile
-        run: uv lock --check
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: ${{ env.UV_VERSION }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Sync dependencies
+        run: uv sync --locked --extra django --extra postgres --extra all
+      - name: Coverage gate
+        run: bash scripts/ci/run.sh coverage
 
-      - name: Ruff lint
-        run: uv run ruff check .
-
-      - name: Ruff format
-        run: uv run ruff format --check .
-
-      - name: Pyright (strict)
-        run: uv run pyright
-
-      - name: Pytest with coverage
-        run: uv run pytest --cov=talktoharnesses --cov-report=term-missing
-
-      - name: Build distributions
-        run: uv build --no-sources
+  providers:
+    name: Provider contracts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: ${{ env.UV_VERSION }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Sync dependencies
+        run: uv sync --locked --extra django --extra all
+      - name: Provider gate
+        run: bash scripts/ci/run.sh providers
 
   postgres:
-    name: Ubuntu / PostgreSQL
+    name: PostgreSQL
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -65,21 +75,16 @@ jobs:
           --health-timeout 5s
           --health-retries 10
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v5
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
         with:
-          python-version: "3.11"
-
-      - name: Sync dependencies (locked + django + postgres)
+          version: ${{ env.UV_VERSION }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Sync dependencies
         run: uv sync --locked --extra django --extra postgres
-
-      - name: Pytest persistence/interaction contracts on PostgreSQL
+      - name: PostgreSQL gate
         env:
           DJANGO_SETTINGS_MODULE: tests.django_settings_postgres
           POSTGRES_HOST: 127.0.0.1
@@ -87,19 +92,87 @@ jobs:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: talktoharnesses
-        run: >
-          uv run pytest
-          tests/test_django_persistence.py
-          tests/test_phase8_persistence.py
-          tests/test_phase8_fts.py
-          tests/e2e/test_phase6_approvals_gate.py
-          tests/e2e/test_phase9_recovery_gate.py
-          tests/unit/django/test_approval_api.py
-          tests/unit/application/test_interaction_broker.py
-          tests/unit/application/test_command_processor_interactions.py
-          tests/unit/application/test_fencing.py
-          tests/unit/application/test_worker_coordinator.py
-          tests/unit/domain/test_interaction_answers.py
-          tests/unit/domain/test_approval_matching.py
-          tests/unit/providers/grok/test_permission_fixtures.py
-          -q --tb=short
+        run: bash scripts/ci/run.sh postgres
+
+  runtime-os:
+    name: Runtime OS / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: ${{ env.UV_VERSION }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Sync dependencies
+        run: uv sync --locked --extra django
+      - name: Runtime OS gate
+        shell: bash
+        run: bash scripts/ci/run.sh runtime-os
+
+  performance:
+    name: Performance
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: talktoharnesses
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: ${{ env.UV_VERSION }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Sync dependencies
+        run: uv sync --locked --extra django --extra postgres
+      - name: Performance gate (SQLite)
+        run: bash scripts/ci/run.sh performance
+      - name: Performance gate (PostgreSQL)
+        env:
+          DJANGO_SETTINGS_MODULE: tests.django_settings_postgres
+          POSTGRES_HOST: 127.0.0.1
+          POSTGRES_PORT: "5432"
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: talktoharnesses
+        run: bash scripts/ci/run.sh performance
+
+  build:
+    name: Build and install matrix
+    runs-on: ubuntu-latest
+    needs: [static, coverage, providers, postgres, runtime-os, performance]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: ${{ env.UV_VERSION }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Sync dependencies
+        run: uv sync --locked --extra django --extra all
+      - name: Build gate
+        run: bash scripts/ci/run.sh build
+      - name: Upload distributions
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-package-distributions
+          path: dist/*
+          if-no-files-found: error

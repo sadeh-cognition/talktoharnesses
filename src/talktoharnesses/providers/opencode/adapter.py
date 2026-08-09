@@ -8,7 +8,7 @@ import json
 import logging
 import socket
 from collections.abc import AsyncIterator, Callable
-from typing import Any, cast
+from typing import Any, Literal, cast
 from uuid import UUID, uuid4
 
 from talktoharnesses.domain.enums import ApprovalDecision, ErrorCode, HarnessKind
@@ -28,7 +28,10 @@ from talktoharnesses.providers.adapter import (
     TurnRequest,
 )
 from talktoharnesses.providers.opencode.argv import build_opencode_argv
-from talktoharnesses.providers.opencode.compatibility import OpenCodeReleaseRecord
+from talktoharnesses.providers.opencode.compatibility import (
+    OpenCodeReleaseRecord,
+    enforce_published_operation,
+)
 from talktoharnesses.providers.opencode.normalizer import OpenCodeNormalizer
 from talktoharnesses.providers.opencode.probe import probe_opencode
 from talktoharnesses.providers.opencode.schemas import OpenCodeHealth, OpenCodeSession
@@ -102,7 +105,15 @@ class OpenCodeAdapter:
         self._release = release
         return caps
 
+    def preflight_operation(self, mode: Literal["create", "resume"]) -> None:
+        if self._release is None:
+            raise DomainError(
+                ErrorCode.INVALID_STATE, "opencode adapter must be probed before operation"
+            )
+        enforce_published_operation(self._release, mode=mode)
+
     async def start(self, request: StartSessionRequest) -> HarnessSession:
+        self.preflight_operation("create")
         await self._ensure_http()
         await self._wait_healthy()
         await self._open_events()
@@ -126,6 +137,7 @@ class OpenCodeAdapter:
         return session
 
     async def resume(self, request: ResumeSessionRequest) -> HarnessSession:
+        self.preflight_operation("resume")
         await self._ensure_http()
         await self._wait_healthy()
         await self._open_events()

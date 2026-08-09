@@ -13,7 +13,13 @@ from pydantic import BaseModel, ConfigDict, Field
 from talktoharnesses.domain.enums import ErrorCode, HarnessKind
 from talktoharnesses.domain.errors import DomainError
 from talktoharnesses.domain.models import HarnessCapabilities
-from talktoharnesses.providers.compatibility import ReleaseCapabilities, yes_no
+from talktoharnesses.providers.compatibility import (
+    CompatibilityMatrixEntry,
+    ReleaseCapabilities,
+    assert_matrix_membership,
+    validate_matrices,
+    yes_no,
+)
 
 _COMPAT = ConfigDict(extra="forbid", frozen=True)
 
@@ -49,8 +55,12 @@ class CursorCompatibilityDoc(BaseModel):
 
     adapter_version: str
     releases: list[CursorReleaseRecord] = Field(default_factory=list[CursorReleaseRecord])
-    create_matrix: list[str] = Field(default_factory=list[str])
-    resume_matrix: list[str] = Field(default_factory=list[str])
+    create_matrix: list[CompatibilityMatrixEntry] = Field(
+        default_factory=list[CompatibilityMatrixEntry]
+    )
+    resume_matrix: list[CompatibilityMatrixEntry] = Field(
+        default_factory=list[CompatibilityMatrixEntry]
+    )
 
     def release_by_id(self, release_id: str) -> CursorReleaseRecord | None:
         for release in self.releases:
@@ -63,7 +73,14 @@ class CursorCompatibilityDoc(BaseModel):
 def load_cursor_compatibility() -> CursorCompatibilityDoc:
     root = resources.files("talktoharnesses.data.compatibility")
     data = (root / "cursor.json").read_text(encoding="utf-8")
-    return CursorCompatibilityDoc.model_validate(json.loads(data))
+    doc = CursorCompatibilityDoc.model_validate(json.loads(data))
+    validate_matrices(
+        releases=doc.releases,
+        create_matrix=doc.create_matrix,
+        resume_matrix=doc.resume_matrix,
+        harness_label="cursor",
+    )
+    return doc
 
 
 def parse_version_stdout(version_stdout: str) -> str:
@@ -114,24 +131,23 @@ def match_release(
     )
 
 
-def assert_matrix_membership(
+def enforce_published_operation(
     release: CursorReleaseRecord,
     *,
     mode: Literal["create", "resume"],
+    platform: str | None = None,
     enforce_published: bool = True,
 ) -> None:
-    if not enforce_published:
-        return
     doc = load_cursor_compatibility()
     matrix = doc.create_matrix if mode == "create" else doc.resume_matrix
-    if not matrix:
-        return
-    if release.id not in matrix:
-        raise DomainError(
-            ErrorCode.PROVIDER_INCOMPATIBLE,
-            f"cursor release not in published {mode} matrix",
-            details={"release_id": release.id, "matrix": list(matrix)},
-        )
+    assert_matrix_membership(
+        release_id=release.id,
+        platform=platform or sys.platform,
+        matrix=matrix,
+        mode=mode,
+        harness_label="cursor",
+        enforce_published=enforce_published,
+    )
 
 
 class CursorCompatibilitySection:
@@ -147,11 +163,11 @@ class CursorCompatibilitySection:
         return self._doc.adapter_version
 
     @property
-    def create_matrix(self) -> list[str]:
+    def create_matrix(self) -> list[CompatibilityMatrixEntry]:
         return list(self._doc.create_matrix)
 
     @property
-    def resume_matrix(self) -> list[str]:
+    def resume_matrix(self) -> list[CompatibilityMatrixEntry]:
         return list(self._doc.resume_matrix)
 
     def render_release_rows(self) -> list[str]:

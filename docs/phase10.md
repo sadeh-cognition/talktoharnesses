@@ -15,12 +15,15 @@
 - Split CI by responsibility: static checks, coverage, provider contracts, database behavior,
   operating-system runtime behavior, performance, and distribution verification. Do not run the
   entire suite redundantly in every job.
-- Build the wheel and sdist once from the tagged, locked checkout, verify those exact artifacts,
-  and publish those same bytes through `uv publish` and PyPI trusted publishing.
-- Change the package and adapter compatibility versions to `2026.8.0` only after all five live
-  create/resume matrices and every release gate pass.
+- Build the wheel and sdist once from a locked checkout, verify those exact artifacts, and land the
+  tag/publish workflow that will publish those same bytes through `uv publish` and PyPI trusted
+  publishing. The actual live-evidence matrix population, 91% coverage closeout, `2026.8.0`
+  metadata cut, tag, and PyPI publication are owned by [Phase 12](phase12.md).
+- Keep the package and adapter compatibility versions at `2026.8.0.dev9` for the Phase 10 merge.
+  Do not invent matrix rows or cut the stable version without live evidence.
 - Do not add a package CLI, automatic migrations, provider installers, compatibility ranges,
-  deployment templates, a telemetry SDK/exporter, or Phase 11 product work.
+  deployment templates, a telemetry SDK/exporter, or Phase 11/12 product-or-publication work beyond
+  the machinery above.
 
 ## Current Baseline and Entry Conditions
 
@@ -448,19 +451,11 @@ not converted into a skipped required check.
 
 ### Stable version transition
 
-After all other Phase 10 work is green on `2026.8.0.dev9`:
-
-1. Populate the five exact create/resume matrices from successful live evidence.
-2. Use `uv version 2026.8.0` to update project/lock metadata.
-3. Set each compatibility document's adapter contract version to `2026.8.0` and remove provisional
-   “implementation target only” notes that no longer describe the published rows.
-4. Regenerate `SUPPORTED_HARNESSES.md` and update README's pre-release wording.
-5. Run stable compatibility validation, the full CI topology, artifact install matrix, and both
-   final journeys below.
-6. Merge the stable-version commit without further code changes, then create the exact tag
-   `v2026.8.0` on that commit.
-
-Do not let the tag workflow edit or commit a version. A tag on a development-version commit fails.
+Phase 10 lands the stable-validation CLI, release checklist, and
+`scripts/ci/stable_cut_checklist.sh` while remaining on `2026.8.0.dev9`. Populating
+live-proven matrices, bumping to `2026.8.0`, tagging `v2026.8.0`, and publishing are
+deferred to [Phase 12](phase12.md). Do not let the tag workflow edit or commit a
+version. A tag on a development-version commit must fail when Phase 12 runs it.
 
 ### Build and publish workflow
 
@@ -542,24 +537,26 @@ For each journey:
 
 ### Final acceptance sequence
 
-1. Confirm links to passing live create/resume/interaction runs for every published matrix row.
-2. Run Ruff, format check, strict Pyright, migration drift, lock check, compatibility/document
-   drift, unit/property/contract/transcript/integration/e2e suites, SQLite/PostgreSQL suites, OS
-   runtime matrix, 91% coverage, performance gates, and prior phase gates.
-3. Build the stable wheel/sdist once and pass the isolated core, Django-only, `all`, and sdist
-   install matrix.
-4. Run both definition-of-done journeys from the built wheel, not the source tree.
-5. Verify all five adapters and exact create/resume platform rows appear identically in packaged
-   JSON and generated Markdown.
-6. Verify `v2026.8.0`, project metadata, installed metadata, compatibility adapter versions, and
-   artifact filenames agree, then approve trusted publication of the already tested artifacts.
-7. In a fresh environment, install `talktoharnesses==2026.8.0` from the index with core,
-   Django-only, and `all`, and repeat the import/metadata smoke checks.
+Phase 10 acceptance is machinery-complete on `2026.8.0.dev9`:
 
-The Phase 10 gate passes only when all five adapters have exact live-tested create and resume
-claims, public and operational contracts are documented and tested, aggregate coverage is over
-90%, fixed performance budgets pass, and the tagged artifacts are the exact verified bytes ready
-for trusted publication.
+1. Exact matrix schema/enforcement, renderer, and development/stable validation modes are present.
+2. All five live create/resume/interaction modules exist and fail closed when enabled without
+   prerequisites; matrices may remain empty.
+3. Public-export audit, packaging/install matrix, operator docs, performance budgets, split CI,
+   manual live workflow, and tag/publish workflow are present and green for development validation.
+4. Fake-adapter definition-of-done journeys pass from a built wheel.
+5. `bash scripts/ci/stable_cut_checklist.sh` correctly reports that stable publication is still
+   blocked while matrices are empty.
+
+The publication acceptance sequence (live-run links, 91% coverage, populated matrices, `v2026.8.0`,
+trusted publish, and post-publish index smoke) is owned by [Phase 12](phase12.md).
+
+The Phase 10 gate passes when release-readiness machinery is merged on `2026.8.0.dev9`: exact
+matrix schema and enforcement, live create/resume/interaction modules for all five adapters,
+documented public/operational contracts, packaging/install matrix, split CI with performance and
+coverage fail-under configuration, and the tag/publish workflow. Empty matrices and sub-91%
+coverage remain valid Phase 10 exit conditions only while the package is still `.devN`; closing
+them for publication is [Phase 12](phase12.md).
 
 ## Implementation Order
 
@@ -574,10 +571,8 @@ for trusted publication.
    documentation against the development build.
 6. Split CI into focused static, coverage, provider, database, OS-runtime, performance, and build
    jobs; add the manual live workflow and tag/publish workflow.
-7. Run live gates on configured exact releases/platforms, add only passing matrix rows, and
-   regenerate `SUPPORTED_HARNESSES.md`.
-8. Change all release metadata to `2026.8.0`, run the stable gate and built-wheel journeys, then tag
-   and publish the exact verified artifacts.
+7. Hand off live evidence, coverage closeout, stable metadata cut, tag, and publication to
+   [Phase 12](phase12.md).
 
 ## Explicitly Out of Scope
 
@@ -599,11 +594,12 @@ for trusted publication.
 
 ## Assumptions
 
-- `2026.8.0` is the approved first stable CalVer and PyPI is the release registry.
+- `2026.8.0` is the approved first stable CalVer; Phase 12 owns cutting and publishing it. PyPI is
+  the release registry.
 - The PyPI project and GitHub `pypi` environment are configured for trusted publishing outside the
-  repository. Missing external configuration blocks publication but does not justify a token-based
-  fallback in the workflow.
-- At least one securely configured runner/platform is available for each provider's exact live
+  repository before Phase 12 publication. Missing external configuration blocks publication but
+  does not justify a token-based fallback in the workflow.
+- Phase 12 assumes at least one securely configured runner/platform for each provider's exact live
   create/resume gate. The initial stable matrix need not claim all three operating systems, but it
   must not claim an untested one.
 - Provider credentials and workspace permissions are equivalent between create and resume runs.

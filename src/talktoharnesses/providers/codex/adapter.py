@@ -24,7 +24,10 @@ from talktoharnesses.providers.adapter import (
     SteerRequest,
     TurnRequest,
 )
-from talktoharnesses.providers.codex.compatibility import CodexReleaseRecord
+from talktoharnesses.providers.codex.compatibility import (
+    CodexReleaseRecord,
+    enforce_published_operation,
+)
 from talktoharnesses.providers.codex.normalizer import CodexNormalizer
 from talktoharnesses.providers.codex.probe import probe_codex
 from talktoharnesses.providers.codex.schemas import parse_codex_notification
@@ -104,6 +107,9 @@ class CodexAdapter:
         return caps
 
     async def start(self, request: StartSessionRequest) -> HarnessSession:
+        if self._release is None:
+            raise DomainError(ErrorCode.INVALID_STATE, "codex adapter must be probed before start")
+        enforce_published_operation(self._release, mode="create")
         await self._ensure_client()
         assert self._client is not None
         cwd = request.launch.working_directory or request.configuration.working_directory
@@ -131,6 +137,9 @@ class CodexAdapter:
         return session
 
     async def resume(self, request: ResumeSessionRequest) -> HarnessSession:
+        if self._release is None:
+            raise DomainError(ErrorCode.INVALID_STATE, "codex adapter must be probed before resume")
+        enforce_published_operation(self._release, mode="resume")
         await self._ensure_client()
         assert self._client is not None
         cwd = request.launch.working_directory or request.configuration.working_directory

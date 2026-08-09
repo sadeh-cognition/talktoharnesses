@@ -114,8 +114,7 @@ async def test_phase9_idle_no_runtime_and_ambiguous_never_redelivers() -> None:
         stored = recovered.commands[ambiguous.id]
         assert stored.status is CommandStatus.OUTCOME_UNKNOWN
         assert (
-            recovered.active_turn is None
-            or recovered.active_turn.status is not TurnStatus.RUNNING
+            recovered.active_turn is None or recovered.active_turn.status is not TurnStatus.RUNNING
         )
 
         # Claims must never re-deliver an outcome_unknown command.
