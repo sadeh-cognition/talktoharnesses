@@ -156,7 +156,7 @@ async def test_memory_search_and_soft_delete() -> None:
 
     hits = await p.search_conversations("owner-a", "unique-search-token")
     assert len(hits.items) == 1
-    assert hits.items[0].id == a.conversation.id
+    assert hits.items[0].conversation.id == a.conversation.id
 
     # Other owner cannot see it.
     other = await p.search_conversations("owner-b", "unique-search-token")

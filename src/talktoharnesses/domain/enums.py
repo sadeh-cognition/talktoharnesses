@@ -197,4 +197,5 @@ class ErrorCode(StrEnum):
     STALE_OWNER = "stale_owner"
     WORKER_LEASE_UNAVAILABLE = "worker_lease_unavailable"
     INVALID_CURSOR = "invalid_cursor"
+    INVALID_SEARCH_QUERY = "invalid_search_query"
     NOT_FOUND = "not_found"

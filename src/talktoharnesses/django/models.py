@@ -45,6 +45,7 @@ class ConversationAggregate(models.Model):
     snoozed_until: models.DateTimeField[datetime | None, datetime | None] = models.DateTimeField(
         null=True, blank=True
     )
+    retention_exempt: models.BooleanField[bool, bool] = models.BooleanField(default=False)
     latest_activity_at: models.DateTimeField[datetime | None, datetime | None] = (
         models.DateTimeField(null=True, blank=True)
     )
@@ -384,13 +385,12 @@ class ConversationBindingRecord(models.Model):
 
 
 class SearchDocument(models.Model):
-    """Sanitized normalized text used by portable substring/FTS search.
+    """Sanitized derived search fields used by portable FTS search.
 
-    ``normalized_text`` is the shared knowledge source built by
-    ``application.search_documents``. PostgreSQL derives a stored
-    ``tsvector``/GIN index and SQLite derives an FTS5 virtual table from this
-    column; both remain private, vendor-specific derived indexes (see
-    ``docs/phase8.md`` Work Package 4).
+    ``normalized_text`` is the complete normalized document indexed by
+    PostgreSQL ``tsvector``/GIN and SQLite FTS5. ``search_title`` /
+    ``search_body`` feed the fixed integer rank formula; ``snippet_text`` is
+    redacted display text for plain-text snippets (see ``docs/phase11.md``).
     """
 
     conversation: models.OneToOneField[ConversationAggregate, ConversationAggregate] = (
@@ -400,10 +400,32 @@ class SearchDocument(models.Model):
     )
     owner_id: models.CharField[str, str] = models.CharField(max_length=255, db_index=True)
     normalized_text: models.TextField[str, str] = models.TextField(default="")
+    search_title: models.TextField[str, str] = models.TextField(default="")
+    search_body: models.TextField[str, str] = models.TextField(default="")
+    snippet_text: models.TextField[str, str] = models.TextField(default="")
     updated_at: models.DateTimeField[datetime, datetime] = models.DateTimeField()
 
     class Meta:
         db_table = "talktoharnesses_search_document"
+
+
+class RetentionPolicyRecord(models.Model):
+    """Owner-scoped retention month count. Absence means the six-month default."""
+
+    owner_id: models.CharField[str, str] = models.CharField(
+        max_length=255, primary_key=True, editable=False
+    )
+    months: models.PositiveSmallIntegerField[int, int] = models.PositiveSmallIntegerField()
+    updated_at: models.DateTimeField[datetime, datetime] = models.DateTimeField()
+
+    class Meta:
+        db_table = "talktoharnesses_retention_policy"
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(months__gte=1) & models.Q(months__lte=120),
+                name="tth_retention_months_range",
+            ),
+        ]
 
 
 class ApiToken(models.Model):

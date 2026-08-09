@@ -25,8 +25,12 @@ rolling upgrades are not supported. Backward migration compatibility is not prom
 7. Run the externally scheduled retention command only after the upgraded service is healthy:
 
    ```bash
+   python manage.py talktoharnesses_cleanup --dry-run
    python manage.py talktoharnesses_cleanup
    ```
+
+   Owner policies, exemptions, ranked search, and transcript portability are
+   documented in [`search-retention-transcripts.md`](search-retention-transcripts.md).
 
 ## Rollback
 

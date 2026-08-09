@@ -11,13 +11,21 @@ from datetime import UTC, datetime
 from typing import Any, cast
 from uuid import UUID, uuid4
 
+from pydantic import ValidationError
+
 from talktoharnesses.application.command_processor import CommandProcessor
 from talktoharnesses.application.faults import FaultCallback
+from talktoharnesses.application.handoff import render_handoff
 from talktoharnesses.application.interaction_broker import InteractionBroker
 from talktoharnesses.application.observability import get_observability
 from talktoharnesses.application.persistence import Persistence
 from talktoharnesses.application.publisher import CommittedEventPublisher
 from talktoharnesses.application.readiness import ReadinessProbeMonitor
+from talktoharnesses.application.transcripts import (
+    handoff_to_transcript,
+    redact_transcript,
+    transcript_to_handoff,
+)
 from talktoharnesses.application.worker_coordinator import WorkerCoordinator
 from talktoharnesses.domain.approval_matching import normalize_approval_rule
 from talktoharnesses.domain.enums import (
@@ -28,7 +36,7 @@ from talktoharnesses.domain.enums import (
     InteractionStatus,
 )
 from talktoharnesses.domain.errors import DomainError
-from talktoharnesses.domain.events import ConversationEvent
+from talktoharnesses.domain.events import ConversationEvent, TranscriptImportedPayload
 from talktoharnesses.domain.models import (
     ActivityProjection,
     ApprovalRule,
@@ -36,6 +44,7 @@ from talktoharnesses.domain.models import (
     CommandProjection,
     ConversationHarnessBinding,
     ConversationRuleScope,
+    ConversationSearchHit,
     ConversationShell,
     ConversationSnapshot,
     HarnessCapabilities,
@@ -51,6 +60,8 @@ from talktoharnesses.domain.models import (
     MessageProjection,
     Page,
     PlanProjection,
+    RetentionPolicyProjection,
+    RetentionPreviewProjection,
     SubmitTurnPayload,
     SubmitTurnResult,
     SwitchHarnessPayload,
@@ -59,15 +70,23 @@ from talktoharnesses.domain.models import (
     TurnProjection,
     UserRuleScope,
 )
+from talktoharnesses.domain.transcripts import (
+    TranscriptDocument,
+    TranscriptMessage,
+    TranscriptTool,
+    load_transcript_document,
+)
 from talktoharnesses.domain.transitions import (
     ConversationState,
     TransitionResult,
+    append_events,
     apply_steer,
     archive_conversation,
     cancel_queued_prompt,
     edit_queued_prompt,
     new_conversation_state,
     pin_conversation,
+    set_retention_exemption,
     snooze_conversation,
     soft_delete_conversation,
     submit_turn,
@@ -413,7 +432,7 @@ class TalkToHarnessesService:
         *,
         cursor: str | None = None,
         limit: int = 50,
-    ) -> Page[ConversationShell]:
+    ) -> Page[ConversationSearchHit]:
         return await self._persistence.search_conversations(
             owner_id, query, cursor=cursor, limit=limit
         )
@@ -467,6 +486,143 @@ class TalkToHarnessesService:
             result.events,
         )
         await self._publish(events)
+
+    async def get_retention_policy(self, owner_id: str) -> RetentionPolicyProjection:
+        return await self._persistence.get_retention_policy(owner_id)
+
+    async def replace_retention_policy(
+        self, owner_id: str, months: int
+    ) -> RetentionPolicyProjection:
+        return await self._persistence.replace_retention_policy(owner_id, months, now=self._clock())
+
+    async def preview_retention(self, owner_id: str) -> RetentionPreviewProjection:
+        return await self._persistence.preview_retention(owner_id, now=self._clock())
+
+    async def set_retention_exemption(
+        self,
+        owner_id: str,
+        conversation_id: UUID,
+        *,
+        exempt: bool,
+    ) -> ConversationSnapshot:
+        def _fn(state: ConversationState, *, now: datetime) -> TransitionResult:
+            return set_retention_exemption(state, now=now, exempt=exempt)
+
+        return await self._mutate(owner_id, conversation_id, _fn)
+
+    # ------------------------------------------------------------------
+    # Transcript export / import
+    # ------------------------------------------------------------------
+
+    async def export_transcript(
+        self,
+        owner_id: str,
+        conversation_id: UUID,
+    ) -> TranscriptDocument:
+        handoff, title = await self._persistence.read_retained_export(conversation_id, owner_id)
+        return handoff_to_transcript(handoff, title)
+
+    async def import_transcript(
+        self,
+        owner_id: str,
+        harness_id: UUID,
+        document: TranscriptDocument | dict[str, Any] | str | bytes,
+    ) -> ConversationSnapshot:
+        try:
+            if isinstance(document, TranscriptDocument):
+                validated = load_transcript_document(document.model_dump(mode="json"))
+            else:
+                validated = load_transcript_document(document)
+        except ValidationError as exc:
+            raise DomainError(ErrorCode.INVALID_STATE, "invalid transcript document") from exc
+        patterns = getattr(self._runtime, "_redaction_patterns", ())
+        validated = redact_transcript(validated, patterns)
+        handoff = transcript_to_handoff(validated)
+        harness = await self._persistence.get_harness(harness_id, owner_id)
+        now = self._clock()
+        conversation_id = uuid4()
+        binding_id = uuid4()
+        binding = ConversationHarnessBinding(
+            id=binding_id,
+            conversation_id=conversation_id,
+            kind=harness.kind,
+            configuration=harness.configuration,
+            harness_instance_id=harness.id,
+            created_at=now,
+        )
+        try:
+            candidate = await self._runtime.start_candidate(
+                conversation_id=conversation_id,
+                owner_id=owner_id,
+                binding_id=binding_id,
+                configuration=harness.configuration,
+            )
+            await self._runtime.seed_candidate(candidate, render_handoff(handoff))
+            active = binding.model_copy(
+                update={
+                    "native_session_id": candidate.session.native_session_id,
+                    "launch_snapshot": candidate.launch,
+                    "is_active": True,
+                }
+            )
+            state = new_conversation_state(
+                owner_id=owner_id,
+                now=now,
+                binding=active,
+                conversation_id=conversation_id,
+                capabilities=candidate.launch.capabilities,
+            )
+            state = state.model_copy(
+                update={
+                    "conversation": state.conversation.model_copy(
+                        update={
+                            "title_manual": validated.title,
+                            "current_binding_id": active.id,
+                        }
+                    )
+                }
+            )
+            message_count = sum(
+                1
+                for turn in validated.turns
+                for entry in turn.entries
+                if isinstance(entry, TranscriptMessage)
+            )
+            tool_count = sum(
+                1
+                for turn in validated.turns
+                for entry in turn.entries
+                if isinstance(entry, TranscriptTool)
+            )
+            state, events = append_events(
+                state,
+                now,
+                [
+                    TranscriptImportedPayload(
+                        turn_count=len(validated.turns),
+                        message_count=message_count,
+                        tool_count=tool_count,
+                    )
+                ],
+            )
+            committed = await self._persistence.commit_transcript_import(
+                state,
+                handoff,
+                events,
+                process=candidate.process_record,
+                launch_history_entry=candidate.launch,
+            )
+        except BaseException:
+            await self._runtime.close_candidate(binding_id)
+            raise
+        try:
+            await self._publish(committed)
+        except Exception:
+            logger.exception(
+                "publisher failed after transcript import commit; events remain durable"
+            )
+        await self._runtime.promote_candidate(conversation_id, binding_id)
+        return await self._persistence.get_conversation_snapshot(conversation_id, owner_id)
 
     # ------------------------------------------------------------------
     # History

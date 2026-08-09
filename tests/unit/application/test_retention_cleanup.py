@@ -10,13 +10,18 @@ import pytest
 from tests.runtime.conftest import FakeAdapter, make_state
 from tests.runtime.memory_persistence import MemoryPersistence
 
-from talktoharnesses.application.retention import run_cleanup, six_months_before
+from talktoharnesses.application.retention import (
+    months_before,
+    preview_cleanup,
+    run_cleanup,
+)
 from talktoharnesses.domain import (
     ActivityStatus,
     BackgroundActivity,
     TurnStatus,
     append_events,
     complete_turn,
+    set_retention_exemption,
     soft_delete_conversation,
     start_turn,
     submit_turn,
@@ -31,7 +36,7 @@ from talktoharnesses.providers import AdapterRegistry
 from talktoharnesses.runtime.manager import RuntimeManager
 
 NOW = datetime(2026, 8, 8, 12, 0, tzinfo=UTC)
-CUTOFF = six_months_before(NOW)
+CUTOFF = months_before(NOW, 6)
 
 
 class _SdkFakeAdapter(FakeAdapter):
@@ -241,3 +246,81 @@ async def test_run_cleanup_skips_background_active(tmp_path: Path) -> None:
     runtime = RuntimeManager(persistence, _registry(), clock=lambda: NOW)
     counts = await run_cleanup(persistence, runtime, lambda: NOW)
     assert counts.pruned_turns == 0
+
+
+@pytest.mark.asyncio
+async def test_run_cleanup_skips_retention_exempt_history(tmp_path: Path) -> None:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    persistence = MemoryPersistence()
+    state = make_state(now=NOW, workdir=workspace)
+    persistence.seed(state)
+    state = await _seed_completed_turn(
+        persistence, state, completed_at=CUTOFF - timedelta(days=1), prompt="old", key="old"
+    )
+    exempted = set_retention_exemption(state, now=NOW, exempt=True)
+    persistence.states[state.conversation.id] = exempted.state
+
+    runtime = RuntimeManager(persistence, _registry(), clock=lambda: NOW)
+    counts = await run_cleanup(persistence, runtime, lambda: NOW)
+    assert counts.pruned_turns == 0
+    assert state.conversation.id in persistence.turns
+    assert len(persistence.turns[state.conversation.id]) == 1
+
+
+@pytest.mark.asyncio
+async def test_run_cleanup_uses_owner_policy_months(tmp_path: Path) -> None:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    persistence = MemoryPersistence()
+    await persistence.replace_retention_policy("owner-1", 1, now=NOW)
+    state = make_state(now=NOW, workdir=workspace)
+    persistence.seed(state)
+    one_month_cutoff = months_before(NOW, 1)
+    state = await _seed_completed_turn(
+        persistence,
+        state,
+        completed_at=one_month_cutoff - timedelta(days=1),
+        prompt="prune under 1-month policy",
+        key="old",
+    )
+    await _seed_completed_turn(
+        persistence,
+        state,
+        completed_at=NOW - timedelta(hours=1),
+        prompt="keep recent",
+        key="new",
+    )
+
+    runtime = RuntimeManager(persistence, _registry(), clock=lambda: NOW)
+    counts = await run_cleanup(persistence, runtime, lambda: NOW)
+    assert counts.pruned_turns == 1
+    handoff = await persistence.read_retained_handoff(state.conversation.id)
+    texts = [getattr(entry, "text", "") for entry in handoff.entries]
+    assert not any("prune under 1-month policy" in text for text in texts)
+    assert any("keep recent" in text for text in texts)
+
+
+@pytest.mark.asyncio
+async def test_preview_cleanup_matches_eligible_counts_without_mutation(tmp_path: Path) -> None:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    persistence = MemoryPersistence()
+    state = make_state(now=NOW, workdir=workspace)
+    persistence.seed(state)
+    await _seed_completed_turn(
+        persistence, state, completed_at=CUTOFF - timedelta(days=1), prompt="old", key="old"
+    )
+    deleted = soft_delete_conversation(
+        make_state(now=NOW, workdir=workspace), now=CUTOFF - timedelta(days=1)
+    )
+    persistence.seed(deleted.state)
+
+    preview = await preview_cleanup(persistence, lambda: NOW)
+    assert preview.soft_deleted_conversations == 1
+    assert preview.history_conversations == 1
+    assert preview.terminal_turns == 1
+    assert preview.waiting_turns == 0
+    assert state.conversation.id in persistence.states
+    assert deleted.state.conversation.id in persistence.states
+    assert len(persistence.turns[state.conversation.id]) == 1

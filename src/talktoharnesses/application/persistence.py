@@ -15,6 +15,7 @@ from talktoharnesses.domain.models import (
     ApprovalRule,
     ApprovalRuleProjection,
     Command,
+    ConversationSearchHit,
     ConversationShell,
     ConversationSnapshot,
     HarnessCapabilities,
@@ -31,6 +32,8 @@ from talktoharnesses.domain.models import (
     Page,
     PlanProjection,
     ProcessRecord,
+    RetentionPolicyProjection,
+    RetentionPreviewProjection,
     ToolProjection,
     TurnProjection,
 )
@@ -500,6 +503,31 @@ class Persistence(Protocol):
         """
         ...
 
+    async def read_retained_export(
+        self,
+        conversation_id: UUID,
+        owner_id: str,
+    ) -> tuple[HandoffDocument, str]:
+        """Read retained handoff and effective title from one committed version."""
+        ...
+
+    async def commit_transcript_import(
+        self,
+        state: ConversationState,
+        handoff: HandoffDocument,
+        events: Sequence[ConversationEvent],
+        *,
+        process: ProcessRecord | None = None,
+        launch_history_entry: LaunchSnapshot | None = None,
+    ) -> Sequence[ConversationEvent]:
+        """Atomically create an imported conversation and its retained history.
+
+        Creates the aggregate, active binding, canonical turn/message/tool rows
+        from ``handoff``, search document, launch/session state, and the
+        bounded ``transcript_imported`` event. Never calls a provider.
+        """
+        ...
+
     async def prepare_harness_switch(self, conversation_id: UUID) -> SwitchPreparation:
         """Lock and read the switch aggregate and handoff in one transaction."""
         ...
@@ -546,8 +574,35 @@ class Persistence(Protocol):
         """
         ...
 
-    async def list_cleanup_conversation_ids(self) -> Sequence[UUID]:
-        """Return every non-soft-deleted conversation ID for one retention pass."""
+    async def get_retention_policy(self, owner_id: str) -> RetentionPolicyProjection:
+        """Return the owner's effective retention policy (absent => months=6)."""
+        ...
+
+    async def replace_retention_policy(
+        self,
+        owner_id: str,
+        months: int,
+        *,
+        now: datetime,
+    ) -> RetentionPolicyProjection:
+        """Upsert the owner's retention month count."""
+        ...
+
+    async def preview_retention(
+        self,
+        owner_id: str,
+        *,
+        now: datetime,
+    ) -> RetentionPreviewProjection:
+        """Read-only eligible retention counts for one owner at ``now``."""
+        ...
+
+    async def list_retention_owner_ids(self) -> Sequence[str]:
+        """Return distinct owner IDs that have any conversation (live or deleted)."""
+        ...
+
+    async def list_cleanup_conversation_ids(self) -> Sequence[tuple[UUID, str]]:
+        """Return ``(conversation_id, owner_id)`` for every non-soft-deleted conversation."""
         ...
 
     async def prune_expired_history(
@@ -557,12 +612,12 @@ class Persistence(Protocol):
     ) -> PruneResult | None:
         """Delete one conversation's terminal-expired turn history in one transaction.
 
-        Returns ``None`` when a turn or background activity is running, or
-        when nothing is eligible. An expired ``WAITING`` turn's open
-        interactions are cancelled and settled before that turn is pruned.
-        Recomputes the derived title, shell fields, and search document, and
-        returns the retained handoff plus the previous native session
-        identity needed for rotation.
+        Returns ``None`` when the conversation is retention-exempt, a turn or
+        background activity is running, or nothing is eligible. An expired
+        ``WAITING`` turn's open interactions are cancelled and settled before
+        that turn is pruned. Recomputes the derived title, shell fields, and
+        search document, and returns the retained handoff plus the previous
+        native session identity needed for rotation.
         """
         ...
 
@@ -598,12 +653,12 @@ class Persistence(Protocol):
         """
         ...
 
-    async def purge_soft_deleted(self, cutoff: datetime) -> int:
-        """Retention: permanently purge soft-deleted conversations. Returns count.
+    async def purge_soft_deleted(self, now: datetime) -> int:
+        """Permanently purge soft-deleted conversations using per-owner cutoffs.
 
-        Matches ``deleted_at <= cutoff`` (not strict ``<``) so a boundary row
-        is purged on the run whose cutoff equals it, and a rerun with the
-        same cutoff stays idempotent.
+        Each owner's effective policy months determine its cutoff from ``now``.
+        Matches ``deleted_at <= cutoff`` so a boundary row is purged on the run
+        whose cutoff equals it; exemption does not prevent soft-delete purge.
         """
         ...
 
@@ -679,12 +734,8 @@ class Persistence(Protocol):
         *,
         cursor: str | None = None,
         limit: int = 50,
-    ) -> Page[ConversationShell]:
-        """Portable substring search over sanitized documents.
-
-        Query terms are normalized with the same casefold/alphanumeric rule
-        used to build the document and joined with AND.
-        """
+    ) -> Page[ConversationSearchHit]:
+        """Ranked search over sanitized documents with bounded snippets."""
         ...
 
     async def get_conversation_snapshot(

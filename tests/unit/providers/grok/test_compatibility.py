@@ -17,7 +17,7 @@ from talktoharnesses.providers.grok.compatibility import (
 
 def test_load_and_match_release() -> None:
     doc = load_grok_compatibility()
-    assert doc.adapter_version == "2026.8.0.dev9"
+    assert doc.adapter_version == "2026.8.1.dev1"
     release = match_release("grok 1.0.0 (3cd0d0cbce) [stable]", platform="linux")
     assert release.id == "grok-1.0.0-3cd0d0cbce"
     caps = release.to_harness_capabilities()

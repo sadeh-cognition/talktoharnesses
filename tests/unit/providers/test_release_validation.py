@@ -14,7 +14,7 @@ from talktoharnesses.providers.render_supported import main
 
 
 def test_development_version_detection() -> None:
-    assert is_development_version("2026.8.0.dev9")
+    assert is_development_version("2026.8.1.dev1")
     assert not is_development_version("2026.8.0")
 
 

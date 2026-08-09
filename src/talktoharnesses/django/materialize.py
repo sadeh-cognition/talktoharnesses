@@ -52,10 +52,8 @@ from talktoharnesses.domain.events import (
     TurnStartedPayload,
     UsageUpdatedPayload,
 )
-from talktoharnesses.domain.models import Turn
+from talktoharnesses.domain.models import Turn, limit_tool_output_tail
 from talktoharnesses.domain.transitions import ConversationState
-
-_MAX_TOOL_TAIL_BYTES = 2048
 
 
 def materialize_projections(
@@ -183,19 +181,6 @@ def _ensure_turn(conversation_id: UUID, turn_id: UUID, *, at: datetime) -> None:
         created_at=at,
         order_index=_next_order_index(conversation_id),
     )
-
-
-def _tail(text: str) -> str:
-    encoded = text.encode("utf-8")
-    if len(encoded) <= _MAX_TOOL_TAIL_BYTES:
-        return text
-    truncated = encoded[-_MAX_TOOL_TAIL_BYTES:]
-    while truncated:
-        try:
-            return truncated.decode("utf-8")
-        except UnicodeDecodeError:
-            truncated = truncated[1:]
-    return ""
 
 
 def _apply_event(conversation_id: UUID, event: ConversationEvent) -> None:
@@ -377,7 +362,7 @@ def _apply_event(conversation_id: UUID, event: ConversationEvent) -> None:
         if row is not None:
             full = (row.full_output or "") + payload.text
             row.full_output = full
-            row.output_tail = _tail(full)
+            row.output_tail = limit_tool_output_tail(full)
             row.save(update_fields=("full_output", "output_tail"))
         return
 
@@ -542,7 +527,7 @@ def _recompute_derived_title(state: ConversationState) -> ConversationState:
 
 
 def _refresh_search_document(state: ConversationState) -> None:
-    """Rebuild portable search text from retained projection rows + title."""
+    """Rebuild portable search fields from retained projection rows + title."""
     from talktoharnesses.application.search_documents import build_search_document_from_parts
 
     cid = state.conversation.id
@@ -550,7 +535,7 @@ def _refresh_search_document(state: ConversationState) -> None:
         MessageRecord.objects.filter(conversation_id=cid).values_list("text", flat=True)
     )
     tools = list(ToolRecord.objects.filter(conversation_id=cid))
-    normalized = build_search_document_from_parts(
+    fields = build_search_document_from_parts(
         title=state.conversation.display_title,
         message_texts=message_texts,
         tool_names=[t.tool_name for t in tools],
@@ -562,7 +547,10 @@ def _refresh_search_document(state: ConversationState) -> None:
         conversation_id=cid,
         defaults={
             "owner_id": state.conversation.owner_id,
-            "normalized_text": normalized,
+            "normalized_text": fields.normalized_text,
+            "search_title": fields.search_title,
+            "search_body": fields.search_body,
+            "snippet_text": fields.snippet_text,
             "updated_at": state.conversation.updated_at,
         },
     )

@@ -96,10 +96,14 @@ Schedule externally:
 
 ```bash
 python manage.py talktoharnesses_cleanup
+# Read-only aggregate preview across owners:
+python manage.py talktoharnesses_cleanup --dry-run
 ```
 
-Retention removes database rows older than a fixed six-calendar-month window.
-Workspace files are never deleted by this command.
+Retention uses each owner's configured calendar-month policy (default six months).
+Workspace files and provider-native sessions are never deleted by this command.
+See [`search-retention-transcripts.md`](search-retention-transcripts.md) for
+policies, exemptions, preview, ranked search, and transcript import/export.
 
 ## Observability
 

@@ -33,6 +33,12 @@ _CONFLICT_CODES = frozenset(
     }
 )
 
+_BAD_REQUEST_CODES = frozenset(
+    {
+        ErrorCode.INVALID_SEARCH_QUERY,
+    }
+)
+
 _UNPROCESSABLE_CODES = frozenset(
     {
         ErrorCode.INVALID_CURSOR,
@@ -61,6 +67,8 @@ def domain_error_response(exc: DomainError) -> HttpResponse:
         return _json_error(ErrorCode.NOT_FOUND.value, public_message(ErrorCode.NOT_FOUND), 404)
     if exc.code is ErrorCode.INVALID_STATE and "owner mismatch" in exc.message.lower():
         return _json_error(ErrorCode.NOT_FOUND.value, public_message(ErrorCode.NOT_FOUND), 404)
+    if exc.code in _BAD_REQUEST_CODES:
+        return _json_error(exc.code.value, public_message(exc.code), 400)
     if exc.code in _CONFLICT_CODES:
         return _json_error(exc.code.value, public_message(exc.code), 409)
     if exc.code in _UNPROCESSABLE_CODES or exc.code is ErrorCode.INVALID_CURSOR:

@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from django.core.management import call_command
 
-from talktoharnesses.application.retention import CleanupCounts
+from talktoharnesses.application.retention import CleanupCounts, DryRunCounts
 
 
 @pytest.mark.django_db(transaction=True)
@@ -33,6 +33,30 @@ def test_talktoharnesses_cleanup_prints_counts() -> None:
     assert "cancelled_waiting_turns=3" in text
     assert "successful_rotations=4" in text
     assert "bindings_requiring_recreation=5" in text
+
+
+@pytest.mark.django_db(transaction=True)
+def test_talktoharnesses_cleanup_dry_run_prints_preview_counts() -> None:
+    counts = DryRunCounts(
+        soft_deleted_conversations=2,
+        history_conversations=3,
+        terminal_turns=4,
+        waiting_turns=1,
+    )
+    with patch(
+        "talktoharnesses.django.management.commands.talktoharnesses_cleanup._dry_run",
+        new=AsyncMock(return_value=counts),
+    ) as dry_run:
+        out = StringIO()
+        call_command("talktoharnesses_cleanup", "--dry-run", stdout=out)
+    assert dry_run.await_count == 1
+    text = out.getvalue()
+    assert "soft_deleted_conversations=2" in text
+    assert "history_conversations=3" in text
+    assert "terminal_turns=4" in text
+    assert "waiting_turns=1" in text
+    assert "purged_conversations=" not in text
+    assert "pruned_turns=" not in text
 
 
 @pytest.mark.django_db(transaction=True)

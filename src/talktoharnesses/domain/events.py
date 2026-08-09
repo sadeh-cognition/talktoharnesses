@@ -421,6 +421,26 @@ class ConversationMetadataChangedPayload(BaseModel):
     deleted_at: UtcDateTime | None = None
 
 
+class RetentionExemptionChangedPayload(BaseModel):
+    """Conversation-visible retention exemption flag after a committed mutation."""
+
+    model_config = FROZEN
+
+    type: Literal["retention_exemption_changed"] = "retention_exemption_changed"
+    retention_exempt: bool
+
+
+class TranscriptImportedPayload(BaseModel):
+    """Bounded notification that imported history was committed."""
+
+    model_config = FROZEN
+
+    type: Literal["transcript_imported"] = "transcript_imported"
+    turn_count: int
+    message_count: int
+    tool_count: int
+
+
 class InteractionRequestedPayload(BaseModel):
     model_config = FROZEN
 
@@ -558,6 +578,8 @@ EventPayload = Annotated[
     | FileChangeAppliedPayload
     | ConversationTitleUpdatedPayload
     | ConversationMetadataChangedPayload
+    | RetentionExemptionChangedPayload
+    | TranscriptImportedPayload
     | InteractionRequestedPayload
     | InteractionDraftUpdatedPayload
     | InteractionResolvedPayload

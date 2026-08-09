@@ -35,6 +35,7 @@ from talktoharnesses.domain.events import (
     InteractionDraftUpdatedPayload,
     InteractionRequestedPayload,
     InteractionResolvedPayload,
+    RetentionExemptionChangedPayload,
     SessionClosedPayload,
     SessionFailedPayload,
     SessionReapedPayload,
@@ -1025,6 +1026,25 @@ def soft_delete_conversation(state: ConversationState, *, now: datetime) -> Tran
     return _apply_metadata(state, now=now, deleted_at=_now(now))
 
 
+def set_retention_exemption(
+    state: ConversationState,
+    *,
+    now: datetime,
+    exempt: bool,
+) -> TransitionResult:
+    """Set the per-conversation history retention exemption flag."""
+    if state.conversation.deleted_at is not None:
+        raise DomainError(ErrorCode.NOT_FOUND, "conversation not found")
+    ts = _now(now)
+    new_state = _replace_conversation(state, retention_exempt=exempt, updated_at=ts)
+    new_state, events = append_events(
+        new_state,
+        ts,
+        [RetentionExemptionChangedPayload(retention_exempt=exempt)],
+    )
+    return TransitionResult(state=new_state, events=events)
+
+
 def interrupt_turn(
     state: ConversationState,
     *,
@@ -1559,6 +1579,7 @@ __all__ = [
     "request_interaction",
     "resume_session",
     "rotate_session",
+    "set_retention_exemption",
     "snooze_conversation",
     "soft_delete_conversation",
     "start_session",
