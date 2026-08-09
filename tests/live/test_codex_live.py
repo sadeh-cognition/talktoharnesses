@@ -3,8 +3,9 @@
 Enable with TALKTOHARNESSES_LIVE_CODEX=1.
 When enabled, missing SDK/auth/version is a failure rather than a skip.
 
-Codex remains blocked for stable matrix publication until a release exposes
-broker-compatible deferred approvals without private SDK attributes.
+When the live stream surfaces approvals, they must resolve through the
+broker-compatible CodexClient approval_handler path (no private SDK attrs,
+no silent auto-approval) before create/resume matrix rows are published.
 """
 
 from __future__ import annotations

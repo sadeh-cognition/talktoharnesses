@@ -6,7 +6,7 @@ Do not edit provider tables by hand; regenerate via
 
 ## Grok
 
-- Adapter version: `2026.8.1.dev1`
+- Adapter version: `2026.8.1`
 
 ### Known releases (implementation targets)
 
@@ -16,15 +16,19 @@ Do not edit provider tables by hand; regenerate via
 
 ### Published create matrix
 
-_No published create combinations yet. Create rows are added only after the opt-in create suite passes._
+| Release ID | Platform |
+| --- | --- |
+| `grok-1.0.0-3cd0d0cbce` | `linux` |
 
 ### Published resume matrix
 
-_No published resume combinations yet. Resume rows are added only after the opt-in resume suite passes._
+| Release ID | Platform |
+| --- | --- |
+| `grok-1.0.0-3cd0d0cbce` | `linux` |
 
 ## Cursor
 
-- Adapter version: `2026.8.1.dev1`
+- Adapter version: `2026.8.1`
 
 ### Known releases (implementation targets)
 
@@ -34,15 +38,19 @@ _No published resume combinations yet. Resume rows are added only after the opt-
 
 ### Published create matrix
 
-_No published create combinations yet. Create rows are added only after the opt-in create suite passes._
+| Release ID | Platform |
+| --- | --- |
+| `cursor-2026.08.04-aaa8809` | `linux` |
 
 ### Published resume matrix
 
-_No published resume combinations yet. Resume rows are added only after the opt-in resume suite passes._
+| Release ID | Platform |
+| --- | --- |
+| `cursor-2026.08.04-aaa8809` | `linux` |
 
 ## Codex
 
-- Adapter version: `2026.8.1.dev1`
+- Adapter version: `2026.8.1`
 
 ### Known releases (implementation targets)
 
@@ -52,19 +60,23 @@ _No published resume combinations yet. Resume rows are added only after the opt-
 
 ### Published create matrix
 
-_No published create combinations yet. Create rows are added only after the opt-in create suite passes._
+| Release ID | Platform |
+| --- | --- |
+| `codex-openai-codex-0.144.4` | `linux` |
 
 ### Published resume matrix
 
-_No published resume combinations yet. Resume rows are added only after the opt-in resume suite passes._
+| Release ID | Platform |
+| --- | --- |
+| `codex-openai-codex-0.144.4` | `linux` |
 
 ### Notes
 
-- `codex-openai-codex-0.144.4`: Public AsyncCodex lacks a deferred approval handler; create/resume matrices stay empty until a release exposes broker-compatible approvals without private client attributes.
+- `codex-openai-codex-0.144.4`: Broker-compatible approvals use public CodexClient(approval_handler=...) with ApprovalsReviewer.user. Live create/resume/interaction proven on linux.
 
 ## Claude Code
 
-- Adapter version: `2026.8.1.dev1`
+- Adapter version: `2026.8.1`
 
 ### Known releases (implementation targets)
 
@@ -74,19 +86,23 @@ _No published resume combinations yet. Resume rows are added only after the opt-
 
 ### Published create matrix
 
-_No published create combinations yet. Create rows are added only after the opt-in create suite passes._
+| Release ID | Platform |
+| --- | --- |
+| `claude-agent-sdk-0.1.53-bundled-2.1.88` | `linux` |
 
 ### Published resume matrix
 
-_No published resume combinations yet. Resume rows are added only after the opt-in resume suite passes._
+| Release ID | Platform |
+| --- | --- |
+| `claude-agent-sdk-0.1.53-bundled-2.1.88` | `linux` |
 
 ### Notes
 
-- `claude-agent-sdk-0.1.53-bundled-2.1.88`: Implementation target using SDK-bundled Claude Code CLI; matrix rows published only after create/resume gates pass.
+- `claude-agent-sdk-0.1.53-bundled-2.1.88`: Live create/resume/interaction proven on linux with SDK-bundled Claude Code CLI.
 
 ## OpenCode
 
-- Adapter version: `2026.8.1.dev1`
+- Adapter version: `2026.8.1`
 
 ### Known releases (implementation targets)
 
@@ -96,12 +112,16 @@ _No published resume combinations yet. Resume rows are added only after the opt-
 
 ### Published create matrix
 
-_No published create combinations yet. Create rows are added only after the opt-in create suite passes._
+| Release ID | Platform |
+| --- | --- |
+| `opencode-1.2.27` | `linux` |
 
 ### Published resume matrix
 
-_No published resume combinations yet. Resume rows are added only after the opt-in resume suite passes._
+| Release ID | Platform |
+| --- | --- |
+| `opencode-1.2.27` | `linux` |
 
 ### Notes
 
-- `opencode-1.2.27`: Implementation target for opencode serve loopback HTTP/SSE; matrix rows published only after create/resume gates pass.
+- `opencode-1.2.27`: Live create/resume/interaction proven on linux for opencode serve loopback HTTP/SSE.

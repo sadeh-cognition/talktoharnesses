@@ -17,7 +17,7 @@ from talktoharnesses.providers.grok.compatibility import (
 
 def test_load_and_match_release() -> None:
     doc = load_grok_compatibility()
-    assert doc.adapter_version == "2026.8.1.dev1"
+    assert doc.adapter_version == "2026.8.1"
     release = match_release("grok 1.0.0 (3cd0d0cbce) [stable]", platform="linux")
     assert release.id == "grok-1.0.0-3cd0d0cbce"
     caps = release.to_harness_capabilities()
@@ -50,16 +50,25 @@ def test_version_output_must_match_completely(output: str) -> None:
     assert exc.value.code is ErrorCode.PROVIDER_INCOMPATIBLE
 
 
-def test_markdown_render_empty_matrices() -> None:
+def test_markdown_render_published_matrices() -> None:
     md = render_supported_harnesses_markdown()
     assert "Supported Harnesses" in md
     assert "grok-1.0.0-3cd0d0cbce" in md
-    assert "No published create combinations" in md
+    assert "linux" in md
+    assert "No published create combinations" not in md
 
 
 def test_build_argv() -> None:
-    assert build_grok_argv() == ("agent", "--no-leader", "stdio")
+    assert build_grok_argv() == (
+        "--permission-mode",
+        "default",
+        "agent",
+        "--no-leader",
+        "stdio",
+    )
     assert build_grok_argv(model="grok-build") == (
+        "--permission-mode",
+        "default",
         "agent",
         "--no-leader",
         "--model",

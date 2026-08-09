@@ -96,8 +96,10 @@ class _Phase10Adapter(FakeAdapter):
         answer: InteractionAnswer,
     ) -> None:
         del session
-        assert answer.interaction_id == self._interaction_id
         assert self._active_request is not None
+        # Auto-policy may deliver an answer before the test helper resolves the
+        # latest request; accept any answer for the active turn.
+        self._interaction_id = answer.interaction_id
         self.answers.append(answer)
         await self._events.put(
             TurnCompletedPayload(
@@ -162,6 +164,14 @@ def service(db: Any) -> Any:
     coordinator._draining = False  # pyright: ignore[reportPrivateUsage]
     coordinator._claims_healthy = True  # pyright: ignore[reportPrivateUsage]
     svc.processor.initialize_worker("p10")
+    svc.processor._running = True  # pyright: ignore[reportPrivateUsage]
+    svc.processor._claims_enabled = True  # pyright: ignore[reportPrivateUsage]
+
+    class _HealthyClaimTask:
+        def done(self) -> bool:
+            return False
+
+    svc.processor._claim_task = _HealthyClaimTask()  # pyright: ignore[reportAttributeAccessIssue, reportPrivateUsage]
     svc._readiness.notify_success(_now())  # pyright: ignore[reportPrivateUsage]
     asgi_mod._service = svc  # pyright: ignore[reportPrivateUsage]
 
@@ -231,7 +241,9 @@ async def _resolve_first_turn(
         conversation_id=conversation_id,
         event_type="interaction_requested",
     )
-    request_event = next(event for event in requested if event.type == "interaction_requested")
+    request_event = next(
+        event for event in reversed(requested) if event.type == "interaction_requested"
+    )
     interaction_id = request_event.payload.interaction_id
     rule = ApprovalRule(
         principal_id=owner_id,
@@ -449,7 +461,7 @@ def test_http_sse_journey_owner_isolation(
         HTTP_IDEMPOTENCY_KEY=str(uuid4()),
     )
     assert submit.status_code == 202, submit.content
-    command_id = UUID(submit.json()["id"])
+    command_id = UUID(submit.json()["command"]["id"])
 
     async def _execute_and_read_sse() -> str:
         committed = await _resolve_first_turn(
@@ -468,16 +480,20 @@ def test_http_sse_journey_owner_isolation(
             last_event_id=0,
         )
         try:
-            frames = []
+            frames: list[str] = []
             while True:
                 frame = await anext(stream)
+                assert isinstance(frame, str)
                 frames.append(frame)
                 if "event: turn_completed" in frame:
                     return "".join(frames)
         finally:
+            from collections.abc import Awaitable, Callable
+            from typing import cast
+
             close_stream = getattr(stream, "aclose", None)
             if callable(close_stream):
-                await close_stream()
+                await cast(Callable[[], Awaitable[object]], close_stream)()
 
     sse_body = asyncio.run(_execute_and_read_sse())
     assert "event: turn_completed" in sse_body

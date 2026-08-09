@@ -173,3 +173,61 @@ async def test_session_update_is_validated_with_strict_variant_schema() -> None:
         await asyncio.wait_for(pending, timeout=1)
     assert exc.value.code is ErrorCode.UNSUPPORTED_NATIVE_EVENT
     await conn.close()
+
+
+@pytest.mark.asyncio
+async def test_notify_respond_error_cancel_and_frame_faults() -> None:
+    proc = FakeProcess()
+    conn = AcpConnection(proc)  # type: ignore[arg-type]
+    await conn.start()
+
+    with pytest.raises(DomainError):
+        await conn.notify("not/allowlisted", {})
+    await conn.notify("session/cancel", {"sessionId": "s"})
+    await conn.respond_error("e1", -32000, "nope", data={"x": 1})
+    assert any(b"e1" in chunk for chunk in proc.stdin_writes)
+
+    future, _ = await conn.request("initialize", {"protocolVersion": 1})
+    assert conn.cancel_pending(1) is True
+    assert conn.cancel_pending(1) is False
+    with pytest.raises(asyncio.CancelledError):
+        await future
+
+    # Malformed frame content → protocol fault closes writes.
+    await proc.feed("{not-json\n")
+    await asyncio.sleep(0.05)
+    with pytest.raises(DomainError):
+        await conn.notify("session/cancel", {"sessionId": "s"})
+    await conn.close()
+
+
+@pytest.mark.asyncio
+async def test_inbound_request_without_handler_and_control_notification() -> None:
+    from talktoharnesses.providers.acp.protocol import AcpProtocolConfig
+
+    proc = FakeProcess()
+    protocol = AcpProtocolConfig(
+        outbound_methods=frozenset({"initialize"}),
+        inbound_request_methods=frozenset({"session/request_permission"}),
+        control_notifications=frozenset({"_x.ai/ping"}),
+        permission_request_validator=lambda params: True,
+        session_update_validator=lambda params: True,
+    )
+    conn = AcpConnection(proc, protocol=protocol)  # type: ignore[arg-type]
+    seen: list[str] = []
+
+    async def control(note: object) -> None:
+        seen.append(getattr(note, "method", ""))
+
+    conn.set_notification_handler("_x.ai/ping", control)
+    await conn.start()
+    pending, _ = await conn.request("initialize", {"protocolVersion": 1})
+    await proc.feed('{"jsonrpc":"2.0","method":"_x.ai/ping","params":{}}')
+    await asyncio.sleep(0.02)
+    assert seen == ["_x.ai/ping"]
+
+    await proc.feed('{"jsonrpc":"2.0","id":"p1","method":"session/request_permission","params":{}}')
+    with pytest.raises(DomainError) as exc:
+        await asyncio.wait_for(pending, timeout=1)
+    assert exc.value.code is ErrorCode.UNSUPPORTED_NATIVE_EVENT
+    await conn.close()

@@ -1,5 +1,5 @@
 {
-  "adapter_version": "2026.8.1.dev1",
+  "adapter_version": "2026.8.1",
   "releases": [
     {
       "id": "cursor-2026.08.04-aaa8809",
@@ -7,7 +7,11 @@
       "version_stdout_prefix": "2026.08.04-aaa8809",
       "agent_name": "cursor",
       "acp_protocol_version": 1,
-      "platforms": ["linux", "darwin", "win32"],
+      "platforms": [
+        "linux",
+        "darwin",
+        "win32"
+      ],
       "capabilities": {
         "supports_resume": true,
         "supports_interrupt": true,
@@ -22,9 +26,19 @@
         "session/cancel"
       ],
       "allowlisted_extensions": [],
-      "notes": "Implementation target; matrix rows published only after create/resume gates pass."
+      "notes": "Live create/resume/interaction proven on linux."
     }
   ],
-  "create_matrix": [],
-  "resume_matrix": []
+  "create_matrix": [
+    {
+      "release_id": "cursor-2026.08.04-aaa8809",
+      "platform": "linux"
+    }
+  ],
+  "resume_matrix": [
+    {
+      "release_id": "cursor-2026.08.04-aaa8809",
+      "platform": "linux"
+    }
+  ]
 }

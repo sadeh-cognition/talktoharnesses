@@ -43,6 +43,49 @@ def _now() -> datetime:
     return datetime(2026, 8, 8, 12, 0, 0, tzinfo=UTC)
 
 
+def test_normalize_path_directory_and_recursive_matcher_edges(tmp_path: Path) -> None:
+    from talktoharnesses.domain.approval_matching import (
+        normalize_approval_path,
+        normalize_directory,
+    )
+
+    existing = tmp_path / "file.txt"
+    existing.write_text("x")
+    assert normalize_approval_path(str(existing), working_directory=None) == str(existing.resolve())
+    missing_child = tmp_path / "new-file.txt"
+    assert normalize_approval_path(
+        str(missing_child),
+        working_directory=None,
+        allow_missing_final=True,
+    ).endswith("new-file.txt")
+    with pytest.raises(ValueError):
+        normalize_approval_path(str(tmp_path / "nope" / "x"), allow_missing_final=True)
+    with pytest.raises(ValueError):
+        normalize_approval_path(str(tmp_path / "missing"), allow_missing_final=False)
+
+    assert normalize_directory(str(tmp_path)) == str(tmp_path.resolve())
+    with pytest.raises(ValueError):
+        normalize_directory(str(tmp_path / "missing-dir"))
+    with pytest.raises(ValueError):
+        normalize_directory(str(existing))
+
+    nested = tmp_path / "rel"
+    nested.mkdir()
+    rule = ApprovalRule(
+        principal_id="p1",
+        decision=ApprovalRuleDecision.ALLOW,
+        scope=PrincipalGlobalRuleScope(),
+        matcher=RecursiveDirectoryMatcher(directory="rel", operation=FileOperation.READ),
+        created_at=_now(),
+        updated_at=_now(),
+    )
+    with pytest.raises(ValueError):
+        normalize_approval_rule(rule)
+    normalized = normalize_approval_rule(rule, working_directory=str(tmp_path))
+    assert Path(normalized.matcher.directory).is_absolute()  # type: ignore[union-attr]
+    assert Path(normalized.matcher.directory) == nested.resolve()  # type: ignore[union-attr]
+
+
 def _ctx(
     *,
     principal_id: str = "p1",

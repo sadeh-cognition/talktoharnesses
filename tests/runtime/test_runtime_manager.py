@@ -6,7 +6,7 @@ import asyncio
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 from unittest.mock import AsyncMock
 from uuid import uuid4
 
@@ -21,9 +21,17 @@ from tests.runtime.conftest import (
 
 from talktoharnesses.domain import DomainError, ErrorCode, HarnessKind
 from talktoharnesses.domain.enums import ActivityStatus
-from talktoharnesses.domain.models import BackgroundActivity, HarnessConfiguration
+from talktoharnesses.domain.models import (
+    BackgroundActivity,
+    HarnessCapabilities,
+    HarnessConfiguration,
+)
 from talktoharnesses.providers import AdapterRegistry
-from talktoharnesses.providers.adapter import StartSessionRequest
+from talktoharnesses.providers.adapter import (
+    HarnessSession,
+    ResumeSessionRequest,
+    StartSessionRequest,
+)
 from talktoharnesses.runtime import ProcessHandle, RuntimeManager, RuntimePolicy
 from talktoharnesses.runtime.supervisor import ProcessSupervisor
 
@@ -694,3 +702,448 @@ async def test_shutdown_force_phase_is_concurrent_and_within_budget(
     elapsed = time.monotonic() - started
     assert elapsed < 0.8
     assert all(manager.get_runtime(state.conversation.id) is None for state in states)
+
+
+class _ResumingSdkAdapter(FakeAdapter):
+    """SDK-managed adapter that advertises resume support."""
+
+    sdk_managed = True
+
+    async def probe(self, config: HarnessConfiguration):
+        return HarnessCapabilities(
+            kind=self.kind,
+            version="test-1",
+            supports_resume=True,
+        )
+
+
+class _NoResumeSdkAdapter(FakeAdapter):
+    sdk_managed = True
+
+
+class _ResumeRejectingAdapter(_ResumingSdkAdapter):
+    async def resume(self, request: ResumeSessionRequest) -> HarnessSession:
+        del request
+        raise DomainError(ErrorCode.PROVIDER_INCOMPATIBLE, "native resume rejected")
+
+
+@pytest.mark.asyncio
+async def test_resume_for_recovery_happy_path(
+    short_policy: RuntimePolicy,
+    workdir: Path,
+    now: datetime,
+) -> None:
+    from datetime import UTC, timedelta
+
+    from talktoharnesses.domain.enums import RecoveryReasonCode
+    from talktoharnesses.domain.models import LaunchSnapshot
+
+    store = MemoryPersistence()
+    state = make_state(now=now, workdir=workdir)
+    assert state.binding is not None
+    binding = state.binding.model_copy(update={"native_session_id": "native-resume-1"})
+    store.seed(state.model_copy(update={"binding": binding}))
+    cid = state.conversation.id
+    store.ownership[cid] = ("worker-a", 3, datetime.now(UTC) + timedelta(hours=1))
+
+    registry = AdapterRegistry()
+    registry.register(HarnessKind.OPENCODE, _ResumingSdkAdapter)
+    mgr = RuntimeManager(store, registry, policy=short_policy)
+    previous = LaunchSnapshot(
+        harness_version="test-1",
+        working_directory=str(workdir),
+        adapter_version="0",
+        capabilities=HarnessCapabilities(
+            kind=HarnessKind.OPENCODE,
+            version="test-1",
+            supports_resume=True,
+        ),
+    )
+
+    managed, reason = await mgr.resume_for_recovery(
+        cid,
+        "owner-1",
+        binding.configuration,
+        "native-resume-1",
+        worker_id="worker-a",
+        fence=3,
+        expected_binding_kind=HarnessKind.OPENCODE,
+        previous_launch=previous,
+    )
+    assert managed.session.native_session_id == "native-resume-1"
+    assert mgr.get_runtime(cid) is managed
+    assert reason is RecoveryReasonCode.UNCHANGED_LAUNCH
+    await mgr.close(cid, reason="test")
+
+
+@pytest.mark.asyncio
+async def test_resume_for_recovery_rejects_busy_and_kind_mismatch(
+    short_policy: RuntimePolicy,
+    workdir: Path,
+    now: datetime,
+) -> None:
+    from datetime import UTC, timedelta
+
+    store = MemoryPersistence()
+    state = make_state(now=now, workdir=workdir)
+    assert state.binding is not None
+    binding = state.binding.model_copy(update={"native_session_id": "n1"})
+    store.seed(state.model_copy(update={"binding": binding}))
+    cid = state.conversation.id
+    store.ownership[cid] = ("worker-a", 1, datetime.now(UTC) + timedelta(hours=1))
+    registry = AdapterRegistry()
+    registry.register(HarnessKind.OPENCODE, _ResumingSdkAdapter)
+    mgr = RuntimeManager(store, registry, policy=short_policy)
+
+    await mgr.resume_for_recovery(
+        cid,
+        "owner-1",
+        binding.configuration,
+        "n1",
+        worker_id="worker-a",
+        fence=1,
+        expected_binding_kind=HarnessKind.OPENCODE,
+        previous_launch=None,
+    )
+    with pytest.raises(DomainError) as busy:
+        await mgr.resume_for_recovery(
+            cid,
+            "owner-1",
+            binding.configuration,
+            "n1",
+            worker_id="worker-a",
+            fence=1,
+            expected_binding_kind=HarnessKind.OPENCODE,
+            previous_launch=None,
+        )
+    assert busy.value.code is ErrorCode.CONVERSATION_BUSY
+
+    store2 = MemoryPersistence()
+    state2 = make_state(now=now, workdir=workdir)
+    assert state2.binding is not None
+    binding2 = state2.binding.model_copy(update={"native_session_id": "n2"})
+    store2.seed(state2.model_copy(update={"binding": binding2}))
+    cid2 = state2.conversation.id
+    store2.ownership[cid2] = ("worker-a", 1, datetime.now(UTC) + timedelta(hours=1))
+    mgr2 = RuntimeManager(store2, registry, policy=short_policy)
+    with pytest.raises(DomainError) as kind_exc:
+        await mgr2.resume_for_recovery(
+            cid2,
+            "owner-1",
+            binding2.configuration,
+            "n2",
+            worker_id="worker-a",
+            fence=1,
+            expected_binding_kind=HarnessKind.GROK,
+            previous_launch=None,
+        )
+    assert kind_exc.value.code is ErrorCode.INVALID_STATE
+    await mgr.shutdown()
+    await mgr2.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_resume_for_recovery_unsupported_and_rejected(
+    short_policy: RuntimePolicy,
+    workdir: Path,
+    now: datetime,
+) -> None:
+    from datetime import UTC, timedelta
+
+    from talktoharnesses.domain.enums import RecoveryReasonCode
+
+    store = MemoryPersistence()
+    state = make_state(now=now, workdir=workdir)
+    assert state.binding is not None
+    binding = state.binding.model_copy(update={"native_session_id": "n1"})
+    store.seed(state.model_copy(update={"binding": binding}))
+    cid = state.conversation.id
+    store.ownership[cid] = ("worker-a", 1, datetime.now(UTC) + timedelta(hours=1))
+    registry = AdapterRegistry()
+    registry.register(HarnessKind.OPENCODE, _NoResumeSdkAdapter)
+    mgr = RuntimeManager(store, registry, policy=short_policy)
+    with pytest.raises(DomainError) as exc:
+        await mgr.resume_for_recovery(
+            cid,
+            "owner-1",
+            binding.configuration,
+            "n1",
+            worker_id="worker-a",
+            fence=1,
+            expected_binding_kind=HarnessKind.OPENCODE,
+            previous_launch=None,
+        )
+    assert exc.value.code is ErrorCode.PROVIDER_INCOMPATIBLE
+    assert exc.value.message == RecoveryReasonCode.RESUME_UNSUPPORTED.value
+    await mgr.shutdown()
+
+    store2 = MemoryPersistence()
+    state2 = make_state(now=now, workdir=workdir)
+    assert state2.binding is not None
+    binding2 = state2.binding.model_copy(update={"native_session_id": "n2"})
+    store2.seed(state2.model_copy(update={"binding": binding2}))
+    cid2 = state2.conversation.id
+    store2.ownership[cid2] = ("worker-a", 1, datetime.now(UTC) + timedelta(hours=1))
+    reg2 = AdapterRegistry()
+    reg2.register(HarnessKind.OPENCODE, _ResumeRejectingAdapter)
+    mgr2 = RuntimeManager(store2, reg2, policy=short_policy)
+    with pytest.raises(DomainError) as rejected:
+        await mgr2.resume_for_recovery(
+            cid2,
+            "owner-1",
+            binding2.configuration,
+            "n2",
+            worker_id="worker-a",
+            fence=1,
+            expected_binding_kind=HarnessKind.OPENCODE,
+            previous_launch=None,
+        )
+    assert rejected.value.code is ErrorCode.PROVIDER_INCOMPATIBLE
+    await mgr2.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_recovery_handoff_fallback_success_and_failure(
+    short_policy: RuntimePolicy,
+    workdir: Path,
+    now: datetime,
+) -> None:
+    from datetime import UTC, timedelta
+    from unittest.mock import AsyncMock
+
+    store = MemoryPersistence()
+    state = make_state(now=now, workdir=workdir)
+    assert state.binding is not None
+    store.seed(state)
+    cid = state.conversation.id
+    binding_id = state.binding.id
+    store.ownership[cid] = ("worker-a", 2, datetime.now(UTC) + timedelta(hours=1))
+    registry = AdapterRegistry()
+    registry.register(HarnessKind.OPENCODE, _ResumingSdkAdapter)
+    mgr = RuntimeManager(store, registry, policy=short_policy)
+
+    candidate = await mgr.recovery_handoff_fallback(
+        cid,
+        "owner-1",
+        binding_id,
+        state.binding.configuration,
+        "handoff text",
+        worker_id="worker-a",
+        fence=2,
+    )
+    assert candidate is not None
+    assert mgr.get_candidate(binding_id) is candidate
+    await mgr.close_candidate(binding_id)
+
+    # Failure path: start_candidate raises → requires_session_recreation.
+    mgr.start_candidate = AsyncMock(side_effect=RuntimeError("boom"))  # type: ignore[method-assign]
+    failed = await mgr.recovery_handoff_fallback(
+        cid,
+        "owner-1",
+        uuid4(),
+        state.binding.configuration,
+        "handoff text",
+        worker_id="worker-a",
+        fence=2,
+    )
+    assert failed is None
+    binding = store.states[cid].binding
+    assert binding is not None
+    assert binding.requires_session_recreation is True
+    await mgr.shutdown()
+
+
+def test_map_resume_reason_branches() -> None:
+    from talktoharnesses.domain.enums import RecoveryReasonCode
+    from talktoharnesses.runtime.manager import (
+        _map_resume_reason,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    assert (
+        _map_resume_reason(  # pyright: ignore[reportPrivateUsage]
+            DomainError(
+                ErrorCode.PROVIDER_INCOMPATIBLE,
+                RecoveryReasonCode.RESUME_UNSUPPORTED.value,
+            )
+        )
+        is RecoveryReasonCode.RESUME_UNSUPPORTED
+    )
+    assert (
+        _map_resume_reason(DomainError(ErrorCode.PROVIDER_INCOMPATIBLE, "other"))  # pyright: ignore[reportPrivateUsage]
+        is RecoveryReasonCode.PROVIDER_INCOMPATIBLE
+    )
+    assert (
+        _map_resume_reason(DomainError(ErrorCode.RUNTIME_TIMEOUT, "timeout"))  # pyright: ignore[reportPrivateUsage]
+        is RecoveryReasonCode.RESUME_REJECTED
+    )
+    assert (
+        _map_resume_reason(DomainError(ErrorCode.INVALID_STATE, "x"))  # pyright: ignore[reportPrivateUsage]
+        is RecoveryReasonCode.RESUME_REJECTED
+    )
+
+
+@pytest.mark.asyncio
+async def test_persist_failure_retries_conflict_then_swallows(
+    short_policy: RuntimePolicy,
+    workdir: Path,
+    now: datetime,
+) -> None:
+    from talktoharnesses.domain.enums import ProcessStatus
+    from talktoharnesses.domain.models import ProcessRecord
+
+    store = MemoryPersistence()
+    state = make_state(now=now, workdir=workdir)
+    store.seed(state)
+    cid = state.conversation.id
+    registry = AdapterRegistry()
+    registry.register(HarnessKind.OPENCODE, FakeAdapter)
+    mgr = RuntimeManager(store, registry, policy=short_policy)
+
+    calls = {"n": 0}
+    original = store.commit_runtime_lifecycle
+
+    async def flaky(*args: Any, **kwargs: Any) -> Any:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise DomainError(ErrorCode.OPTIMISTIC_CONFLICT, "retry")
+        if calls["n"] == 2:
+            raise DomainError(ErrorCode.INVALID_STATE, "give up")
+        return await original(*args, **kwargs)
+
+    store.commit_runtime_lifecycle = flaky  # type: ignore[method-assign]
+    record = ProcessRecord(
+        conversation_id=cid,
+        binding_id=state.binding.id,  # type: ignore[union-attr]
+        status=ProcessStatus.STARTING,
+    )
+    await mgr._persist_failure(  # pyright: ignore[reportPrivateUsage]
+        cid,
+        "owner-1",
+        record,
+        None,
+        ErrorCode.INVALID_STATE.value,
+        "boom",
+    )
+    assert calls["n"] == 2
+
+    async def boom(*_a: object, **_k: object) -> object:
+        raise RuntimeError("db down")
+
+    store.commit_runtime_lifecycle = boom  # type: ignore[method-assign]
+    await mgr._persist_failure(  # pyright: ignore[reportPrivateUsage]
+        cid,
+        "owner-1",
+        record,
+        None,
+        ErrorCode.INVALID_STATE.value,
+        "boom",
+    )
+    await mgr.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_recovery_handoff_recreation_flag_failure_is_swallowed(
+    short_policy: RuntimePolicy,
+    workdir: Path,
+    now: datetime,
+) -> None:
+    store = MemoryPersistence()
+    state = make_state(now=now, workdir=workdir)
+    store.seed(state)
+    cid = state.conversation.id
+    binding_id = state.binding.id  # type: ignore[union-attr]
+    registry = AdapterRegistry()
+    registry.register(HarnessKind.OPENCODE, _ResumingSdkAdapter)
+    mgr = RuntimeManager(store, registry, policy=short_policy)
+    mgr.start_candidate = AsyncMock(side_effect=RuntimeError("boom"))  # type: ignore[method-assign]
+
+    async def fail_recreation(*_a: object, **_k: object) -> None:
+        raise RuntimeError("cannot mark")
+
+    store.commit_rotation_requires_recreation = fail_recreation  # type: ignore[method-assign]
+    failed = await mgr.recovery_handoff_fallback(
+        cid,
+        "owner-1",
+        binding_id,
+        state.binding.configuration,  # type: ignore[union-attr]
+        "handoff",
+        worker_id="worker-a",
+        fence=1,
+    )
+    assert failed is None
+    await mgr.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_resume_for_recovery_rejects_when_shutting_down(
+    short_policy: RuntimePolicy,
+    workdir: Path,
+    now: datetime,
+) -> None:
+    from datetime import UTC, timedelta
+
+    store = MemoryPersistence()
+    state = make_state(now=now, workdir=workdir)
+    assert state.binding is not None
+    binding = state.binding.model_copy(update={"native_session_id": "n1"})
+    store.seed(state.model_copy(update={"binding": binding}))
+    cid = state.conversation.id
+    store.ownership[cid] = ("worker-a", 1, datetime.now(UTC) + timedelta(hours=1))
+    registry = AdapterRegistry()
+    registry.register(HarnessKind.OPENCODE, _ResumingSdkAdapter)
+    mgr = RuntimeManager(store, registry, policy=short_policy)
+    mgr._shutting_down = True  # pyright: ignore[reportPrivateUsage]
+    with pytest.raises(DomainError) as exc:
+        await mgr.resume_for_recovery(
+            cid,
+            "owner-1",
+            binding.configuration,
+            "n1",
+            worker_id="worker-a",
+            fence=1,
+            expected_binding_kind=HarnessKind.OPENCODE,
+            previous_launch=None,
+        )
+    assert exc.value.code is ErrorCode.INVALID_STATE
+    await mgr.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_resume_for_recovery_probe_failure_maps_incompatible(
+    short_policy: RuntimePolicy,
+    workdir: Path,
+    now: datetime,
+) -> None:
+    from datetime import UTC, timedelta
+
+    from talktoharnesses.domain.enums import RecoveryReasonCode
+
+    class _ProbeFailSdk(_ResumingSdkAdapter):
+        async def probe(self, config: HarnessConfiguration):
+            del config
+            raise DomainError(ErrorCode.PROVIDER_INCOMPATIBLE, "probe refused")
+
+    store = MemoryPersistence()
+    state = make_state(now=now, workdir=workdir)
+    assert state.binding is not None
+    binding = state.binding.model_copy(update={"native_session_id": "n1"})
+    store.seed(state.model_copy(update={"binding": binding}))
+    cid = state.conversation.id
+    store.ownership[cid] = ("worker-a", 1, datetime.now(UTC) + timedelta(hours=1))
+    registry = AdapterRegistry()
+    registry.register(HarnessKind.OPENCODE, _ProbeFailSdk)
+    mgr = RuntimeManager(store, registry, policy=short_policy)
+    with pytest.raises(DomainError) as exc:
+        await mgr.resume_for_recovery(
+            cid,
+            "owner-1",
+            binding.configuration,
+            "n1",
+            worker_id="worker-a",
+            fence=1,
+            expected_binding_kind=HarnessKind.OPENCODE,
+            previous_launch=None,
+        )
+    assert exc.value.code is ErrorCode.PROVIDER_INCOMPATIBLE
+    assert exc.value.message == RecoveryReasonCode.PROVIDER_INCOMPATIBLE.value
+    await mgr.shutdown()

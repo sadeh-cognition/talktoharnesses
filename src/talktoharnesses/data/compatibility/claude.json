@@ -1,12 +1,16 @@
 {
-  "adapter_version": "2026.8.1.dev1",
+  "adapter_version": "2026.8.1",
   "releases": [
     {
       "id": "claude-agent-sdk-0.1.53-bundled-2.1.88",
       "sdk_version": "0.1.53",
       "cli_version": "2.1.88",
       "cli_source": "bundled",
-      "platforms": ["linux", "darwin", "win32"],
+      "platforms": [
+        "linux",
+        "darwin",
+        "win32"
+      ],
       "capabilities": {
         "supports_resume": true,
         "supports_interrupt": true,
@@ -14,9 +18,19 @@
         "supports_multi_interaction": true,
         "supports_nested_activity": true
       },
-      "notes": "Implementation target using SDK-bundled Claude Code CLI; matrix rows published only after create/resume gates pass."
+      "notes": "Live create/resume/interaction proven on linux with SDK-bundled Claude Code CLI."
     }
   ],
-  "create_matrix": [],
-  "resume_matrix": []
+  "create_matrix": [
+    {
+      "release_id": "claude-agent-sdk-0.1.53-bundled-2.1.88",
+      "platform": "linux"
+    }
+  ],
+  "resume_matrix": [
+    {
+      "release_id": "claude-agent-sdk-0.1.53-bundled-2.1.88",
+      "platform": "linux"
+    }
+  ]
 }

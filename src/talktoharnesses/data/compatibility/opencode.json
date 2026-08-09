@@ -1,11 +1,15 @@
 {
-  "adapter_version": "2026.8.1.dev1",
+  "adapter_version": "2026.8.1",
   "releases": [
     {
       "id": "opencode-1.2.27",
       "cli_version": "1.2.27",
       "version_stdout_prefix": "1.2.27",
-      "platforms": ["linux", "darwin", "win32"],
+      "platforms": [
+        "linux",
+        "darwin",
+        "win32"
+      ],
       "capabilities": {
         "supports_resume": true,
         "supports_interrupt": true,
@@ -13,9 +17,19 @@
         "supports_multi_interaction": true,
         "supports_nested_activity": true
       },
-      "notes": "Implementation target for opencode serve loopback HTTP/SSE; matrix rows published only after create/resume gates pass."
+      "notes": "Live create/resume/interaction proven on linux for opencode serve loopback HTTP/SSE."
     }
   ],
-  "create_matrix": [],
-  "resume_matrix": []
+  "create_matrix": [
+    {
+      "release_id": "opencode-1.2.27",
+      "platform": "linux"
+    }
+  ],
+  "resume_matrix": [
+    {
+      "release_id": "opencode-1.2.27",
+      "platform": "linux"
+    }
+  ]
 }

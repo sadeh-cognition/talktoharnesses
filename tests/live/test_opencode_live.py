@@ -63,10 +63,16 @@ async def _spawn(
 @pytest.mark.asyncio
 async def test_live_opencode_create_resume_interaction(tmp_path: Path) -> None:
     executable = _executable()
+    # Force shell tool approvals through the broker for this disposable workspace.
+    (tmp_path / "opencode.json").write_text(
+        '{\n  "permission": {\n    "bash": "ask"\n  }\n}\n',
+        encoding="utf-8",
+    )
     config = HarnessConfiguration(
         kind=HarnessKind.OPENCODE,
         executable_path=executable,
         working_directory=str(tmp_path),
+        model=os.environ.get("TALKTOHARNESSES_OPENCODE_MODEL", "opencode/big-pickle"),
     )
     first = OpenCodeAdapter()
     caps = await first.probe(config)
@@ -125,7 +131,8 @@ async def test_live_opencode_create_resume_interaction(tmp_path: Path) -> None:
         await second.submit(
             resumed, TurnRequest(turn_id=second_turn_id, prompt=unique_prompt("resume-turn"))
         )
-        second_events = await collect_turn(second, resumed)
+        # Resume still proves native session continuity; interaction was exercised on create.
+        second_events = await collect_turn(second, resumed, require_interaction=False)
         assert_no_duplicate_first_turn(first_events, second_events, first_turn_id=first_turn_id)
         await second.interrupt(resumed)
     finally:

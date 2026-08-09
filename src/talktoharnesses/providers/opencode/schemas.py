@@ -16,12 +16,32 @@ class OpenCodeHealth(BaseModel):
     version: str
 
 
+class OpenCodeSessionTime(BaseModel):
+    model_config = _STRICT
+
+    created: int | None = None
+    updated: int | None = None
+
+
+class OpenCodeSessionSummary(BaseModel):
+    model_config = _STRICT
+
+    additions: int | None = None
+    deletions: int | None = None
+    files: int | None = None
+
+
 class OpenCodeSession(BaseModel):
     model_config = _STRICT
 
     id: str
     title: str | None = None
     directory: str | None = None
+    slug: str | None = None
+    version: str | None = None
+    projectID: str | None = None
+    time: OpenCodeSessionTime | None = None
+    summary: OpenCodeSessionSummary | None = None
 
 
 class OpenCodeMessageAck(BaseModel):

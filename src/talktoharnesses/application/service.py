@@ -725,10 +725,20 @@ class TalkToHarnessesService:
                     "idempotency key reused with a different payload",
                     details={"idempotency_key": idempotency_key},
                 )
-            turn = self._target_turn(result.state, existing)
+            try:
+                turn = self._target_turn(result.state, existing)
+                turn_projection = _turn_projection(turn)
+            except DomainError:
+                # After the original turn has already terminalized, the worker
+                # snapshot no longer holds it — resolve the durable projection.
+                turn_projection = await self._turn_projection_for_command(
+                    conversation_id,
+                    owner_id,
+                    existing,
+                )
             return SubmitTurnResult(
                 command=_command_projection(existing),
-                turn=_turn_projection(turn),
+                turn=turn_projection,
             )
 
         events = await self._persistence.commit_facade_mutation(
@@ -1188,6 +1198,35 @@ class TalkToHarnessesService:
         if state.active_turn is not None:
             return state.active_turn
         raise DomainError(ErrorCode.INVALID_STATE, "command has no target turn")
+
+    async def _turn_projection_for_command(
+        self,
+        conversation_id: UUID,
+        owner_id: str,
+        command: Command,
+    ) -> TurnProjection:
+        target = command.target_turn_id
+        if target is None:
+            raise DomainError(ErrorCode.INVALID_STATE, "command has no target turn")
+        cursor: str | None = None
+        while True:
+            page = await self._persistence.page_turns(
+                conversation_id,
+                owner_id,
+                cursor=cursor,
+                limit=50,
+            )
+            for item in page.items:
+                if item.id == target:
+                    return item
+            if page.next_cursor is None:
+                break
+            cursor = page.next_cursor
+        raise DomainError(
+            ErrorCode.INVALID_STATE,
+            "command target turn not found",
+            details={"target_turn_id": str(target)},
+        )
 
 
 # Silence unused import used only for type documentation of pending status.

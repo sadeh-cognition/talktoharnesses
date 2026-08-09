@@ -142,7 +142,9 @@ class GrokAdapter:
             },
         )
         result = await future
-        session_id = _require_session_id(result) or request.native_session_id
+        session_id = _session_id_or_none(result) or request.native_session_id
+        if not session_id:
+            raise DomainError(ErrorCode.PROTOCOL_ERROR, "session result missing sessionId")
         self._normalizer.set_session(session_id, resync=False)
         session = HarnessSession(
             conversation_id=request.conversation_id,
@@ -276,6 +278,8 @@ class GrokAdapter:
                 "_x.ai/mcp/servers_updated",
                 "_x.ai/settings/update",
                 "_x.ai/announcements/update",
+                "_x.ai/models/update",
+                "_x.ai/mcp_initialized",
             ):
                 conn.set_notification_handler(method, self._on_control_notification)
             conn.set_request_handler(
@@ -322,14 +326,24 @@ class GrokAdapter:
     def _validate_initialize_identity(self, result: dict[str, Any]) -> None:
         assert self._release is not None
         agent_info = _map_dict(result.get("agentInfo"))
-        if (
-            agent_info.get("name") != self._release.agent_name
-            or agent_info.get("version") != self._release.cli_version
-        ):
+        meta = _map_dict(result.get("_meta"))
+        # Grok 1.0.0 may omit agentInfo; identity then lives in _meta.agentVersion.
+        version = agent_info.get("version") or meta.get("agentVersion")
+        name = agent_info.get("name")
+        name_ok = (
+            name == self._release.agent_name
+            if name is not None
+            else version == self._release.cli_version
+        )
+        if not name_ok or version != self._release.cli_version:
             raise DomainError(
                 ErrorCode.PROVIDER_INCOMPATIBLE,
                 "initialize agent identity does not match compatibility record",
-                details={"agentInfo": agent_info, "release_id": self._release.id},
+                details={
+                    "agentInfo": agent_info,
+                    "agentVersion": meta.get("agentVersion"),
+                    "release_id": self._release.id,
+                },
             )
         capabilities = _map_dict(result.get("agentCapabilities"))
         if (
@@ -442,11 +456,18 @@ class GrokAdapter:
             raise DomainError(ErrorCode.INVALID_STATE, "adapter is closed")
 
 
-def _require_session_id(result: Any) -> str:
+def _session_id_or_none(result: Any) -> str | None:
     if not isinstance(result, dict):
-        raise DomainError(ErrorCode.PROTOCOL_ERROR, "session result must be an object")
+        return None
     result_map = _map_dict(cast(object, result))
     session_id = result_map.get("sessionId") or result_map.get("session_id")
-    if not isinstance(session_id, str) or not session_id:
+    if isinstance(session_id, str) and session_id:
+        return session_id
+    return None
+
+
+def _require_session_id(result: Any) -> str:
+    session_id = _session_id_or_none(result)
+    if session_id is None:
         raise DomainError(ErrorCode.PROTOCOL_ERROR, "session result missing sessionId")
     return session_id

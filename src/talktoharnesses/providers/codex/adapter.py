@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import contextlib
 import logging
 from collections.abc import AsyncIterator, Callable
 from typing import Any, ClassVar, Literal, cast
+from uuid import UUID, uuid4
 
-from talktoharnesses.domain.enums import ErrorCode, HarnessKind
+from talktoharnesses.domain.enums import ApprovalDecision, ErrorCode, HarnessKind
 from talktoharnesses.domain.errors import DomainError
-from talktoharnesses.domain.events import HarnessEvent
+from talktoharnesses.domain.events import HarnessEvent, InteractionRequestedPayload
 from talktoharnesses.domain.models import (
     HarnessCapabilities,
     HarnessConfiguration,
@@ -30,11 +32,16 @@ from talktoharnesses.providers.codex.compatibility import (
 )
 from talktoharnesses.providers.codex.normalizer import CodexNormalizer
 from talktoharnesses.providers.codex.probe import probe_codex
-from talktoharnesses.providers.codex.schemas import parse_codex_notification
+from talktoharnesses.providers.codex.schemas import (
+    parse_codex_approval_params,
+    parse_codex_notification,
+)
 
 logger = logging.getLogger(__name__)
 
 ClientFactory = Callable[[], Any]
+
+_APPROVAL_TIMEOUT_S = 3600.0
 
 
 def _codex_settings(mode: str | None) -> tuple[Any, Any]:
@@ -59,7 +66,76 @@ def _codex_settings(mode: str | None) -> tuple[Any, Any]:
             "unsupported codex mode",
             details={"mode": mode},
         )
+    # ApprovalMode.auto_review pairs on-request with ApprovalsReviewer.auto_review,
+    # which hides brokered approvals. BrokerAsyncCodex forces ApprovalsReviewer.user.
     return ApprovalMode.auto_review, sandbox
+
+
+def _sandbox_wire_value(sandbox: Any) -> Any:
+    """Map openai_codex.Sandbox (or wire string) to protocol SandboxMode."""
+    from openai_codex.generated.v2_all import SandboxMode
+
+    value = str(getattr(sandbox, "value", sandbox))
+    if value in {"full-access", "full_access", "danger-full-access", "danger_full_access"}:
+        return SandboxMode.danger_full_access
+    return SandboxMode(value)
+
+
+def _build_broker_async_codex(
+    approval_handler: Callable[[str, dict[str, Any] | None], dict[str, Any]],
+) -> Any:
+    """Build AsyncCodex with public CodexClient(approval_handler=...) and user reviewer."""
+    from openai_codex import AsyncCodex, AsyncThread
+    from openai_codex.async_client import AsyncCodexClient
+    from openai_codex.client import CodexClient
+    from openai_codex.generated.v2_all import (
+        ApprovalsReviewer,
+        AskForApproval,
+        AskForApprovalValue,
+        ThreadResumeParams,
+        ThreadStartParams,
+    )
+
+    class BrokerAsyncCodexClient(AsyncCodexClient):
+        def __init__(self, config: Any = None) -> None:
+            # Public CodexClient accepts approval_handler; AsyncCodexClient does not forward it.
+            self._sync = CodexClient(config=config, approval_handler=approval_handler)
+
+    class BrokerAsyncCodex(AsyncCodex):
+        def __init__(self, config: Any = None) -> None:
+            self._client = BrokerAsyncCodexClient(config=config)
+            self._init = None
+            self._initialized = False
+            self._init_lock = asyncio.Lock()
+
+        async def thread_start(self, **kwargs: Any) -> Any:
+            await self._ensure_initialized()
+            sandbox = kwargs.get("sandbox")
+            params = ThreadStartParams(
+                approval_policy=AskForApproval(root=AskForApprovalValue.on_request),
+                approvals_reviewer=ApprovalsReviewer.user,
+                cwd=kwargs.get("cwd"),
+                model=kwargs.get("model"),
+                sandbox=_sandbox_wire_value(sandbox) if sandbox is not None else None,
+            )
+            started = await self._client.thread_start(params)
+            return AsyncThread(self, started.thread.id)
+
+        async def thread_resume(self, thread_id: str, **kwargs: Any) -> Any:
+            await self._ensure_initialized()
+            sandbox = kwargs.get("sandbox")
+            params = ThreadResumeParams(
+                thread_id=thread_id,
+                approval_policy=AskForApproval(root=AskForApprovalValue.on_request),
+                approvals_reviewer=ApprovalsReviewer.user,
+                cwd=kwargs.get("cwd"),
+                model=kwargs.get("model"),
+                sandbox=_sandbox_wire_value(sandbox) if sandbox is not None else None,
+            )
+            await self._client.thread_resume(thread_id, params)
+            return AsyncThread(self, thread_id)
+
+    return BrokerAsyncCodex()
 
 
 class CodexAdapter:
@@ -85,6 +161,8 @@ class CodexAdapter:
         self._event_q: asyncio.Queue[HarnessEvent | HarnessInteractionRequest | None] = (
             asyncio.Queue()
         )
+        self._pending_interactions: dict[UUID, asyncio.Future[ApprovalDecision | None]] = {}
+        self._loop: asyncio.AbstractEventLoop | None = None
         self._closed = False
 
     def set_redaction_patterns(self, patterns: tuple[str, ...]) -> None:
@@ -207,6 +285,10 @@ class CodexAdapter:
 
     async def interrupt(self, session: HarnessSession) -> None:
         self._require_session(session)
+        for interaction_id, future in list(self._pending_interactions.items()):
+            if not future.done():
+                future.set_result(ApprovalDecision.CANCEL)
+            del self._pending_interactions[interaction_id]
         if self._turn_handle is not None:
             with contextlib.suppress(Exception):
                 await self._turn_handle.interrupt()
@@ -217,11 +299,16 @@ class CodexAdapter:
         answer: InteractionAnswer,
     ) -> None:
         self._require_session(session)
-        del answer
-        raise DomainError(
-            ErrorCode.PROVIDER_INCOMPATIBLE,
-            "the pinned Codex AsyncCodex SDK cannot answer brokered interactions",
-        )
+        pending = self._pending_interactions.get(answer.interaction_id)
+        if pending is None:
+            raise DomainError(
+                ErrorCode.INVALID_STATE,
+                "no pending interaction for answer",
+                details={"interaction_id": str(answer.interaction_id)},
+            )
+        del self._pending_interactions[answer.interaction_id]
+        if not pending.done():
+            pending.set_result(answer.decision)
 
     def events(
         self,
@@ -253,6 +340,10 @@ class CodexAdapter:
         self._stream_task = None
         self._turn_handle = None
         self._thread = None
+        for future in self._pending_interactions.values():
+            if not future.done():
+                future.set_result(ApprovalDecision.CANCEL)
+        self._pending_interactions.clear()
         if self._client is not None:
             close = getattr(self._client, "close", None)
             aexit = getattr(self._client, "__aexit__", None)
@@ -273,18 +364,18 @@ class CodexAdapter:
     async def _ensure_client(self) -> None:
         if self._client is not None:
             return
+        self._loop = asyncio.get_running_loop()
         if self._client_factory is not None:
             client = self._client_factory()
         else:
             try:
-                from openai_codex import AsyncCodex
+                client = _build_broker_async_codex(self._approval_handler)
             except ImportError as exc:
                 raise DomainError(
                     ErrorCode.PROVIDER_INCOMPATIBLE,
                     "openai-codex extra is not installed",
                     details={"extra": "codex"},
                 ) from exc
-            client = AsyncCodex()
         aenter = getattr(client, "__aenter__", None)
         if callable(aenter):
             entered = aenter()
@@ -297,6 +388,86 @@ class CodexAdapter:
                 if asyncio.iscoroutine(started):
                     await started
         self._client = client
+
+    def _approval_handler(
+        self,
+        method: str,
+        params: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Public CodexClient approval callback; blocks the SDK reader until answered."""
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            raise DomainError(
+                ErrorCode.INVALID_STATE,
+                "codex approval handler has no event loop",
+            )
+        bridge: concurrent.futures.Future[dict[str, Any]] = concurrent.futures.Future()
+
+        async def _emit_and_wait() -> dict[str, Any]:
+            try:
+                parsed = parse_codex_approval_params(method, params)
+            except Exception as exc:
+                raise DomainError(
+                    ErrorCode.UNSUPPORTED_NATIVE_EVENT,
+                    f"unsupported codex approval request: {exc}",
+                ) from exc
+            interaction_id = uuid4()
+            future: asyncio.Future[ApprovalDecision | None] = (
+                asyncio.get_running_loop().create_future()
+            )
+            self._pending_interactions[interaction_id] = future
+            events = self._normalizer.on_approval_request(
+                method=method,
+                params=parsed,
+                interaction_id=interaction_id,
+            )
+            for event in events:
+                if isinstance(event, InteractionRequestedPayload):
+                    item_id = getattr(parsed, "item_id", None)
+                    correlation: dict[str, str] = {"method": method}
+                    if item_id is not None:
+                        correlation["item_id"] = str(item_id)
+                    await self._event_q.put(
+                        HarnessInteractionRequest(
+                            payload=event,
+                            provider_correlation=correlation,
+                        )
+                    )
+                else:
+                    await self._event_q.put(event)
+            decision = await future
+            return self._to_approval_result(method, decision)
+
+        def _done(task: concurrent.futures.Future[dict[str, Any]]) -> None:
+            if bridge.done():
+                return
+            try:
+                bridge.set_result(task.result())
+            except Exception as exc:  # noqa: BLE001
+                bridge.set_exception(exc)
+
+        asyncio.run_coroutine_threadsafe(_emit_and_wait(), loop).add_done_callback(_done)
+        try:
+            return bridge.result(timeout=_APPROVAL_TIMEOUT_S)
+        except concurrent.futures.TimeoutError as exc:
+            raise DomainError(
+                ErrorCode.PROVIDER_INCOMPATIBLE,
+                "codex approval wait timed out",
+            ) from exc
+
+    def _to_approval_result(
+        self,
+        method: str,
+        decision: ApprovalDecision | None,
+    ) -> dict[str, Any]:
+        del method
+        if decision is ApprovalDecision.ALLOW_ONCE:
+            return {"decision": "accept"}
+        if decision is ApprovalDecision.ALLOW_SESSION:
+            return {"decision": "acceptForSession"}
+        if decision is ApprovalDecision.CANCEL:
+            return {"decision": "cancel"}
+        return {"decision": "decline"}
 
     async def _consume_stream(self, handle: Any) -> None:
         try:
@@ -327,6 +498,8 @@ class CodexAdapter:
 
     async def _handle_native_event(self, event: Any) -> None:
         raw = self._coerce_notification(event)
+        if raw is None:
+            return
         try:
             parsed = parse_codex_notification(raw)
         except Exception as exc:
@@ -337,7 +510,7 @@ class CodexAdapter:
         events = self._normalizer.on_notification(parsed)
         await self._emit_many(events)
 
-    def _coerce_notification(self, event: Any) -> dict[str, Any]:
+    def _coerce_notification(self, event: Any) -> dict[str, Any] | None:
         if isinstance(event, dict):
             return {str(k): v for k, v in cast(dict[object, object], event).items()}
         method = getattr(event, "method", None)
@@ -423,6 +596,10 @@ class CodexAdapter:
             else:
                 raw["status"] = item.get("status")
             return raw
+        if isinstance(method, str) and "/" in method:
+            # SDK emits many advisory notifications; ignore ones outside the turn model.
+            logger.debug("ignoring codex notification method=%s", method)
+            return None
         # Fake SDK path: plain objects with model_dump / __dict__.
         if hasattr(event, "model_dump"):
             dumped = event.model_dump()

@@ -169,6 +169,9 @@ class AcpSessionNormalizer:
             self._record_resync(update)
             return []
 
+        if kind in {"session_info_update", "available_commands_update", "user_message_chunk"}:
+            return []
+
         if self._active_turn_id is None:
             raise DomainError(
                 ErrorCode.PROTOCOL_ERROR,
@@ -551,6 +554,8 @@ class AcpSessionNormalizer:
                 if input_map.get("network") is True:
                     return NetworkApprovalAction()
                 cmd = input_map.get("command")
+                if isinstance(cmd, str) and cmd:
+                    return CommandApprovalAction(argv=(cmd,))
                 if isinstance(cmd, list):
                     raw_cmd = cast(list[object], cmd)
                     if raw_cmd and all(isinstance(item, str) for item in raw_cmd):

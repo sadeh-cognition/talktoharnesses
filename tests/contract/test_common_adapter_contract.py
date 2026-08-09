@@ -34,7 +34,7 @@ def _launch(kind: HarnessKind) -> LaunchSnapshot:
         working_directory="/tmp",
         adapter_version=__version__,
         capabilities=caps,
-        model="default",
+        model="test/default" if kind is HarnessKind.OPENCODE else "default",
         mode="default",
     )
 

@@ -459,3 +459,131 @@ async def test_cross_owner_uuid_is_not_found() -> None:
             idempotency_key="k",
         )
     assert exc.value.code is ErrorCode.INVALID_STATE  # get_snapshot style
+
+
+@pytest.mark.asyncio
+async def test_queued_prompt_steer_readiness_and_history_pages() -> None:
+    service, _p, _pub = _service()
+    config = HarnessConfiguration(kind=HarnessKind.GROK, working_directory="/tmp/ws")
+    h = await service.create_harness("owner", name="h", configuration=config)
+    snap = await service.create_conversation("owner", h.id)
+    cid = snap.detail.conversation.id
+
+    assert service.started is False
+    assert service.coordinator is not None
+    assert service.publisher is not None
+    ready_bits = service.readiness_snapshot()
+    assert "probe_fresh" in ready_bits
+    assert await service.is_ready() is False
+
+    await service.submit_turn("owner", cid, prompt="queued-1", idempotency_key="q1")
+    edited = await service.edit_queued_prompt("owner", cid, prompt="queued-2")
+    assert edited.detail.conversation.id == cid
+    cancelled = await service.cancel_queued_prompt("owner", cid)
+    assert cancelled is not None
+
+    with pytest.raises(DomainError):
+        await service.steer("owner", cid, prompt="nudge", idempotency_key="   ")
+
+    messages = await service.page_messages("owner", cid)
+    tools = await service.page_tools("owner", cid)
+    plans = await service.page_plans("owner", cid)
+    activity = await service.page_activity("owner", cid)
+    pending = await service.list_pending_interactions("owner", cid)
+    assert len(messages.items) >= 1
+    assert tools.items == ()
+    assert plans.items == ()
+    assert activity.items == ()
+    assert pending.items == ()
+
+    hw = await service.get_high_water_sequence("owner", cid)
+    assert hw >= 0
+    stream_hw = await service.get_stream_high_water_sequence("owner", cid)
+    assert stream_hw >= 0
+    stream_snap = await service.get_stream_snapshot("owner", cid)
+    assert stream_snap.detail.conversation.id == cid
+    replay = await service.replay_stream_events("owner", cid, after_sequence=0)
+    assert isinstance(replay, (tuple, list))
+
+
+@pytest.mark.asyncio
+async def test_conversation_metadata_retention_and_probe_views() -> None:
+    service, _p, _pub = _service()
+    config = HarnessConfiguration(kind=HarnessKind.GROK, working_directory="/tmp/ws")
+    h = await service.create_harness("owner", name="h", configuration=config)
+    snap = await service.create_conversation("owner", h.id)
+    cid = snap.detail.conversation.id
+
+    await service.archive_conversation("owner", cid)
+    await service.unarchive_conversation("owner", cid)
+    await service.pin_conversation("owner", cid)
+    await service.unpin_conversation("owner", cid)
+    until = datetime(2026, 9, 1, tzinfo=UTC)
+    await service.snooze_conversation("owner", cid, until=until)
+    await service.unsnooze_conversation("owner", cid)
+    await service.set_retention_exemption("owner", cid, exempt=True)
+
+    policy = await service.get_retention_policy("owner")
+    assert policy.months >= 1
+    replaced = await service.replace_retention_policy("owner", 3)
+    assert replaced.months == 3
+    preview = await service.preview_retention("owner")
+    assert preview.cutoff is not None
+
+    probe = await service.probe_harness("owner", h.id)
+    assert probe.capabilities.kind is HarnessKind.GROK
+    models = await service.get_harness_models("owner", h.id)
+    modes = await service.get_harness_modes("owner", h.id)
+    assert models == probe.capabilities.models
+    assert modes == probe.capabilities.modes
+
+    class _BoomAdapter:
+        kind = HarnessKind.GROK
+
+        async def probe(self, config: HarnessConfiguration) -> HarnessCapabilities:
+            del config
+            raise RuntimeError("native probe crashed")
+
+    service._registry.create = lambda kind: _BoomAdapter()  # type: ignore[method-assign, return-value]
+    with pytest.raises(DomainError) as exc:
+        await service.probe_harness("owner", h.id)
+    assert exc.value.code is ErrorCode.PROVIDER_INCOMPATIBLE
+
+    with pytest.raises(DomainError):
+        await service.interrupt("owner", cid)
+
+
+@pytest.mark.asyncio
+async def test_start_failure_rolls_back_and_shutdown_timeouts() -> None:
+    import asyncio
+    import time
+
+    service, _p, publisher = _service()
+
+    async def fail_acquire(_worker_id: str) -> None:
+        raise RuntimeError("lease unavailable")
+
+    service._coordinator.acquire_and_heartbeat = fail_acquire  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError):
+        await service.start("worker-fail")
+    assert service.started is False
+    assert publisher.stopped is True or publisher.started is False
+
+    async def hang() -> None:
+        await asyncio.sleep(10)
+
+    async def boom() -> None:
+        raise RuntimeError("stop failed")
+
+    deadline = time.monotonic() + 0.05
+    await TalkToHarnessesService._run_shutdown_step(hang(), deadline, "hang")  # pyright: ignore[reportPrivateUsage]
+    await TalkToHarnessesService._run_shutdown_step(boom(), deadline + 1, "boom")  # pyright: ignore[reportPrivateUsage]
+
+    async def cancellable() -> None:
+        await asyncio.sleep(10)
+
+    task = asyncio.create_task(cancellable())
+    await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await TalkToHarnessesService._run_shutdown_step(task, deadline + 1, "cancel")  # pyright: ignore[reportPrivateUsage]
