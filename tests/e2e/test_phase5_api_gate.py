@@ -11,6 +11,7 @@ import asyncio
 import json
 from datetime import UTC, datetime
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
 from django.contrib.auth import get_user_model
@@ -65,6 +66,17 @@ def service(db: Any) -> Any:
     svc = TalkToHarnessesService(persistence, registry, broker, _now, runtime)
     svc._started = True  # type: ignore[attr-defined]
     svc._worker_id = "e2e"  # type: ignore[attr-defined]
+    # Phase 5 gate exercises the authenticated API surface without a full
+    # worker recovery/probe cycle; mark readiness healthy for /ready.
+    coordinator = svc.coordinator
+    coordinator._lease_healthy = True  # type: ignore[attr-defined]
+    coordinator._heartbeat_healthy = True  # type: ignore[attr-defined]
+    coordinator._initial_recovery_complete = True  # type: ignore[attr-defined]
+    coordinator._draining = False  # type: ignore[attr-defined]
+    coordinator._claims_healthy = True  # type: ignore[attr-defined]
+    svc.processor._running = True  # type: ignore[attr-defined]
+    svc.processor._claim_task = Mock(done=Mock(return_value=False))  # type: ignore[attr-defined]
+    svc._readiness.notify_success(_now())  # type: ignore[attr-defined]
     asgi_mod._service = svc  # type: ignore[attr-defined]
 
     async def _start_broker() -> None:
@@ -89,7 +101,9 @@ def test_phase5_authenticated_conversation_gate(
 
     # Public surfaces.
     assert client.get("/api/v1/health").status_code == 200
-    assert client.get("/api/v1/ready").status_code == 200
+    ready = client.get("/api/v1/ready")
+    assert ready.status_code == 200
+    assert ready.json() == {"ready": True, "reason": "ready"}
 
     # Create harness + conversation for A.
     harness = _json(

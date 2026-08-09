@@ -9,6 +9,7 @@ from django.db import connection
 from django.http import HttpRequest, StreamingHttpResponse
 from ninja import Router
 
+from talktoharnesses.application.observability import get_observability
 from talktoharnesses.django.api.schemas import (
     ApprovalRuleBody,
     CreateConversationBody,
@@ -31,7 +32,6 @@ from talktoharnesses.domain.models import (
     CommandProjection,
     ConversationShell,
     ConversationSnapshot,
-    ErrorProjection,
     HarnessModeInfo,
     HarnessModelInfo,
     HarnessProbeProjection,
@@ -41,6 +41,7 @@ from talktoharnesses.domain.models import (
     MessageProjection,
     Page,
     PlanProjection,
+    ReadinessProjection,
     SubmitTurnResult,
     TokenProjection,
     ToolProjection,
@@ -68,8 +69,12 @@ async def health(request: HttpRequest) -> dict[str, str]:
     return {"status": "ok"}
 
 
-@router.get("/ready", auth=None, response={200: dict[str, object], 503: ErrorProjection})
-async def ready(request: HttpRequest) -> tuple[int, dict[str, object] | ErrorProjection]:
+@router.get(
+    "/ready",
+    auth=None,
+    response={200: ReadinessProjection, 503: ReadinessProjection},
+)
+async def ready(request: HttpRequest) -> tuple[int, ReadinessProjection]:
     from asgiref.sync import sync_to_async
 
     def _db_ok() -> bool:
@@ -79,19 +84,17 @@ async def ready(request: HttpRequest) -> tuple[int, dict[str, object] | ErrorPro
         except Exception:
             return False
 
+    not_ready = ReadinessProjection(ready=False, reason="not_ready")
     db_ok = await sync_to_async(_db_ok, thread_sensitive=True)()
+    if not db_ok:
+        return 503, not_ready
     try:
         service = get_service()
-        service_ok = service.started
-        # Publisher is always injected; readiness is service-started + DB.
-        _ = service.publisher
-        broker_ok = True
+        if await service.is_ready():
+            return 200, ReadinessProjection(ready=True, reason="ready")
     except Exception:
-        service_ok = False
-        broker_ok = False
-    if db_ok and service_ok and broker_ok:
-        return 200, {"status": "ready", "database": True, "service": True, "broker": True}
-    return 503, ErrorProjection(code="not_ready", message="service not ready")
+        pass
+    return 503, not_ready
 
 
 # ---------------------------------------------------------------------------
@@ -549,6 +552,8 @@ async def get_interaction_audit(request: HttpRequest, audit_id: UUID) -> Interac
 async def conversation_events(request: HttpRequest, conversation_id: UUID) -> StreamingHttpResponse:
     owner_id = _owner(request)
     last_event_id = parse_last_event_id(request.headers.get("Last-Event-ID"))
+    if request.headers.get("Last-Event-ID") is not None:
+        get_observability().record_sse_reconnect()
     service = get_service()
     await service.get_conversation(owner_id, conversation_id)
     stream = iter_sse(

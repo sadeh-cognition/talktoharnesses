@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import cast
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from talktoharnesses.application.cursors import clamp_page_limit, decode_cursor, encode_cursor
 from talktoharnesses.application.handoff import (
@@ -14,7 +14,14 @@ from talktoharnesses.application.handoff import (
     HandoffTool,
     handoff_sort_key,
 )
-from talktoharnesses.application.persistence import PruneResult, SwitchPreparation
+from talktoharnesses.application.persistence import (
+    ClaimedCommand,
+    ConversationOwnership,
+    LostLease,
+    PruneResult,
+    RecoveryAttempt,
+    SwitchPreparation,
+)
 from talktoharnesses.application.search_documents import (
     build_search_document_from_parts,
     normalize_search_terms,
@@ -28,10 +35,17 @@ from talktoharnesses.domain.enums import (
     ApprovalDecision,
     ApprovalRuleDecision,
     CommandStatus,
+    ConversationStatus,
     ErrorCode,
     InteractionKind,
     InteractionStatus,
     MessageRole,
+    ObservedDeliveryPhase,
+    ProcessStatus,
+    RecoveryAction,
+    RecoveryReasonCode,
+    RecoveryResultCode,
+    RecoveryTrigger,
     ToolOutcome,
     TurnStatus,
 )
@@ -97,10 +111,28 @@ _TERMINAL_TURN_STATUSES = (
     TurnStatus.FAILED,
     TurnStatus.OUTCOME_UNKNOWN,
 )
+_SQLITE_SUPERVISOR_SLOT = "sqlite-supervisor"
+_ACTIVE_RECOVERY_STATUSES = {
+    ConversationStatus.RUNNING,
+    ConversationStatus.WAITING,
+    ConversationStatus.BACKGROUND_ACTIVE,
+}
+_RENEWABLE_COMMAND_STATUSES = {
+    CommandStatus.CLAIMED,
+    CommandStatus.DELIVERY_STARTED,
+    CommandStatus.DELIVERED,
+}
 
 
 def _not_found(resource: str = "conversation") -> DomainError:
     return DomainError(ErrorCode.NOT_FOUND, f"{resource} not found")
+
+
+def _stale_owner(*, conversation_id: UUID | None = None) -> DomainError:
+    details: dict[str, object] = {}
+    if conversation_id is not None:
+        details["conversation_id"] = str(conversation_id)
+    return DomainError(ErrorCode.STALE_OWNER, "stale conversation owner", details=details)
 
 
 class MemoryPersistence:
@@ -128,6 +160,11 @@ class MemoryPersistence:
         self.interaction_audits: dict[UUID, InteractionAuditProjection] = {}
         self.search_docs: dict[UUID, str] = {}
         self.turn_order: dict[UUID, list[UUID]] = {}
+        # Phase 9 ownership / recovery doubles.
+        self.ownership: dict[UUID, tuple[str, int, datetime]] = {}
+        self.worker_leases: dict[str, dict[str, object]] = {}
+        self.recovery_attempts: dict[UUID, RecoveryAttempt] = {}
+        self._sqlite_mode: bool = True
 
     def seed(self, state: ConversationState) -> None:
         self.states[state.conversation.id] = state
@@ -204,13 +241,17 @@ class MemoryPersistence:
         self.accepted_queue.append(command.id)
         return command
 
-    async def claim_commands(self, worker_id: str, limit: int) -> Sequence[Command]:
-        from datetime import UTC, datetime, timedelta
-
-        claimed: list[Command] = []
+    async def claim_commands(
+        self,
+        worker_id: str,
+        limit: int,
+        *,
+        lease_duration: float,
+    ) -> Sequence[ClaimedCommand]:
+        claimed: list[ClaimedCommand] = []
         still_pending: list[UUID] = []
         now = datetime.now(UTC)
-        lease = now + timedelta(seconds=30)
+        lease = now + timedelta(seconds=lease_duration)
         candidates = list(self.accepted_queue)
         candidates.extend(
             command.id
@@ -234,6 +275,15 @@ class MemoryPersistence:
                 )
             ):
                 continue
+            fence = self._acquire_conversation_owner(
+                command.conversation_id,
+                worker_id,
+                lease_duration=lease_duration,
+                now=now,
+            )
+            if fence is None:
+                still_pending.append(command_id)
+                continue
             updated = command.model_copy(
                 update={
                     "status": CommandStatus.CLAIMED,
@@ -243,7 +293,7 @@ class MemoryPersistence:
                 }
             )
             self.commands[command_id] = updated
-            claimed.append(updated)
+            claimed.append(ClaimedCommand(command=updated, fence=fence))
         self.accepted_queue = still_pending
         return tuple(claimed)
 
@@ -251,18 +301,32 @@ class MemoryPersistence:
         self,
         command_id: UUID,
         worker_id: str,
-        expires_at: datetime,
+        *,
+        lease_duration: float,
+        fence: int | None = None,
     ) -> None:
         command = self.commands.get(command_id)
         if (
             command is None
             or command.worker_id != worker_id
-            or command.status is not CommandStatus.CLAIMED
+            or command.status not in _RENEWABLE_COMMAND_STATUSES
         ):
             raise DomainError(ErrorCode.INVALID_STATE, "command lease not found for worker")
-        self.commands[command_id] = command.model_copy(update={"lease_expires_at": expires_at})
+        if fence is not None:
+            self._require_owner(command.conversation_id, worker_id, fence)
+        self.commands[command_id] = command.model_copy(
+            update={"lease_expires_at": datetime.now(UTC) + timedelta(seconds=lease_duration)}
+        )
 
-    async def update_command(self, command: Command) -> Command:
+    async def update_command(
+        self,
+        command: Command,
+        *,
+        worker_id: str | None = None,
+        fence: int | None = None,
+    ) -> Command:
+        if worker_id is not None or fence is not None:
+            self._require_owner(command.conversation_id, worker_id, fence)
         self.commands[command.id] = command
         if command.status == CommandStatus.ACCEPTED and command.id not in self.accepted_queue:
             self.accepted_queue.append(command.id)
@@ -274,6 +338,9 @@ class MemoryPersistence:
         expected_version: int,
         state: ConversationState,
         events: Sequence[ConversationEvent],
+        *,
+        worker_id: str | None = None,
+        fence: int | None = None,
     ) -> Sequence[ConversationEvent]:
         return await self.commit_turn_batch(
             conversation_id,
@@ -281,6 +348,8 @@ class MemoryPersistence:
             state,
             events,
             (),
+            worker_id=worker_id,
+            fence=fence,
         )
 
     async def commit_turn_batch(
@@ -290,6 +359,9 @@ class MemoryPersistence:
         state: ConversationState,
         events: Sequence[ConversationEvent],
         commands: Sequence[Command] = (),
+        *,
+        worker_id: str | None = None,
+        fence: int | None = None,
     ) -> Sequence[ConversationEvent]:
         committed = await self.commit_runtime_lifecycle(
             conversation_id,
@@ -298,6 +370,8 @@ class MemoryPersistence:
             None,
             None,
             events,
+            worker_id=worker_id,
+            fence=fence,
         )
         for command in commands:
             self.commands[command.id] = command
@@ -313,7 +387,12 @@ class MemoryPersistence:
         process: ProcessRecord | None,
         launch_history_entry: LaunchSnapshot | None,
         events: Sequence[ConversationEvent],
+        *,
+        worker_id: str | None = None,
+        fence: int | None = None,
     ) -> Sequence[ConversationEvent]:
+        if worker_id is not None or fence is not None:
+            self._require_owner(conversation_id, worker_id, fence)
         current = self.states.get(conversation_id)
         if current is None:
             raise DomainError(
@@ -395,8 +474,17 @@ class MemoryPersistence:
         interaction_id: UUID,
         provider_correlation: dict[str, str] | None = None,
         request_event_sequence: int,
+        worker_id: str | None = None,
+        fence: int | None = None,
     ) -> Sequence[ConversationEvent]:
-        committed = await self.commit_turn_batch(conversation_id, expected_version, state, events)
+        committed = await self.commit_turn_batch(
+            conversation_id,
+            expected_version,
+            state,
+            events,
+            worker_id=worker_id,
+            fence=fence,
+        )
         meta = self.interaction_meta.setdefault(interaction_id, {})
         meta["provider_correlation"] = provider_correlation or {}
         meta["request_event_sequence"] = request_event_sequence
@@ -420,10 +508,14 @@ class MemoryPersistence:
         mark_policy_evaluated: bool = False,
         interaction_id: UUID | None = None,
         suppress_answer_command: bool = False,
+        worker_id: str | None = None,
+        fence: int | None = None,
     ) -> InteractionResolutionResult:
         from uuid import uuid4
 
         iid = interaction_id or answer.interaction_id
+        if worker_id is not None or fence is not None:
+            self._require_owner(conversation_id, worker_id, fence)
         if iid in self.interaction_answers and not self.interaction_answers[iid].is_draft:
             return InteractionResolutionResult(
                 answer=self.interaction_answers[iid],
@@ -492,7 +584,14 @@ class MemoryPersistence:
                 answer=answer, command=None, was_first_write=False, audit=None
             )
         if events:
-            await self.commit_turn_batch(conversation_id, expected_version, state, events)
+            await self.commit_turn_batch(
+                conversation_id,
+                expected_version,
+                state,
+                events,
+                worker_id=worker_id,
+                fence=fence,
+            )
         if create_rule is not None:
             self.approval_rules[create_rule.id] = create_rule
             deciding_rule = create_rule
@@ -544,7 +643,11 @@ class MemoryPersistence:
         *,
         expected_version: int,
         state: ConversationState,
+        worker_id: str | None = None,
+        fence: int | None = None,
     ) -> Command:
+        if worker_id is not None or fence is not None:
+            self._require_owner(conversation_id, worker_id, fence)
         meta = self.interaction_meta.setdefault(interaction_id, {})
         existing_id = meta.get("command_id")
         if isinstance(existing_id, UUID) and existing_id in self.commands:
@@ -805,6 +908,8 @@ class MemoryPersistence:
         command: Command,
         process: ProcessRecord | None = None,
         launch_history_entry: LaunchSnapshot | None = None,
+        worker_id: str | None = None,
+        fence: int | None = None,
     ) -> Sequence[ConversationEvent]:
         committed = await self.commit_runtime_lifecycle(
             conversation_id,
@@ -813,6 +918,8 @@ class MemoryPersistence:
             process,
             launch_history_entry,
             events,
+            worker_id=worker_id,
+            fence=fence,
         )
         self.commands[command.id] = command
         return committed
@@ -825,9 +932,17 @@ class MemoryPersistence:
         events: Sequence[ConversationEvent],
         *,
         command: Command,
+        worker_id: str | None = None,
+        fence: int | None = None,
     ) -> Sequence[ConversationEvent]:
         return await self.commit_turn_batch(
-            conversation_id, expected_version, state, events, (command,)
+            conversation_id,
+            expected_version,
+            state,
+            events,
+            (command,),
+            worker_id=worker_id,
+            fence=fence,
         )
 
     async def list_cleanup_conversation_ids(self) -> Sequence[UUID]:
@@ -985,7 +1100,11 @@ class MemoryPersistence:
         *,
         native_session_id: str | None,
         launch_snapshot: LaunchSnapshot | None,
+        worker_id: str | None = None,
+        fence: int | None = None,
     ) -> None:
+        if worker_id is not None or fence is not None:
+            self._require_owner(conversation_id, worker_id, fence)
         state = self._require_binding(conversation_id, expected_version)
         assert state.binding is not None
         binding = state.binding.model_copy(
@@ -995,15 +1114,449 @@ class MemoryPersistence:
                 "requires_session_recreation": False,
             }
         )
-        self.states[conversation_id] = state.model_copy(update={"binding": binding})
+        self.states[conversation_id] = state.model_copy(
+            update={
+                "binding": binding,
+                "seen_native_ids": frozenset(),
+                "seen_stream_offsets": frozenset(),
+            }
+        )
 
     async def commit_rotation_requires_recreation(
         self,
         conversation_id: UUID,
         expected_version: int,
+        *,
+        worker_id: str | None = None,
+        fence: int | None = None,
     ) -> None:
+        if worker_id is not None or fence is not None:
+            self._require_owner(conversation_id, worker_id, fence)
         state = self._require_binding(conversation_id, expected_version)
         self.states[conversation_id] = mark_requires_recreation(state, now=datetime.now(UTC)).state
+
+    async def acquire_worker_lease(
+        self,
+        worker_id: str,
+        *,
+        lease_duration: float,
+        slot: str | None = None,
+    ) -> None:
+        now = datetime.now(UTC)
+        lease_slot = _SQLITE_SUPERVISOR_SLOT if self._sqlite_mode else (slot or worker_id)
+        expires = now + timedelta(seconds=lease_duration)
+        existing = self.worker_leases.get(lease_slot)
+        if existing is not None:
+            existing_expires = cast(datetime, existing["expires_at"])
+            existing_worker = cast(str, existing["worker_id"])
+            if existing_expires >= now and existing_worker != worker_id:
+                raise DomainError(
+                    ErrorCode.WORKER_LEASE_UNAVAILABLE,
+                    "worker lease unavailable",
+                    details={"slot": lease_slot},
+                )
+            if existing_worker == worker_id and existing_expires >= now:
+                existing["heartbeat_at"] = now
+                existing["expires_at"] = expires
+                existing["draining"] = False
+                return
+        self.worker_leases[lease_slot] = {
+            "worker_id": worker_id,
+            "started_at": now,
+            "heartbeat_at": now,
+            "expires_at": expires,
+            "draining": False,
+        }
+
+    async def renew_worker_lease(self, worker_id: str, *, lease_duration: float) -> None:
+        now = datetime.now(UTC)
+        lease_slot = _SQLITE_SUPERVISOR_SLOT if self._sqlite_mode else worker_id
+        existing = self.worker_leases.get(lease_slot)
+        if (
+            existing is None
+            or cast(str, existing["worker_id"]) != worker_id
+            or cast(datetime, existing["expires_at"]) < now
+        ):
+            raise DomainError(
+                ErrorCode.WORKER_LEASE_UNAVAILABLE,
+                "worker lease unavailable",
+                details={"slot": lease_slot},
+            )
+        existing["heartbeat_at"] = now
+        existing["expires_at"] = now + timedelta(seconds=lease_duration)
+
+    async def mark_worker_draining(self, worker_id: str) -> None:
+        lease_slot = _SQLITE_SUPERVISOR_SLOT if self._sqlite_mode else worker_id
+        existing = self.worker_leases.get(lease_slot)
+        if existing is None or cast(str, existing["worker_id"]) != worker_id:
+            raise DomainError(
+                ErrorCode.WORKER_LEASE_UNAVAILABLE,
+                "worker lease unavailable",
+                details={"slot": lease_slot},
+            )
+        existing["draining"] = True
+
+    async def release_worker_lease(self, worker_id: str) -> None:
+        lease_slot = _SQLITE_SUPERVISOR_SLOT if self._sqlite_mode else worker_id
+        existing = self.worker_leases.get(lease_slot)
+        if existing is not None and cast(str, existing["worker_id"]) == worker_id:
+            del self.worker_leases[lease_slot]
+
+    async def claim_expired_conversations(
+        self,
+        worker_id: str,
+        limit: int,
+        *,
+        lease_duration: float,
+        trigger: str = RecoveryTrigger.TAKEOVER.value,
+    ) -> Sequence[ConversationOwnership]:
+        now = datetime.now(UTC)
+        lease_expires = now + timedelta(seconds=lease_duration)
+        claimed: list[ConversationOwnership] = []
+        for conversation_id, state in sorted(self.states.items(), key=lambda item: item[0]):
+            if len(claimed) >= limit:
+                break
+            if state.conversation.deleted_at is not None:
+                continue
+            ownership = self.ownership.get(conversation_id)
+            lease_expired = ownership is not None and ownership[2] < now
+            unowned_active = ownership is None and (
+                state.conversation.status in _ACTIVE_RECOVERY_STATUSES
+            )
+            expired_command_owner = any(
+                command.status
+                in {
+                    CommandStatus.CLAIMED,
+                    CommandStatus.DELIVERY_STARTED,
+                    CommandStatus.DELIVERED,
+                }
+                and (command.lease_expires_at is None or command.lease_expires_at < now)
+                for command in state.commands.values()
+            )
+            if not lease_expired and not unowned_active and not expired_command_owner:
+                continue
+            if ownership is not None and ownership[0] == worker_id and ownership[2] >= now:
+                continue
+            fence = (ownership[1] if ownership is not None else 0) + 1
+            self._mark_processes_orphaned(conversation_id, now=now)
+            for attempt_id, attempt in list(self.recovery_attempts.items()):
+                if attempt.conversation_id == conversation_id and attempt.result is None:
+                    self.recovery_attempts[attempt_id] = RecoveryAttempt(
+                        id=attempt.id,
+                        conversation_id=attempt.conversation_id,
+                        binding_id=attempt.binding_id,
+                        command_id=attempt.command_id,
+                        turn_id=attempt.turn_id,
+                        worker_id=attempt.worker_id,
+                        fence=attempt.fence,
+                        trigger=attempt.trigger,
+                        observed_delivery_phase=attempt.observed_delivery_phase,
+                        action=attempt.action,
+                        result=RecoveryResultCode.ABANDONED.value,
+                        reason_code=RecoveryReasonCode.WORKER_LOST.value,
+                        started_at=attempt.started_at,
+                        completed_at=now,
+                    )
+            binding_id = (
+                state.binding.id
+                if state.binding is not None
+                else state.conversation.current_binding_id
+            )
+            if binding_id is None:
+                raise DomainError(
+                    ErrorCode.INVALID_STATE,
+                    "active conversation missing binding for recovery",
+                    details={"conversation_id": str(conversation_id)},
+                )
+            attempt_id = uuid4()
+            self.recovery_attempts[attempt_id] = RecoveryAttempt(
+                id=attempt_id,
+                conversation_id=conversation_id,
+                binding_id=binding_id,
+                command_id=None,
+                turn_id=None,
+                worker_id=worker_id,
+                fence=fence,
+                trigger=trigger,
+                observed_delivery_phase=ObservedDeliveryPhase.NONE.value,
+                action=RecoveryAction.NO_ACTION.value,
+                result=None,
+                reason_code=RecoveryReasonCode.WORKER_LOST.value,
+                started_at=now,
+                completed_at=None,
+            )
+            self.ownership[conversation_id] = (worker_id, fence, lease_expires)
+            claimed.append(
+                ConversationOwnership(
+                    conversation_id=conversation_id,
+                    worker_id=worker_id,
+                    fence=fence,
+                    lease_expires_at=lease_expires,
+                    recovery_attempt_id=attempt_id,
+                )
+            )
+        return tuple(claimed)
+
+    async def renew_owned_conversation_leases(
+        self,
+        worker_id: str,
+        *,
+        lease_duration: float,
+    ) -> Sequence[LostLease]:
+        now = datetime.now(UTC)
+        lease_expires = now + timedelta(seconds=lease_duration)
+        lost: list[LostLease] = []
+        for conversation_id, (owner, fence, expires_at) in list(self.ownership.items()):
+            if owner != worker_id:
+                continue
+            if expires_at < now:
+                lost.append(LostLease(conversation_id=conversation_id, fence=fence))
+                del self.ownership[conversation_id]
+                continue
+            self.ownership[conversation_id] = (worker_id, fence, lease_expires)
+        return tuple(lost)
+
+    async def release_conversation_lease(
+        self,
+        conversation_id: UUID,
+        worker_id: str,
+        fence: int,
+    ) -> None:
+        self._require_owner(conversation_id, worker_id, fence)
+        self.ownership.pop(conversation_id, None)
+
+    async def complete_recovery_attempt(
+        self,
+        attempt_id: UUID,
+        *,
+        result: str,
+        reason_code: str,
+        completed_at: datetime,
+    ) -> None:
+        attempt = self.recovery_attempts.get(attempt_id)
+        if attempt is None or attempt.result is not None:
+            raise DomainError(
+                ErrorCode.INVALID_STATE,
+                "recovery attempt not found or already completed",
+                details={"attempt_id": str(attempt_id)},
+            )
+        self.recovery_attempts[attempt_id] = RecoveryAttempt(
+            id=attempt.id,
+            conversation_id=attempt.conversation_id,
+            binding_id=attempt.binding_id,
+            command_id=attempt.command_id,
+            turn_id=attempt.turn_id,
+            worker_id=attempt.worker_id,
+            fence=attempt.fence,
+            trigger=attempt.trigger,
+            observed_delivery_phase=attempt.observed_delivery_phase,
+            action=attempt.action,
+            result=result,
+            reason_code=reason_code,
+            started_at=attempt.started_at,
+            completed_at=completed_at,
+        )
+
+    async def commit_recovery_batch(
+        self,
+        conversation_id: UUID,
+        expected_version: int,
+        state: ConversationState,
+        events: Sequence[ConversationEvent],
+        commands: Sequence[Command],
+        *,
+        interrupted_turn_id: UUID | None,
+        attempt_id: UUID | None,
+        command_id: UUID | None,
+        turn_id: UUID | None,
+        trigger: str,
+        observed_delivery_phase: str,
+        action: str,
+        result: str,
+        reason_code: str,
+        completed_at: datetime,
+        worker_id: str,
+        fence: int,
+    ) -> Sequence[ConversationEvent]:
+        self._require_owner(conversation_id, worker_id, fence)
+        previous = self.states[conversation_id]
+        for interaction_id, answer in state.answers.items():
+            interaction = state.interactions.get(interaction_id)
+            if (
+                interaction is None
+                or interaction.status is not InteractionStatus.CANCELLED
+                or interaction_id in previous.answers
+            ):
+                continue
+            sequence = next(
+                event.sequence
+                for event in events
+                if event.type == "interaction_resolved"
+                and getattr(event.payload, "interaction_id", None) == interaction_id
+            )
+            await self.commit_interaction_resolution(
+                conversation_id,
+                state.conversation.owner_id,
+                expected_version,
+                state,
+                (),
+                answer,
+                resolution_event_sequence=sequence,
+                suppress_answer_command=True,
+                worker_id=worker_id,
+                fence=fence,
+            )
+        committed = await self.commit_turn_batch(
+            conversation_id,
+            expected_version,
+            state,
+            events,
+            commands,
+            worker_id=worker_id,
+            fence=fence,
+        )
+        if interrupted_turn_id is not None:
+            await self.mark_incomplete_assistant_messages_interrupted(
+                conversation_id, interrupted_turn_id
+            )
+        if attempt_id is not None:
+            await self.update_recovery_attempt(
+                attempt_id,
+                command_id=command_id,
+                turn_id=turn_id,
+                trigger=trigger,
+                observed_delivery_phase=observed_delivery_phase,
+                action=action,
+                reason_code=reason_code,
+                worker_id=worker_id,
+                fence=fence,
+            )
+            await self.complete_recovery_attempt(
+                attempt_id,
+                result=result,
+                reason_code=reason_code,
+                completed_at=completed_at,
+            )
+        return committed
+
+    async def get_open_recovery_attempt(
+        self,
+        conversation_id: UUID,
+        worker_id: str,
+        fence: int,
+    ) -> RecoveryAttempt | None:
+        open_attempts = [
+            attempt
+            for attempt in self.recovery_attempts.values()
+            if (
+                attempt.conversation_id == conversation_id
+                and attempt.worker_id == worker_id
+                and attempt.fence == fence
+                and attempt.result is None
+            )
+        ]
+        if not open_attempts:
+            return None
+        open_attempts.sort(key=lambda item: item.started_at, reverse=True)
+        return open_attempts[0]
+
+    async def update_recovery_attempt(
+        self,
+        attempt_id: UUID,
+        *,
+        command_id: UUID | None,
+        turn_id: UUID | None,
+        trigger: str,
+        observed_delivery_phase: str,
+        action: str,
+        reason_code: str,
+        worker_id: str,
+        fence: int,
+    ) -> None:
+        attempt = self.recovery_attempts[attempt_id]
+        self._require_owner(attempt.conversation_id, worker_id, fence)
+        if attempt.worker_id != worker_id or attempt.fence != fence or attempt.result is not None:
+            raise DomainError(ErrorCode.STALE_OWNER, "stale conversation owner")
+        self.recovery_attempts[attempt_id] = RecoveryAttempt(
+            id=attempt.id,
+            conversation_id=attempt.conversation_id,
+            binding_id=attempt.binding_id,
+            command_id=command_id,
+            turn_id=turn_id,
+            worker_id=attempt.worker_id,
+            fence=attempt.fence,
+            trigger=trigger,
+            observed_delivery_phase=observed_delivery_phase,
+            action=action,
+            result=None,
+            reason_code=reason_code,
+            started_at=attempt.started_at,
+            completed_at=None,
+        )
+
+    async def mark_incomplete_assistant_messages_interrupted(
+        self,
+        conversation_id: UUID,
+        turn_id: UUID,
+    ) -> None:
+        messages = self.messages.get(conversation_id, {})
+        for message_id, message in list(messages.items()):
+            if (
+                message.turn_id == turn_id
+                and message.role is MessageRole.ASSISTANT
+                and not message.completed
+            ):
+                messages[message_id] = message.model_copy(update={"interrupted": True})
+
+    def _require_owner(
+        self,
+        conversation_id: UUID,
+        worker_id: str | None,
+        fence: int | None,
+    ) -> None:
+        if worker_id is None and fence is None:
+            return
+        if worker_id is None or fence is None:
+            raise _stale_owner(conversation_id=conversation_id)
+        ownership = self.ownership.get(conversation_id)
+        now = datetime.now(UTC)
+        if (
+            ownership is None
+            or ownership[0] != worker_id
+            or ownership[1] != fence
+            or ownership[2] < now
+        ):
+            raise _stale_owner(conversation_id=conversation_id)
+
+    def _acquire_conversation_owner(
+        self,
+        conversation_id: UUID,
+        worker_id: str,
+        *,
+        lease_duration: float,
+        now: datetime,
+    ) -> int | None:
+        lease_expires = now + timedelta(seconds=lease_duration)
+        ownership = self.ownership.get(conversation_id)
+        if ownership is not None and ownership[0] != worker_id and ownership[2] >= now:
+            return None
+        if ownership is not None and ownership[0] == worker_id and ownership[2] >= now:
+            fence = ownership[1]
+        else:
+            fence = (ownership[1] if ownership is not None else 0) + 1
+            if ownership is not None and ownership[0] != worker_id:
+                self._mark_processes_orphaned(conversation_id, now=now)
+        self.ownership[conversation_id] = (worker_id, fence, lease_expires)
+        return fence
+
+    def _mark_processes_orphaned(self, conversation_id: UUID, *, now: datetime) -> None:
+        for process_id, process in list(self.processes.items()):
+            if process.conversation_id != conversation_id:
+                continue
+            if process.status in {ProcessStatus.STARTING, ProcessStatus.RUNNING}:
+                self.processes[process_id] = process.model_copy(
+                    update={"status": ProcessStatus.ORPHANED, "orphaned_at": now}
+                )
 
     def _require_binding(self, conversation_id: UUID, expected_version: int) -> ConversationState:
         state = self.states.get(conversation_id)
@@ -1102,6 +1655,19 @@ class MemoryPersistence:
             raise _not_found("harness probe")
         caps, probed_at = probe
         return HarnessProbeProjection(harness_id=harness_id, capabilities=caps, probed_at=probed_at)
+
+    async def list_configured_harnesses_for_readiness(self) -> Sequence[HarnessProjection]:
+        items = sorted(self.harnesses.values(), key=lambda h: h.id)
+        return tuple(self._harness_proj(h) for h in items)
+
+    async def has_fresh_harness_probe(
+        self,
+        *,
+        now: datetime,
+        max_age_seconds: int = 300,
+    ) -> bool:
+        cutoff = now - timedelta(seconds=max_age_seconds)
+        return any(probed_at > cutoff for _caps, probed_at in self.harness_probes.values())
 
     async def list_conversations(
         self,
@@ -1811,7 +2377,7 @@ class MemoryPersistence:
                 existing = messages.get(payload.message_id)
                 if existing is not None:
                     messages[payload.message_id] = existing.model_copy(
-                        update={"text": payload.text}
+                        update={"text": payload.text, "completed": True}
                     )
                 else:
                     messages[payload.message_id] = Message(
@@ -1819,6 +2385,7 @@ class MemoryPersistence:
                         turn_id=payload.turn_id,
                         role=MessageRole.ASSISTANT,
                         text=payload.text,
+                        completed=True,
                         created_at=event.timestamp,
                     )
             elif isinstance(payload, ToolRequestedPayload):

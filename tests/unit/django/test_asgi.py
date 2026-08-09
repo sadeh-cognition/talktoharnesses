@@ -116,7 +116,8 @@ async def test_lifespan_startup_failure_reports_failed() -> None:
     ):
         await app({"type": "lifespan"}, receive, send)
     assert sent[0]["type"] == "lifespan.startup.failed"
-    assert "boom" in sent[0]["message"]
+    assert sent[0]["message"] == "startup failed"
+    assert "boom" not in sent[0]["message"]
     with pytest.raises(DomainError):
         get_service()
 

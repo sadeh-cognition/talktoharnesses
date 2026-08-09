@@ -96,7 +96,7 @@ def _launch() -> LaunchSnapshot:
         resolved_executable="/bin/true",
         harness_version="1.2.27",
         working_directory="/tmp",
-        adapter_version="2026.8.0.dev8",
+        adapter_version="2026.8.0.dev9",
         capabilities=HarnessCapabilities(kind=HarnessKind.OPENCODE, version="1.2.27"),
     )
 

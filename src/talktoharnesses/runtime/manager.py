@@ -11,9 +11,11 @@ from datetime import UTC, datetime
 from typing import cast
 from uuid import UUID, uuid4
 
+from talktoharnesses.application.faults import FaultCallback, FaultPoint, checkpoint
+from talktoharnesses.application.observability import get_observability
 from talktoharnesses.application.persistence import Persistence
-from talktoharnesses.domain.enums import ErrorCode, ProcessStatus
-from talktoharnesses.domain.errors import DomainError
+from talktoharnesses.domain.enums import ErrorCode, HarnessKind, ProcessStatus, RecoveryReasonCode
+from talktoharnesses.domain.errors import DomainError, public_message
 from talktoharnesses.domain.events import (
     ConversationEvent,
     EventPayload,
@@ -80,6 +82,17 @@ def _is_sdk_managed(adapter: HarnessAdapter) -> bool:
     return isinstance(adapter, SdkManagedAdapter) or getattr(adapter, "sdk_managed", False) is True
 
 
+def _map_resume_reason(exc: DomainError) -> RecoveryReasonCode:
+    if exc.code is ErrorCode.PROVIDER_INCOMPATIBLE:
+        message = exc.message
+        if message == RecoveryReasonCode.RESUME_UNSUPPORTED.value:
+            return RecoveryReasonCode.RESUME_UNSUPPORTED
+        return RecoveryReasonCode.PROVIDER_INCOMPATIBLE
+    if exc.code is ErrorCode.RUNTIME_TIMEOUT:
+        return RecoveryReasonCode.RESUME_REJECTED
+    return RecoveryReasonCode.RESUME_REJECTED
+
+
 @dataclass(frozen=True)
 class _LaunchPlan:
     """Adapter and resolved spawn inputs shared by live and candidate starts."""
@@ -99,6 +112,8 @@ class ManagedRuntime:
     process: ProcessHandle | None
     process_record: ProcessRecord
     launch: LaunchSnapshot
+    worker_id: str | None = None
+    fence: int | None = None
     tasks: list[asyncio.Task[None]] = field(default_factory=_empty_tasks)
     closed: bool = False
     terminal_persisted: bool = False
@@ -120,6 +135,7 @@ class RuntimeManager:
         supervisor: ProcessSupervisor | None = None,
         clock: Callable[[], datetime] | None = None,
         redaction_patterns: tuple[str, ...] = (),
+        fault_callback: FaultCallback = None,
     ) -> None:
         self._persistence = persistence
         self._registry = registry
@@ -130,6 +146,7 @@ class RuntimeManager:
         )
         self._clock = clock or _utc_now
         self._redaction_patterns = redaction_patterns
+        self._fault_callback = fault_callback
 
         self._runtimes: dict[UUID, ManagedRuntime] = {}
         # Transient candidates keyed by their prospective binding ID.
@@ -159,6 +176,8 @@ class RuntimeManager:
         argv: tuple[str, ...],
         adapter_version: str = "0",
         executable_path: str | None = None,
+        worker_id: str | None = None,
+        fence: int | None = None,
     ) -> HarnessSession:
         """Create adapter, spawn process, start session, persist lifecycle."""
         return await self._start_request(
@@ -169,6 +188,8 @@ class RuntimeManager:
             adapter_version=adapter_version,
             executable_path=executable_path,
             resume_native_id=None,
+            worker_id=worker_id,
+            fence=fence,
         )
 
     async def resume(
@@ -181,6 +202,8 @@ class RuntimeManager:
         argv: tuple[str, ...],
         adapter_version: str = "0",
         executable_path: str | None = None,
+        worker_id: str | None = None,
+        fence: int | None = None,
     ) -> HarnessSession:
         return await self._start_request(
             conversation_id=conversation_id,
@@ -190,7 +213,315 @@ class RuntimeManager:
             adapter_version=adapter_version,
             executable_path=executable_path,
             resume_native_id=native_session_id,
+            worker_id=worker_id,
+            fence=fence,
         )
+
+    async def prepare_launch_snapshot(
+        self,
+        configuration: HarnessConfiguration,
+        *,
+        argv: tuple[str, ...] = (),
+        adapter_version: str = "0",
+        executable_path: str | None = None,
+    ) -> LaunchSnapshot:
+        """Probe and build a prospective launch snapshot without mutating bindings."""
+        plan = self._plan_launch(
+            configuration=configuration,
+            argv=argv,
+            executable_path=executable_path,
+        )
+        return await self._probe_and_build_launch(
+            plan,
+            configuration=configuration,
+            adapter_version=adapter_version,
+        )
+
+    async def resume_for_recovery(
+        self,
+        conversation_id: UUID,
+        owner_id: str,
+        configuration: HarnessConfiguration,
+        native_session_id: str,
+        *,
+        worker_id: str,
+        fence: int,
+        expected_binding_kind: HarnessKind,
+        previous_launch: LaunchSnapshot | None,
+        argv: tuple[str, ...] = (),
+        adapter_version: str = "0",
+        executable_path: str | None = None,
+    ) -> tuple[ManagedRuntime, RecoveryReasonCode]:
+        """Create a fresh local runtime and native-resume under a fence.
+
+        Never attaches to a prior PID. Commits lifecycle under the fence before
+        installing the runtime into the live map.
+        """
+        task = asyncio.current_task()
+        assert task is not None
+        async with self._global_lock:
+            if self._shutting_down:
+                raise DomainError(ErrorCode.INVALID_STATE, "runtime manager is shutting down")
+            if conversation_id not in self._runtimes:
+                self._require_capacity()
+            self._startup_tasks.add(task)
+        try:
+            async with self._lock_for(conversation_id):
+                if conversation_id in self._runtimes:
+                    raise DomainError(
+                        ErrorCode.CONVERSATION_BUSY,
+                        "conversation already has an active runtime",
+                        details={"conversation_id": str(conversation_id)},
+                    )
+                if configuration.kind != expected_binding_kind:
+                    raise DomainError(
+                        ErrorCode.INVALID_STATE,
+                        RecoveryReasonCode.INVARIANT_FAILURE.value,
+                        details={"conversation_id": str(conversation_id)},
+                    )
+                return await self._resume_for_recovery_locked(
+                    conversation_id=conversation_id,
+                    owner_id=owner_id,
+                    configuration=configuration,
+                    native_session_id=native_session_id,
+                    worker_id=worker_id,
+                    fence=fence,
+                    previous_launch=previous_launch,
+                    argv=argv,
+                    adapter_version=adapter_version,
+                    executable_path=executable_path,
+                )
+        finally:
+            async with self._global_lock:
+                self._startup_tasks.discard(task)
+
+    async def _resume_for_recovery_locked(
+        self,
+        *,
+        conversation_id: UUID,
+        owner_id: str,
+        configuration: HarnessConfiguration,
+        native_session_id: str,
+        worker_id: str,
+        fence: int,
+        previous_launch: LaunchSnapshot | None,
+        argv: tuple[str, ...],
+        adapter_version: str,
+        executable_path: str | None,
+    ) -> tuple[ManagedRuntime, RecoveryReasonCode]:
+        state = await self._persistence.get_worker_snapshot(conversation_id)
+        if state.binding is None:
+            raise DomainError(ErrorCode.INVALID_STATE, "conversation has no binding")
+        binding = state.binding
+        plan = self._plan_launch(
+            configuration=configuration,
+            argv=argv,
+            executable_path=executable_path,
+        )
+        try:
+            launch = await self._probe_and_build_launch(
+                plan,
+                configuration=configuration,
+                adapter_version=adapter_version,
+            )
+        except DomainError as exc:
+            raise DomainError(
+                ErrorCode.PROVIDER_INCOMPATIBLE,
+                RecoveryReasonCode.PROVIDER_INCOMPATIBLE.value,
+                details={"conversation_id": str(conversation_id)},
+            ) from exc
+
+        if not launch.capabilities.supports_resume:
+            raise DomainError(
+                ErrorCode.PROVIDER_INCOMPATIBLE,
+                RecoveryReasonCode.RESUME_UNSUPPORTED.value,
+                details={"conversation_id": str(conversation_id)},
+            )
+
+        reason = (
+            RecoveryReasonCode.UNCHANGED_LAUNCH
+            if previous_launch is not None
+            and previous_launch.resolved_executable == launch.resolved_executable
+            and previous_launch.harness_version == launch.harness_version
+            and previous_launch.adapter_version == launch.adapter_version
+            else RecoveryReasonCode.EXECUTABLE_CHANGED
+        )
+
+        process_id = uuid4()
+        process_record = ProcessRecord(
+            id=process_id,
+            conversation_id=conversation_id,
+            binding_id=binding.id,
+            status=ProcessStatus.STARTING,
+        )
+        await self._persistence.commit_runtime_lifecycle(
+            conversation_id,
+            state.conversation.version,
+            state,
+            process_record,
+            None,
+            (),
+            worker_id=worker_id,
+            fence=fence,
+        )
+        state = await self._persistence.get_worker_snapshot(conversation_id)
+
+        handle: ProcessHandle | None = None
+        try:
+            if not plan.sdk_managed:
+                handle = await self._spawn_process(
+                    plan,
+                    conversation_id=conversation_id,
+                    binding_id=binding.id,
+                    process_id=process_id,
+                    launch=launch,
+                )
+            process_record = process_record.model_copy(
+                update={
+                    "status": ProcessStatus.RUNNING,
+                    "pid": handle.pid if handle is not None else None,
+                    "started_at": self._clock(),
+                }
+            )
+            assert state.binding is not None
+            state = state.model_copy(
+                update={"binding": state.binding.model_copy(update={"launch_snapshot": launch})}
+            )
+            await self._persistence.commit_runtime_lifecycle(
+                conversation_id,
+                state.conversation.version,
+                state,
+                process_record,
+                launch,
+                (),
+                worker_id=worker_id,
+                fence=fence,
+            )
+            state = await self._persistence.get_worker_snapshot(conversation_id)
+
+            try:
+                session = await asyncio.wait_for(
+                    plan.adapter.resume(
+                        ResumeSessionRequest(
+                            conversation_id=conversation_id,
+                            binding_id=binding.id,
+                            configuration=configuration,
+                            native_session_id=native_session_id,
+                            launch=launch,
+                        )
+                    ),
+                    timeout=self._policy.start_resume_timeout,
+                )
+            except TimeoutError as exc:
+                raise DomainError(
+                    ErrorCode.RUNTIME_TIMEOUT,
+                    RecoveryReasonCode.RESUME_REJECTED.value,
+                    details={"conversation_id": str(conversation_id)},
+                ) from exc
+            except DomainError as exc:
+                mapped = _map_resume_reason(exc)
+                raise DomainError(
+                    exc.code,
+                    mapped.value,
+                    details={"conversation_id": str(conversation_id)},
+                ) from exc
+
+            result = resume_session(
+                state,
+                now=self._clock(),
+                native_session_id=session.native_session_id or native_session_id,
+                launch=launch,
+            )
+            await self._persistence.commit_runtime_lifecycle(
+                conversation_id,
+                state.conversation.version,
+                result.state,
+                process_record,
+                None,
+                result.events,
+                worker_id=worker_id,
+                fence=fence,
+            )
+            get_observability().observe_committed_events(result.events, state=result.state)
+            await checkpoint(self._fault_callback, FaultPoint.AFTER_NATIVE_RESUME_COMMIT)
+
+            managed = ManagedRuntime(
+                conversation_id=conversation_id,
+                owner_id=owner_id,
+                adapter=plan.adapter,
+                session=session,
+                process=handle,
+                process_record=process_record,
+                launch=launch,
+                worker_id=worker_id,
+                fence=fence,
+            )
+            if handle is not None:
+                pump = asyncio.create_task(
+                    self._lifecycle_pump(managed),
+                    name=f"lifecycle-{conversation_id}",
+                )
+                managed.tasks.append(pump)
+            self._runtimes[conversation_id] = managed
+            self._arm_idle_timer(conversation_id)
+            return managed, reason
+        except BaseException:
+            if handle is not None:
+                with contextlib.suppress(Exception):
+                    await handle.force_terminate(reason="recovery_resume_failure")
+            elif plan.sdk_managed:
+                await self._rollback_sdk_startup(
+                    plan.adapter,
+                    conversation_id=conversation_id,
+                    binding_id=binding.id,
+                    configuration=configuration,
+                )
+            raise
+
+    async def recovery_handoff_fallback(
+        self,
+        conversation_id: UUID,
+        owner_id: str,
+        binding_id: UUID,
+        configuration: HarnessConfiguration,
+        handoff_text: str,
+        *,
+        worker_id: str,
+        fence: int,
+    ) -> ManagedRuntime | None:
+        """Start/seed a candidate for recovery fallback; caller commits rotation.
+
+        On rejection closes the candidate and marks requires_session_recreation.
+        """
+        try:
+            candidate = await self.start_candidate(
+                conversation_id=conversation_id,
+                owner_id=owner_id,
+                binding_id=binding_id,
+                configuration=configuration,
+                worker_id=worker_id,
+                fence=fence,
+            )
+            await self.seed_candidate(candidate, handoff_text)
+            await checkpoint(self._fault_callback, FaultPoint.AFTER_FALLBACK_SEED)
+            return candidate
+        except Exception:
+            with contextlib.suppress(Exception):
+                await self.close_candidate(binding_id)
+            try:
+                state = await self._persistence.get_worker_snapshot(conversation_id)
+                await self._persistence.commit_rotation_requires_recreation(
+                    conversation_id,
+                    state.conversation.version,
+                    worker_id=worker_id,
+                    fence=fence,
+                )
+            except Exception:
+                logger.warning(
+                    "recovery_fallback_recreation_flag_failed conversation=%s",
+                    conversation_id,
+                )
+            return None
 
     async def _start_request(
         self,
@@ -202,6 +533,8 @@ class RuntimeManager:
         adapter_version: str,
         executable_path: str | None,
         resume_native_id: str | None,
+        worker_id: str | None,
+        fence: int | None,
     ) -> HarnessSession:
         task = asyncio.current_task()
         assert task is not None
@@ -229,6 +562,8 @@ class RuntimeManager:
                     adapter_version=adapter_version,
                     executable_path=executable_path,
                     resume_native_id=resume_native_id,
+                    worker_id=worker_id,
+                    fence=fence,
                 )
         finally:
             async with self._global_lock:
@@ -244,6 +579,8 @@ class RuntimeManager:
         adapter_version: str,
         executable_path: str | None,
         resume_native_id: str | None,
+        worker_id: str | None,
+        fence: int | None,
     ) -> HarnessSession:
         state = await self._persistence.get_snapshot(conversation_id, owner_id)
         if state.binding is None:
@@ -273,6 +610,8 @@ class RuntimeManager:
                 process=process_record,
                 launch_history_entry=None,
                 events=(),
+                worker_id=worker_id,
+                fence=fence,
             )
             state = await self._persistence.get_snapshot(conversation_id, owner_id)
         except DomainError:
@@ -311,6 +650,8 @@ class RuntimeManager:
                 process=process_record,
                 launch_history_entry=launch,
                 events=(),
+                worker_id=worker_id,
+                fence=fence,
             )
             state = await self._persistence.get_snapshot(conversation_id, owner_id)
 
@@ -367,6 +708,8 @@ class RuntimeManager:
                         process=failed_record,
                         launch_history_entry=None,
                         events=(),
+                        worker_id=worker_id,
+                        fence=fence,
                     )
                     state = await self._persistence.get_snapshot(conversation_id, owner_id)
                     process_id = uuid4()
@@ -381,6 +724,8 @@ class RuntimeManager:
                         process=process_record,
                         launch_history_entry=None,
                         events=(),
+                        worker_id=worker_id,
+                        fence=fence,
                     )
                     state = await self._persistence.get_snapshot(conversation_id, owner_id)
                     retry_argv = tuple(str(part) for part in retry_argv_obj)
@@ -405,6 +750,8 @@ class RuntimeManager:
                         process=process_record,
                         launch_history_entry=None,
                         events=(),
+                        worker_id=worker_id,
+                        fence=fence,
                     )
                     state = await self._persistence.get_snapshot(conversation_id, owner_id)
 
@@ -430,7 +777,10 @@ class RuntimeManager:
                 process_record,
                 None,
                 result.events,
+                worker_id=worker_id,
+                fence=fence,
             )
+            get_observability().observe_committed_events(result.events, state=result.state)
             state = await self._persistence.get_snapshot(conversation_id, owner_id)
 
             managed = ManagedRuntime(
@@ -441,6 +791,8 @@ class RuntimeManager:
                 process=handle,
                 process_record=process_record,
                 launch=launch,
+                worker_id=worker_id,
+                fence=fence,
             )
             if handle is not None:
                 pump = asyncio.create_task(
@@ -472,6 +824,8 @@ class RuntimeManager:
                         handle,
                         ErrorCode.RUNTIME_TIMEOUT.value,
                         "session startup cancelled during shutdown",
+                        worker_id=worker_id,
+                        fence=fence,
                     )
                 )
             elif sdk_managed:
@@ -483,6 +837,8 @@ class RuntimeManager:
                         None,
                         ErrorCode.RUNTIME_TIMEOUT.value,
                         "session startup cancelled during shutdown",
+                        worker_id=worker_id,
+                        fence=fence,
                     )
                 )
             raise
@@ -503,6 +859,8 @@ class RuntimeManager:
                 handle,
                 ErrorCode.RUNTIME_TIMEOUT.value,
                 "session start/resume timed out",
+                worker_id=worker_id,
+                fence=fence,
             )
             raise DomainError(
                 ErrorCode.RUNTIME_TIMEOUT,
@@ -525,10 +883,12 @@ class RuntimeManager:
                 process_record,
                 handle,
                 exc.code.value,
-                exc.message,
+                public_message(exc.code),
+                worker_id=worker_id,
+                fence=fence,
             )
             raise
-        except Exception as exc:
+        except Exception:
             if sdk_managed:
                 await self._rollback_sdk_startup(
                     adapter,
@@ -544,7 +904,9 @@ class RuntimeManager:
                 process_record,
                 handle,
                 ErrorCode.INVALID_STATE.value,
-                str(exc),
+                public_message(ErrorCode.INVALID_STATE),
+                worker_id=worker_id,
+                fence=fence,
             )
             raise
 
@@ -577,6 +939,9 @@ class RuntimeManager:
         handle: ProcessHandle | None,
         error_code: str,
         message: str,
+        *,
+        worker_id: str | None = None,
+        fence: int | None = None,
     ) -> None:
         while True:
             try:
@@ -603,7 +968,10 @@ class RuntimeManager:
                     record,
                     None,
                     result.events,
+                    worker_id=worker_id,
+                    fence=fence,
                 )
+                get_observability().observe_committed_events(result.events, state=result.state)
                 return
             except DomainError as exc:
                 if exc.code is ErrorCode.OPTIMISTIC_CONFLICT:
@@ -619,6 +987,8 @@ class RuntimeManager:
         process: ProcessRecord,
         launch_history_entry: LaunchSnapshot | None,
         events: tuple[ConversationEvent, ...],
+        worker_id: str | None = None,
+        fence: int | None = None,
     ) -> None:
         await self._persistence.commit_runtime_lifecycle(
             state.conversation.id,
@@ -627,7 +997,10 @@ class RuntimeManager:
             process,
             launch_history_entry,
             events,
+            worker_id=worker_id,
+            fence=fence,
         )
+        get_observability().observe_committed_events(events, state=state)
 
     def _plan_launch(
         self,
@@ -744,6 +1117,8 @@ class RuntimeManager:
         argv: tuple[str, ...] = (),
         adapter_version: str = "0",
         executable_path: str | None = None,
+        worker_id: str | None = None,
+        fence: int | None = None,
     ) -> ManagedRuntime:
         """Start a transient runtime with a new native session for ``binding_id``.
 
@@ -835,6 +1210,8 @@ class RuntimeManager:
                 started_at=self._clock(),
             ),
             launch=launch,
+            worker_id=worker_id,
+            fence=fence,
         )
         self._candidates[binding_id] = managed
         return managed
@@ -1102,12 +1479,15 @@ class RuntimeManager:
                     process,
                     None,
                     events,
+                    worker_id=managed.worker_id,
+                    fence=managed.fence,
                 )
             except DomainError as exc:
                 if exc.code is ErrorCode.OPTIMISTIC_CONFLICT:
                     continue
                 raise
             managed.process_record = process
+            get_observability().observe_committed_events(events, state=new_state)
             if isinstance(event, ProcessStderrTruncatedEvent):
                 managed.stderr_truncation_persisted = True
             return
@@ -1335,12 +1715,18 @@ class RuntimeManager:
                     process,
                     None,
                     prior_events + process_events + session_events,
+                    worker_id=managed.worker_id,
+                    fence=managed.fence,
                 )
             except DomainError as exc:
                 if exc.code is ErrorCode.OPTIMISTIC_CONFLICT:
                     continue
                 raise
             managed.process_record = process
+            get_observability().observe_committed_events(
+                prior_events + process_events + session_events,
+                state=new_state,
+            )
             managed.terminal_persisted = True
             if prior_events:
                 managed.stderr_truncation_persisted = True
@@ -1399,10 +1785,11 @@ class RuntimeManager:
         if not replaced:
             self._runtimes.pop(managed.conversation_id, None)
 
-    async def shutdown(self) -> None:
+    async def shutdown(self, *, deadline: float | None = None) -> None:
         """Idempotent shutdown: reject new runtimes, interrupt, then force-kill."""
         loop = asyncio.get_running_loop()
-        deadline = loop.time() + self._policy.shutdown_budget
+        if deadline is None:
+            deadline = loop.time() + self._policy.shutdown_budget
         force_reserve = min(
             self._policy.terminate_escalation + 0.25,
             self._policy.shutdown_budget / 2,

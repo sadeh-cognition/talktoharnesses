@@ -68,6 +68,45 @@ class SwitchPreparation:
     handoff: HandoffDocument
 
 
+@dataclass(frozen=True, slots=True)
+class ClaimedCommand:
+    command: Command
+    fence: int
+
+
+@dataclass(frozen=True, slots=True)
+class ConversationOwnership:
+    conversation_id: UUID
+    worker_id: str
+    fence: int
+    lease_expires_at: datetime
+    recovery_attempt_id: UUID | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RecoveryAttempt:
+    id: UUID
+    conversation_id: UUID
+    binding_id: UUID
+    command_id: UUID | None
+    turn_id: UUID | None
+    worker_id: str
+    fence: int
+    trigger: str
+    observed_delivery_phase: str
+    action: str
+    result: str | None
+    reason_code: str
+    started_at: datetime
+    completed_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class LostLease:
+    conversation_id: UUID
+    fence: int
+
+
 class Persistence(Protocol):
     """Injected durable state boundary required for all execution paths.
 
@@ -92,20 +131,34 @@ class Persistence(Protocol):
         """Accept a command idempotently by ``(conversation_id, idempotency_key)``."""
         ...
 
-    async def claim_commands(self, worker_id: str, limit: int) -> Sequence[Command]:
-        """Claim accepted work for a worker under lease semantics."""
+    async def claim_commands(
+        self,
+        worker_id: str,
+        limit: int,
+        *,
+        lease_duration: float,
+    ) -> Sequence[ClaimedCommand]:
+        """Claim accepted work after acquiring/renewing conversation ownership."""
         ...
 
     async def renew_command_lease(
         self,
         command_id: UUID,
         worker_id: str,
-        expires_at: datetime,
+        *,
+        lease_duration: float,
+        fence: int | None = None,
     ) -> None:
-        """Extend a claimed command lease owned by ``worker_id``."""
+        """Extend a claimed/in-flight command lease owned by ``worker_id``."""
         ...
 
-    async def update_command(self, command: Command) -> Command:
+    async def update_command(
+        self,
+        command: Command,
+        *,
+        worker_id: str | None = None,
+        fence: int | None = None,
+    ) -> Command:
         """Update command delivery/settlement fields."""
         ...
 
@@ -115,6 +168,9 @@ class Persistence(Protocol):
         expected_version: int,
         state: ConversationState,
         events: Sequence[ConversationEvent],
+        *,
+        worker_id: str | None = None,
+        fence: int | None = None,
     ) -> Sequence[ConversationEvent]:
         """Atomically persist projection state and conversation events."""
         ...
@@ -126,6 +182,9 @@ class Persistence(Protocol):
         state: ConversationState,
         events: Sequence[ConversationEvent],
         commands: Sequence[Command] = (),
+        *,
+        worker_id: str | None = None,
+        fence: int | None = None,
     ) -> Sequence[ConversationEvent]:
         """Atomically persist aggregate, events, and command rows (no process)."""
         ...
@@ -138,6 +197,9 @@ class Persistence(Protocol):
         process: ProcessRecord | None,
         launch_history_entry: LaunchSnapshot | None,
         events: Sequence[ConversationEvent],
+        *,
+        worker_id: str | None = None,
+        fence: int | None = None,
     ) -> Sequence[ConversationEvent]:
         """Atomically update aggregate, process record/tail, launch history, events.
 
@@ -145,6 +207,125 @@ class Persistence(Protocol):
         Sequence allocation uses the same conversation-local scheme as
         ``commit_event_batch``.
         """
+        ...
+
+    async def acquire_worker_lease(
+        self,
+        worker_id: str,
+        *,
+        lease_duration: float,
+        slot: str | None = None,
+    ) -> None:
+        """Acquire the process worker lease (SQLite singleton or per-worker)."""
+        ...
+
+    async def renew_worker_lease(self, worker_id: str, *, lease_duration: float) -> None:
+        """Heartbeat-renew the process worker lease owned by ``worker_id``."""
+        ...
+
+    async def mark_worker_draining(self, worker_id: str) -> None:
+        """Mark the process worker lease as draining."""
+        ...
+
+    async def release_worker_lease(self, worker_id: str) -> None:
+        """Release the process worker lease owned by ``worker_id``."""
+        ...
+
+    async def claim_expired_conversations(
+        self,
+        worker_id: str,
+        limit: int,
+        *,
+        lease_duration: float,
+        trigger: str = "takeover",
+    ) -> Sequence[ConversationOwnership]:
+        """Take over expired active conversations and start recovery attempts."""
+        ...
+
+    async def renew_owned_conversation_leases(
+        self,
+        worker_id: str,
+        *,
+        lease_duration: float,
+    ) -> Sequence[LostLease]:
+        """Renew conversation leases owned by ``worker_id``; return lost fences."""
+        ...
+
+    async def release_conversation_lease(
+        self,
+        conversation_id: UUID,
+        worker_id: str,
+        fence: int,
+    ) -> None:
+        """Release an idle conversation lease when ownership still matches."""
+        ...
+
+    async def complete_recovery_attempt(
+        self,
+        attempt_id: UUID,
+        *,
+        result: str,
+        reason_code: str,
+        completed_at: datetime,
+    ) -> None:
+        """Mark an in-progress recovery attempt terminal with fixed codes."""
+        ...
+
+    async def commit_recovery_batch(
+        self,
+        conversation_id: UUID,
+        expected_version: int,
+        state: ConversationState,
+        events: Sequence[ConversationEvent],
+        commands: Sequence[Command],
+        *,
+        interrupted_turn_id: UUID | None,
+        attempt_id: UUID | None,
+        command_id: UUID | None,
+        turn_id: UUID | None,
+        trigger: str,
+        observed_delivery_phase: str,
+        action: str,
+        result: str,
+        reason_code: str,
+        completed_at: datetime,
+        worker_id: str,
+        fence: int,
+    ) -> Sequence[ConversationEvent]:
+        """Atomically persist fenced recovery state, suppression, and attempt metadata."""
+        ...
+
+    async def get_open_recovery_attempt(
+        self,
+        conversation_id: UUID,
+        worker_id: str,
+        fence: int,
+    ) -> RecoveryAttempt | None:
+        """Return the unfinished recovery attempt for a fenced owner, if any."""
+        ...
+
+    async def update_recovery_attempt(
+        self,
+        attempt_id: UUID,
+        *,
+        command_id: UUID | None,
+        turn_id: UUID | None,
+        trigger: str,
+        observed_delivery_phase: str,
+        action: str,
+        reason_code: str,
+        worker_id: str,
+        fence: int,
+    ) -> None:
+        """Persist the classifier decision while fenced ownership is current."""
+        ...
+
+    async def mark_incomplete_assistant_messages_interrupted(
+        self,
+        conversation_id: UUID,
+        turn_id: UUID,
+    ) -> None:
+        """Mark incomplete assistant messages for ``turn_id`` as interrupted."""
         ...
 
     async def replay(
@@ -167,6 +348,8 @@ class Persistence(Protocol):
         interaction_id: UUID,
         provider_correlation: dict[str, str] | None = None,
         request_event_sequence: int,
+        worker_id: str | None = None,
+        fence: int | None = None,
     ) -> Sequence[ConversationEvent]:
         """Persist request transition, private correlation, and request event sequence."""
         ...
@@ -189,6 +372,8 @@ class Persistence(Protocol):
         mark_policy_evaluated: bool = False,
         interaction_id: UUID | None = None,
         suppress_answer_command: bool = False,
+        worker_id: str | None = None,
+        fence: int | None = None,
     ) -> InteractionResolutionResult:
         """Atomic first-write-wins resolution with optional rule create and audit.
 
@@ -207,6 +392,8 @@ class Persistence(Protocol):
         *,
         expected_version: int,
         state: ConversationState,
+        worker_id: str | None = None,
+        fence: int | None = None,
     ) -> Command:
         """Create or return the unique answer_interaction command after publication."""
         ...
@@ -327,6 +514,8 @@ class Persistence(Protocol):
         command: Command,
         process: ProcessRecord | None = None,
         launch_history_entry: LaunchSnapshot | None = None,
+        worker_id: str | None = None,
+        fence: int | None = None,
     ) -> Sequence[ConversationEvent]:
         """Atomically commit a successful harness switch.
 
@@ -346,6 +535,8 @@ class Persistence(Protocol):
         events: Sequence[ConversationEvent],
         *,
         command: Command,
+        worker_id: str | None = None,
+        fence: int | None = None,
     ) -> Sequence[ConversationEvent]:
         """Atomically commit a failed harness switch against the unchanged binding.
 
@@ -382,6 +573,8 @@ class Persistence(Protocol):
         *,
         native_session_id: str | None,
         launch_snapshot: LaunchSnapshot | None,
+        worker_id: str | None = None,
+        fence: int | None = None,
     ) -> None:
         """Commit successful post-prune rotation.
 
@@ -394,6 +587,9 @@ class Persistence(Protocol):
         self,
         conversation_id: UUID,
         expected_version: int,
+        *,
+        worker_id: str | None = None,
+        fence: int | None = None,
     ) -> None:
         """Mark the active binding as requiring recreation after failed rotation.
 
@@ -450,6 +646,19 @@ class Persistence(Protocol):
         owner_id: str,
     ) -> HarnessProbeProjection:
         """Return the last successful probe projection for an owned harness."""
+        ...
+
+    async def list_configured_harnesses_for_readiness(self) -> Sequence[HarnessProjection]:
+        """All configured harnesses ordered by harness_id (no owner filter)."""
+        ...
+
+    async def has_fresh_harness_probe(
+        self,
+        *,
+        now: datetime,
+        max_age_seconds: int = 300,
+    ) -> bool:
+        """True when any harness has a successful probe within the freshness window."""
         ...
 
     async def list_conversations(

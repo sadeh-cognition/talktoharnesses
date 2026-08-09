@@ -111,7 +111,7 @@ def _launch() -> LaunchSnapshot:
     return LaunchSnapshot(
         harness_version="0.144.4",
         working_directory="/tmp",
-        adapter_version="2026.8.0.dev8",
+        adapter_version="2026.8.0.dev9",
         capabilities=HarnessCapabilities(kind=HarnessKind.CODEX, version="0.144.4"),
     )
 

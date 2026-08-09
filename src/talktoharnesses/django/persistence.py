@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import json
 from collections.abc import Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TypeVar, cast
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from asgiref.sync import sync_to_async
 from django.db import connection, models, transaction
+from django.utils.dateparse import parse_datetime
 from pydantic import BaseModel
 
 from talktoharnesses.application.cursors import clamp_page_limit, encode_cursor
@@ -19,7 +20,14 @@ from talktoharnesses.application.handoff import (
     HandoffTool,
     handoff_sort_key,
 )
-from talktoharnesses.application.persistence import PruneResult, SwitchPreparation
+from talktoharnesses.application.persistence import (
+    ClaimedCommand,
+    ConversationOwnership,
+    LostLease,
+    PruneResult,
+    RecoveryAttempt,
+    SwitchPreparation,
+)
 from talktoharnesses.application.search_documents import normalize_search_terms
 from talktoharnesses.domain.approval_matching import (
     InteractionMatchContext,
@@ -31,11 +39,18 @@ from talktoharnesses.domain.enums import (
     ApprovalDecision,
     ApprovalRuleDecision,
     CommandStatus,
+    ConversationStatus,
     ErrorCode,
     HarnessKind,
     InteractionKind,
     InteractionStatus,
     MessageRole,
+    ObservedDeliveryPhase,
+    ProcessStatus,
+    RecoveryAction,
+    RecoveryReasonCode,
+    RecoveryResultCode,
+    RecoveryTrigger,
     ToolOutcome,
     TurnStatus,
 )
@@ -91,9 +106,11 @@ from .models import (
     LaunchHistory,
     MessageRecord,
     PlanRecord,
+    RecoveryAttemptRecord,
     RuntimeProcess,
     ToolRecord,
     TurnRecord,
+    WorkerLeaseRecord,
 )
 from .projections import (
     activity_from_row,
@@ -110,6 +127,18 @@ from .projections import (
     shell_from_row,
     tool_from_row,
     turn_from_row,
+)
+
+_SQLITE_SUPERVISOR_SLOT = "sqlite-supervisor"
+_ACTIVE_RECOVERY_STATUSES = (
+    ConversationStatus.RUNNING.value,
+    ConversationStatus.WAITING.value,
+    ConversationStatus.BACKGROUND_ACTIVE.value,
+)
+_RENEWABLE_COMMAND_STATUSES = (
+    CommandStatus.CLAIMED.value,
+    CommandStatus.DELIVERY_STARTED.value,
+    CommandStatus.DELIVERED.value,
 )
 
 
@@ -192,6 +221,38 @@ def _conflict(expected: int, actual: int) -> DomainError:
         "optimistic concurrency conflict",
         details={"expected": expected, "actual": actual},
     )
+
+
+def _db_now() -> datetime:
+    """Read the database clock used by all lease comparisons and expiries."""
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT statement_timestamp()"
+            if connection.vendor == "postgresql"
+            else "SELECT CURRENT_TIMESTAMP"
+        )
+        value = cursor.fetchone()[0]
+    if isinstance(value, datetime):
+        return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+    parsed = parse_datetime(str(value))
+    if parsed is None:
+        raise RuntimeError("database returned an invalid timestamp")
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+
+def _stale_owner(*, conversation_id: UUID | None = None) -> DomainError:
+    details: dict[str, object] = {}
+    if conversation_id is not None:
+        details["conversation_id"] = str(conversation_id)
+    return DomainError(ErrorCode.STALE_OWNER, "stale conversation owner", details=details)
+
+
+def mark_processes_orphaned(conversation_id: UUID, *, now: datetime) -> None:
+    """Mark starting/running process incarnations orphaned on takeover."""
+    RuntimeProcess.objects.filter(
+        conversation_id=conversation_id,
+        status__in=(ProcessStatus.STARTING.value, ProcessStatus.RUNNING.value),
+    ).update(status=ProcessStatus.ORPHANED.value, orphaned_at=now)
 
 
 def _rule_projection(rule: ApprovalRule) -> ApprovalRuleProjection:
@@ -367,28 +428,48 @@ class DjangoPersistence:
         )
         return command if created else _load(Command, row.data)
 
-    async def claim_commands(self, worker_id: str, limit: int) -> Sequence[Command]:
-        return await sync_to_async(self._claim_commands, thread_sensitive=True)(worker_id, limit)
+    async def claim_commands(
+        self,
+        worker_id: str,
+        limit: int,
+        *,
+        lease_duration: float,
+    ) -> Sequence[ClaimedCommand]:
+        return await sync_to_async(self._claim_commands, thread_sensitive=True)(
+            worker_id, limit, lease_duration
+        )
 
     @transaction.atomic
-    def _claim_commands(self, worker_id: str, limit: int) -> tuple[Command, ...]:
-        from datetime import UTC, datetime, timedelta
-
-        now = datetime.now(UTC)
-        lease_expires = now + timedelta(seconds=30)
+    def _claim_commands(
+        self,
+        worker_id: str,
+        limit: int,
+        lease_duration: float,
+    ) -> tuple[ClaimedCommand, ...]:
+        now = _db_now()
+        lease_expires = now + timedelta(seconds=lease_duration)
         query = CommandRecord.objects.filter(
             models.Q(status=CommandStatus.ACCEPTED.value)
             | models.Q(
                 status=CommandStatus.CLAIMED.value,
                 lease_expires_at__lt=now,
+                data__delivery_started_at=None,
             )
         ).order_by("command_id")
         if connection.vendor == "postgresql":
             query = query.select_for_update(skip_locked=True)
         else:
             query = query.select_for_update()
-        claimed: list[Command] = []
+        claimed: list[ClaimedCommand] = []
         for row in query[:limit]:
+            fence = self._acquire_conversation_owner(
+                row.conversation_id,
+                worker_id,
+                lease_duration=lease_duration,
+                now=now,
+            )
+            if fence is None:
+                continue
             stored = _load(Command, row.data)
             command = stored.model_copy(
                 update={
@@ -403,41 +484,63 @@ class DjangoPersistence:
             row.lease_expires_at = lease_expires
             row.data = _json(command)
             row.save(update_fields=("status", "worker_id", "lease_expires_at", "data"))
-            claimed.append(command)
+            claimed.append(ClaimedCommand(command=command, fence=fence))
         return tuple(claimed)
 
     async def renew_command_lease(
         self,
         command_id: UUID,
         worker_id: str,
-        expires_at: datetime,
+        *,
+        lease_duration: float,
+        fence: int | None = None,
     ) -> None:
         await sync_to_async(self._renew_command_lease, thread_sensitive=True)(
-            command_id, worker_id, expires_at
+            command_id, worker_id, lease_duration, fence
         )
 
+    @transaction.atomic
     def _renew_command_lease(
         self,
         command_id: UUID,
         worker_id: str,
-        expires_at: datetime,
+        lease_duration: float,
+        fence: int | None,
     ) -> None:
+        expires_at = _db_now() + timedelta(seconds=lease_duration)
         row = CommandRecord.objects.filter(
             command_id=command_id,
             worker_id=worker_id,
-            status=CommandStatus.CLAIMED.value,
+            status__in=_RENEWABLE_COMMAND_STATUSES,
         ).first()
         if row is None:
             raise DomainError(ErrorCode.INVALID_STATE, "command lease not found for worker")
+        if fence is not None:
+            self._require_conversation_owner(row.conversation_id, worker_id, fence)
         command = _load(Command, row.data).model_copy(update={"lease_expires_at": expires_at})
         row.lease_expires_at = expires_at
         row.data = _json(command)
         row.save(update_fields=("lease_expires_at", "data"))
 
-    async def update_command(self, command: Command) -> Command:
-        return await sync_to_async(self._update_command, thread_sensitive=True)(command)
+    async def update_command(
+        self,
+        command: Command,
+        *,
+        worker_id: str | None = None,
+        fence: int | None = None,
+    ) -> Command:
+        return await sync_to_async(self._update_command, thread_sensitive=True)(
+            command, worker_id, fence
+        )
 
-    def _update_command(self, command: Command) -> Command:
+    def _update_command(
+        self,
+        command: Command,
+        worker_id: str | None,
+        fence: int | None,
+    ) -> Command:
+        if worker_id is not None or fence is not None:
+            self._require_conversation_owner(command.conversation_id, worker_id, fence)
         updated = CommandRecord.objects.filter(command_id=command.id).update(
             **self._command_values(command)
         )
@@ -451,6 +554,9 @@ class DjangoPersistence:
         expected_version: int,
         state: ConversationState,
         events: Sequence[ConversationEvent],
+        *,
+        worker_id: str | None = None,
+        fence: int | None = None,
     ) -> Sequence[ConversationEvent]:
         return await self.commit_turn_batch(
             conversation_id,
@@ -458,6 +564,8 @@ class DjangoPersistence:
             state,
             events,
             (),
+            worker_id=worker_id,
+            fence=fence,
         )
 
     async def commit_turn_batch(
@@ -467,6 +575,9 @@ class DjangoPersistence:
         state: ConversationState,
         events: Sequence[ConversationEvent],
         commands: Sequence[Command] = (),
+        *,
+        worker_id: str | None = None,
+        fence: int | None = None,
     ) -> Sequence[ConversationEvent]:
         return await sync_to_async(self._commit_turn_batch, thread_sensitive=True)(
             conversation_id,
@@ -474,6 +585,8 @@ class DjangoPersistence:
             state,
             tuple(events),
             tuple(commands),
+            worker_id,
+            fence,
         )
 
     @transaction.atomic
@@ -484,6 +597,8 @@ class DjangoPersistence:
         state: ConversationState,
         events: tuple[ConversationEvent, ...],
         commands: tuple[Command, ...],
+        worker_id: str | None = None,
+        fence: int | None = None,
     ) -> tuple[ConversationEvent, ...]:
         committed = self._commit_runtime_lifecycle(
             conversation_id,
@@ -492,6 +607,8 @@ class DjangoPersistence:
             None,
             None,
             events,
+            worker_id=worker_id,
+            fence=fence,
         )
         for command in commands:
             self._settle_command(command)
@@ -505,6 +622,9 @@ class DjangoPersistence:
         process: ProcessRecord | None,
         launch_history_entry: LaunchSnapshot | None,
         events: Sequence[ConversationEvent],
+        *,
+        worker_id: str | None = None,
+        fence: int | None = None,
     ) -> Sequence[ConversationEvent]:
         return await sync_to_async(self._commit_runtime_lifecycle, thread_sensitive=True)(
             conversation_id,
@@ -513,6 +633,8 @@ class DjangoPersistence:
             process,
             launch_history_entry,
             tuple(events),
+            worker_id,
+            fence,
         )
 
     @transaction.atomic
@@ -524,6 +646,8 @@ class DjangoPersistence:
         process: ProcessRecord | None,
         launch_history_entry: LaunchSnapshot | None,
         events: tuple[ConversationEvent, ...],
+        worker_id: str | None = None,
+        fence: int | None = None,
     ) -> tuple[ConversationEvent, ...]:
         try:
             row = ConversationAggregate.objects.select_for_update().get(
@@ -531,6 +655,7 @@ class DjangoPersistence:
             )
         except ConversationAggregate.DoesNotExist as exc:
             raise DomainError(ErrorCode.INVALID_STATE, "conversation not found") from exc
+        self._require_owner_on_row(row, worker_id, fence)
         if row.version != expected_version:
             raise _conflict(expected_version, row.version)
         if state.conversation.id != conversation_id:
@@ -555,6 +680,7 @@ class DjangoPersistence:
                     "pid": process.pid,
                     "started_at": process.started_at,
                     "exited_at": process.exited_at,
+                    "orphaned_at": process.orphaned_at,
                     "exit_code": process.exit_code,
                     "redacted_stderr_tail": process.redacted_stderr_tail,
                 },
@@ -624,6 +750,8 @@ class DjangoPersistence:
         interaction_id: UUID,
         provider_correlation: dict[str, str] | None = None,
         request_event_sequence: int,
+        worker_id: str | None = None,
+        fence: int | None = None,
     ) -> Sequence[ConversationEvent]:
         return await sync_to_async(self._commit_interaction_request, thread_sensitive=True)(
             conversation_id,
@@ -633,6 +761,8 @@ class DjangoPersistence:
             interaction_id,
             provider_correlation,
             request_event_sequence,
+            worker_id,
+            fence,
         )
 
     @transaction.atomic
@@ -645,9 +775,17 @@ class DjangoPersistence:
         interaction_id: UUID,
         provider_correlation: dict[str, str] | None,
         request_event_sequence: int,
+        worker_id: str | None = None,
+        fence: int | None = None,
     ) -> tuple[ConversationEvent, ...]:
         committed = self._commit_turn_batch_sync(
-            conversation_id, expected_version, state, events, ()
+            conversation_id,
+            expected_version,
+            state,
+            events,
+            (),
+            worker_id=worker_id,
+            fence=fence,
         )
         InteractionRecord.objects.filter(interaction_id=interaction_id).update(
             provider_correlation=provider_correlation or {},
@@ -673,6 +811,8 @@ class DjangoPersistence:
         mark_policy_evaluated: bool = False,
         interaction_id: UUID | None = None,
         suppress_answer_command: bool = False,
+        worker_id: str | None = None,
+        fence: int | None = None,
     ) -> InteractionResolutionResult:
         return await sync_to_async(self._commit_interaction_resolution, thread_sensitive=True)(
             conversation_id,
@@ -690,6 +830,8 @@ class DjangoPersistence:
             mark_policy_evaluated,
             interaction_id,
             suppress_answer_command,
+            worker_id,
+            fence,
         )
 
     @transaction.atomic
@@ -710,6 +852,8 @@ class DjangoPersistence:
         mark_policy_evaluated: bool,
         interaction_id: UUID | None,
         suppress_answer_command: bool,
+        worker_id: str | None,
+        fence: int | None,
     ) -> InteractionResolutionResult:
         iid = interaction_id or answer.interaction_id
         existing = InteractionAnswerRecord.objects.filter(interaction_id=iid).first()
@@ -729,6 +873,7 @@ class DjangoPersistence:
         )
         if row is None:
             raise not_found("conversation")
+        self._require_owner_on_row(row, worker_id, fence)
         existing = InteractionAnswerRecord.objects.filter(interaction_id=iid).first()
         if existing is not None:
             stored = _load(InteractionAnswer, existing.data)
@@ -859,7 +1004,15 @@ class DjangoPersistence:
                 )
 
         if events:
-            self._commit_turn_batch_sync(conversation_id, expected_version, state, events, ())
+            self._commit_turn_batch_sync(
+                conversation_id,
+                expected_version,
+                state,
+                events,
+                (),
+                worker_id=worker_id,
+                fence=fence,
+            )
         elif mark_policy_evaluated:
             InteractionRecord.objects.filter(interaction_id=iid).update(
                 policy_evaluated_at=state.conversation.updated_at
@@ -871,7 +1024,48 @@ class DjangoPersistence:
                 audit=None,
             )
 
-        interaction = state.interactions.get(iid)
+        audit = self._persist_interaction_answer(
+            conversation_id=conversation_id,
+            owner_id=owner_id,
+            state=state,
+            interaction_id=iid,
+            answer=answer,
+            interaction_row=interaction_row,
+            automatic=automatic,
+            live_rule=live_rule,
+            provider_kind=provider_kind,
+            provider_request_ids=provider_request_ids,
+            resolution_event_sequence=resolution_event_sequence,
+            suppress_answer_command=suppress_answer_command,
+        )
+        if mark_policy_evaluated or automatic:
+            InteractionRecord.objects.filter(interaction_id=iid).update(
+                policy_evaluated_at=answer.submitted_at or state.conversation.updated_at
+            )
+        return InteractionResolutionResult(
+            answer=answer,
+            command=None,
+            was_first_write=True,
+            audit=audit,
+        )
+
+    def _persist_interaction_answer(
+        self,
+        *,
+        conversation_id: UUID,
+        owner_id: str,
+        state: ConversationState,
+        interaction_id: UUID,
+        answer: InteractionAnswer,
+        interaction_row: InteractionRecord,
+        automatic: bool,
+        live_rule: ApprovalRule | None,
+        provider_kind: str | None,
+        provider_request_ids: dict[str, str] | None,
+        resolution_event_sequence: int,
+        suppress_answer_command: bool,
+    ) -> InteractionAuditProjection:
+        interaction = state.interactions.get(interaction_id)
         correlation = {
             str(key): str(value)
             for key, value in (interaction_row.provider_correlation or {}).items()
@@ -881,13 +1075,10 @@ class DjangoPersistence:
         resolved_provider_kind = provider_kind
         if resolved_provider_kind is None and state.binding is not None:
             resolved_provider_kind = state.binding.kind.value
-        from uuid import uuid4
-
-        audit_id = uuid4()
         audit = InteractionAuditProjection(
-            id=audit_id,
+            id=uuid4(),
             principal_id=owner_id,
-            interaction_id=iid,
+            interaction_id=interaction_id,
             conversation_id=conversation_id,
             turn_id=interaction.turn_id if interaction else uuid4(),
             kind=interaction.kind if interaction else InteractionKind.APPROVAL,
@@ -904,7 +1095,7 @@ class DjangoPersistence:
             request_action=_request_action(interaction),
         )
         InteractionAnswerRecord.objects.create(
-            interaction_id=iid,
+            interaction_id=interaction_id,
             conversation_id=conversation_id,
             data=_json(answer),
             submitted_at=answer.submitted_at,
@@ -932,16 +1123,7 @@ class DjangoPersistence:
             rule_matcher=_json(live_rule.matcher) if live_rule else None,
             request_action=_json(audit.request_action) if audit.request_action else None,
         )
-        if mark_policy_evaluated or automatic:
-            InteractionRecord.objects.filter(interaction_id=iid).update(
-                policy_evaluated_at=answer.submitted_at or state.conversation.updated_at
-            )
-        return InteractionResolutionResult(
-            answer=answer,
-            command=None,
-            was_first_write=True,
-            audit=audit,
-        )
+        return audit
 
     async def release_interaction_answer(
         self,
@@ -952,9 +1134,18 @@ class DjangoPersistence:
         *,
         expected_version: int,
         state: ConversationState,
+        worker_id: str | None = None,
+        fence: int | None = None,
     ) -> Command:
         return await sync_to_async(self._release_interaction_answer, thread_sensitive=True)(
-            conversation_id, owner_id, interaction_id, command, expected_version, state
+            conversation_id,
+            owner_id,
+            interaction_id,
+            command,
+            expected_version,
+            state,
+            worker_id,
+            fence,
         )
 
     @transaction.atomic
@@ -966,6 +1157,8 @@ class DjangoPersistence:
         command: Command,
         expected_version: int,
         state: ConversationState,
+        worker_id: str | None,
+        fence: int | None,
     ) -> Command:
         answer_row = (
             InteractionAnswerRecord.objects.select_for_update()
@@ -983,6 +1176,7 @@ class DjangoPersistence:
         )
         if row is None:
             raise not_found("conversation")
+        self._require_owner_on_row(row, worker_id, fence)
         current_state = _load(ConversationState, row.state)
         command_row, _ = CommandRecord.objects.update_or_create(
             command_id=command.id,
@@ -1268,6 +1462,9 @@ class DjangoPersistence:
         state: ConversationState,
         events: tuple[ConversationEvent, ...],
         commands: tuple[Command, ...],
+        *,
+        worker_id: str | None = None,
+        fence: int | None = None,
     ) -> tuple[ConversationEvent, ...]:
         """Synchronous body shared with commit_turn_batch (must be in a transaction)."""
         row = (
@@ -1277,6 +1474,7 @@ class DjangoPersistence:
         )
         if row is None:
             raise DomainError(ErrorCode.NOT_FOUND, "conversation not found")
+        self._require_owner_on_row(row, worker_id, fence)
         if row.version != expected_version:
             raise _conflict(expected_version, row.version)
         expected_sequence = row.next_event_sequence
@@ -1387,6 +1585,8 @@ class DjangoPersistence:
         command: Command,
         process: ProcessRecord | None = None,
         launch_history_entry: LaunchSnapshot | None = None,
+        worker_id: str | None = None,
+        fence: int | None = None,
     ) -> Sequence[ConversationEvent]:
         return await sync_to_async(self._commit_harness_switch, thread_sensitive=True)(
             conversation_id,
@@ -1396,6 +1596,8 @@ class DjangoPersistence:
             command,
             process,
             launch_history_entry,
+            worker_id,
+            fence,
         )
 
     @transaction.atomic
@@ -1408,6 +1610,8 @@ class DjangoPersistence:
         command: Command,
         process: ProcessRecord | None,
         launch_history_entry: LaunchSnapshot | None,
+        worker_id: str | None = None,
+        fence: int | None = None,
     ) -> tuple[ConversationEvent, ...]:
         # Binding history follows ``state.binding``: projection materialization
         # closes the previous active row and writes the accepted candidate's.
@@ -1418,6 +1622,8 @@ class DjangoPersistence:
             process,
             launch_history_entry,
             events,
+            worker_id=worker_id,
+            fence=fence,
         )
         self._settle_command(command)
         return committed
@@ -1430,10 +1636,18 @@ class DjangoPersistence:
         events: Sequence[ConversationEvent],
         *,
         command: Command,
+        worker_id: str | None = None,
+        fence: int | None = None,
     ) -> Sequence[ConversationEvent]:
         # The unchanged current binding is re-synced, never closed or replaced.
         return await self.commit_turn_batch(
-            conversation_id, expected_version, state, events, (command,)
+            conversation_id,
+            expected_version,
+            state,
+            events,
+            (command,),
+            worker_id=worker_id,
+            fence=fence,
         )
 
     def _settle_command(self, command: Command) -> None:
@@ -1604,9 +1818,16 @@ class DjangoPersistence:
         *,
         native_session_id: str | None,
         launch_snapshot: LaunchSnapshot | None,
+        worker_id: str | None = None,
+        fence: int | None = None,
     ) -> None:
         await sync_to_async(self._commit_session_rotation, thread_sensitive=True)(
-            conversation_id, expected_version, native_session_id, launch_snapshot
+            conversation_id,
+            expected_version,
+            native_session_id,
+            launch_snapshot,
+            worker_id,
+            fence,
         )
 
     @transaction.atomic
@@ -1616,8 +1837,12 @@ class DjangoPersistence:
         expected_version: int,
         native_session_id: str | None,
         launch_snapshot: LaunchSnapshot | None,
+        worker_id: str | None = None,
+        fence: int | None = None,
     ) -> None:
-        row, state = self._lock_for_binding_update(conversation_id, expected_version)
+        row, state = self._lock_for_binding_update(
+            conversation_id, expected_version, worker_id=worker_id, fence=fence
+        )
         assert state.binding is not None
         binding = state.binding.model_copy(
             update={
@@ -1626,15 +1851,27 @@ class DjangoPersistence:
                 "requires_session_recreation": False,
             }
         )
-        self._store_binding_update(row, state.model_copy(update={"binding": binding}))
+        self._store_binding_update(
+            row,
+            state.model_copy(
+                update={
+                    "binding": binding,
+                    "seen_native_ids": frozenset(),
+                    "seen_stream_offsets": frozenset(),
+                }
+            ),
+        )
 
     async def commit_rotation_requires_recreation(
         self,
         conversation_id: UUID,
         expected_version: int,
+        *,
+        worker_id: str | None = None,
+        fence: int | None = None,
     ) -> None:
         await sync_to_async(self._commit_rotation_requires_recreation, thread_sensitive=True)(
-            conversation_id, expected_version
+            conversation_id, expected_version, worker_id, fence
         )
 
     @transaction.atomic
@@ -1642,8 +1879,12 @@ class DjangoPersistence:
         self,
         conversation_id: UUID,
         expected_version: int,
+        worker_id: str | None = None,
+        fence: int | None = None,
     ) -> None:
-        row, state = self._lock_for_binding_update(conversation_id, expected_version)
+        row, state = self._lock_for_binding_update(
+            conversation_id, expected_version, worker_id=worker_id, fence=fence
+        )
         marked = mark_requires_recreation(state, now=datetime.now(UTC))
         self._store_binding_update(row, marked.state)
 
@@ -1651,6 +1892,9 @@ class DjangoPersistence:
         self,
         conversation_id: UUID,
         expected_version: int,
+        *,
+        worker_id: str | None = None,
+        fence: int | None = None,
     ) -> tuple[ConversationAggregate, ConversationState]:
         row = (
             ConversationAggregate.objects.select_for_update()
@@ -1659,6 +1903,7 @@ class DjangoPersistence:
         )
         if row is None:
             raise not_found("conversation")
+        self._require_owner_on_row(row, worker_id, fence)
         if row.version != expected_version:
             raise _conflict(expected_version, row.version)
         state = _load(ConversationState, row.state)
@@ -1755,8 +2000,677 @@ class DjangoPersistence:
             "worker_id": command.worker_id,
             "lease_expires_at": command.lease_expires_at,
             "target_turn_id": command.target_turn_id,
+            "recovery_attempt_id": command.recovery_attempt_id,
             "data": _json(command),
         }
+
+    def _require_owner_on_row(
+        self,
+        row: ConversationAggregate,
+        worker_id: str | None,
+        fence: int | None,
+    ) -> None:
+        if worker_id is None and fence is None:
+            return
+        if worker_id is None or fence is None:
+            raise _stale_owner(conversation_id=row.conversation_id)
+        now = _db_now()
+        if (
+            row.runtime_worker_id != worker_id
+            or row.runtime_fence != fence
+            or row.runtime_lease_expires_at is None
+            or row.runtime_lease_expires_at < now
+        ):
+            raise _stale_owner(conversation_id=row.conversation_id)
+
+    def _require_conversation_owner(
+        self,
+        conversation_id: UUID,
+        worker_id: str | None,
+        fence: int | None,
+    ) -> None:
+        row = (
+            ConversationAggregate.objects.select_for_update()
+            .filter(conversation_id=conversation_id)
+            .first()
+        )
+        if row is None:
+            raise DomainError(ErrorCode.INVALID_STATE, "conversation not found")
+        self._require_owner_on_row(row, worker_id, fence)
+
+    def _acquire_conversation_owner(
+        self,
+        conversation_id: UUID,
+        worker_id: str,
+        *,
+        lease_duration: float,
+        now: datetime,
+        orphan_on_takeover: bool = False,
+    ) -> int | None:
+        """Acquire or renew ownership. Returns fence, or None if another owner is live."""
+        row = (
+            ConversationAggregate.objects.select_for_update()
+            .filter(conversation_id=conversation_id)
+            .first()
+        )
+        if row is None:
+            return None
+        lease_expires = now + timedelta(seconds=lease_duration)
+        live_other = (
+            row.runtime_worker_id is not None
+            and row.runtime_worker_id != worker_id
+            and row.runtime_lease_expires_at is not None
+            and row.runtime_lease_expires_at >= now
+        )
+        if live_other:
+            return None
+        taking_over = (
+            row.runtime_worker_id is not None
+            and row.runtime_worker_id != worker_id
+            and (row.runtime_lease_expires_at is None or row.runtime_lease_expires_at < now)
+        )
+        same_worker = row.runtime_worker_id == worker_id and (
+            row.runtime_lease_expires_at is None or row.runtime_lease_expires_at >= now
+        )
+        if same_worker:
+            fence = int(row.runtime_fence)
+        else:
+            fence = int(row.runtime_fence) + 1
+            if taking_over or orphan_on_takeover:
+                mark_processes_orphaned(conversation_id, now=now)
+        row.runtime_worker_id = worker_id
+        row.runtime_fence = fence
+        row.runtime_lease_expires_at = lease_expires
+        row.save(update_fields=("runtime_worker_id", "runtime_fence", "runtime_lease_expires_at"))
+        return fence
+
+    def _worker_lease_slot(self, worker_id: str, slot: str | None) -> str:
+        if connection.vendor == "sqlite":
+            return _SQLITE_SUPERVISOR_SLOT
+        return slot or worker_id
+
+    async def acquire_worker_lease(
+        self,
+        worker_id: str,
+        *,
+        lease_duration: float,
+        slot: str | None = None,
+    ) -> None:
+        await sync_to_async(self._acquire_worker_lease, thread_sensitive=True)(
+            worker_id, lease_duration, slot
+        )
+
+    @transaction.atomic
+    def _acquire_worker_lease(
+        self,
+        worker_id: str,
+        lease_duration: float,
+        slot: str | None,
+    ) -> None:
+        now = _db_now()
+        lease_slot = self._worker_lease_slot(worker_id, slot)
+        expires = now + timedelta(seconds=lease_duration)
+        row = WorkerLeaseRecord.objects.select_for_update().filter(slot=lease_slot).first()
+        if row is None:
+            WorkerLeaseRecord.objects.create(
+                slot=lease_slot,
+                worker_id=worker_id,
+                started_at=now,
+                heartbeat_at=now,
+                expires_at=expires,
+                draining=False,
+            )
+            return
+        if row.expires_at >= now and row.worker_id != worker_id:
+            raise DomainError(
+                ErrorCode.WORKER_LEASE_UNAVAILABLE,
+                "worker lease unavailable",
+                details={"slot": lease_slot},
+            )
+        if row.worker_id == worker_id and row.expires_at >= now:
+            row.heartbeat_at = now
+            row.expires_at = expires
+            row.draining = False
+            row.save(update_fields=("heartbeat_at", "expires_at", "draining"))
+            return
+        row.worker_id = worker_id
+        row.started_at = now
+        row.heartbeat_at = now
+        row.expires_at = expires
+        row.draining = False
+        row.save(
+            update_fields=("worker_id", "started_at", "heartbeat_at", "expires_at", "draining")
+        )
+
+    async def renew_worker_lease(self, worker_id: str, *, lease_duration: float) -> None:
+        await sync_to_async(self._renew_worker_lease, thread_sensitive=True)(
+            worker_id, lease_duration
+        )
+
+    @transaction.atomic
+    def _renew_worker_lease(self, worker_id: str, lease_duration: float) -> None:
+        now = _db_now()
+        lease_slot = self._worker_lease_slot(worker_id, None)
+        row = WorkerLeaseRecord.objects.select_for_update().filter(slot=lease_slot).first()
+        if row is None or row.worker_id != worker_id or row.expires_at < now:
+            raise DomainError(
+                ErrorCode.WORKER_LEASE_UNAVAILABLE,
+                "worker lease unavailable",
+                details={"slot": lease_slot},
+            )
+        row.heartbeat_at = now
+        row.expires_at = now + timedelta(seconds=lease_duration)
+        row.save(update_fields=("heartbeat_at", "expires_at"))
+
+    async def mark_worker_draining(self, worker_id: str) -> None:
+        await sync_to_async(self._mark_worker_draining, thread_sensitive=True)(worker_id)
+
+    @transaction.atomic
+    def _mark_worker_draining(self, worker_id: str) -> None:
+        lease_slot = self._worker_lease_slot(worker_id, None)
+        updated = WorkerLeaseRecord.objects.filter(slot=lease_slot, worker_id=worker_id).update(
+            draining=True
+        )
+        if not updated:
+            raise DomainError(
+                ErrorCode.WORKER_LEASE_UNAVAILABLE,
+                "worker lease unavailable",
+                details={"slot": lease_slot},
+            )
+
+    async def release_worker_lease(self, worker_id: str) -> None:
+        await sync_to_async(self._release_worker_lease, thread_sensitive=True)(worker_id)
+
+    @transaction.atomic
+    def _release_worker_lease(self, worker_id: str) -> None:
+        lease_slot = self._worker_lease_slot(worker_id, None)
+        WorkerLeaseRecord.objects.filter(slot=lease_slot, worker_id=worker_id).delete()
+
+    async def claim_expired_conversations(
+        self,
+        worker_id: str,
+        limit: int,
+        *,
+        lease_duration: float,
+        trigger: str = RecoveryTrigger.TAKEOVER.value,
+    ) -> Sequence[ConversationOwnership]:
+        return await sync_to_async(self._claim_expired_conversations, thread_sensitive=True)(
+            worker_id, limit, lease_duration, trigger
+        )
+
+    @transaction.atomic
+    def _claim_expired_conversations(
+        self,
+        worker_id: str,
+        limit: int,
+        lease_duration: float,
+        trigger: str,
+    ) -> tuple[ConversationOwnership, ...]:
+        now = _db_now()
+        lease_expires = now + timedelta(seconds=lease_duration)
+        expired_command_owner = CommandRecord.objects.filter(
+            conversation_id=models.OuterRef("conversation_id"),
+            status__in=(
+                CommandStatus.CLAIMED.value,
+                CommandStatus.DELIVERY_STARTED.value,
+                CommandStatus.DELIVERED.value,
+            ),
+        ).filter(models.Q(lease_expires_at__lt=now) | models.Q(lease_expires_at__isnull=True))
+        query = (
+            ConversationAggregate.objects.filter(deleted_at__isnull=True)
+            .filter(
+                models.Q(runtime_lease_expires_at__lt=now)
+                | models.Q(
+                    status__in=_ACTIVE_RECOVERY_STATUSES,
+                    runtime_lease_expires_at__isnull=True,
+                )
+                | models.Exists(expired_command_owner)
+            )
+            .exclude(
+                runtime_worker_id=worker_id,
+                runtime_lease_expires_at__gte=now,
+            )
+            .order_by("conversation_id")
+        )
+        if connection.vendor == "postgresql":
+            query = query.select_for_update(skip_locked=True)
+        else:
+            query = query.select_for_update()
+
+        claimed: list[ConversationOwnership] = []
+        for row in query[:limit]:
+            if (
+                row.runtime_worker_id is not None
+                and row.runtime_worker_id != worker_id
+                and row.runtime_lease_expires_at is not None
+                and row.runtime_lease_expires_at >= now
+            ):
+                continue
+            fence = int(row.runtime_fence) + 1
+            mark_processes_orphaned(row.conversation_id, now=now)
+            RecoveryAttemptRecord.objects.filter(
+                conversation_id=row.conversation_id,
+                result__isnull=True,
+            ).update(
+                result=RecoveryResultCode.ABANDONED.value,
+                reason_code=RecoveryReasonCode.WORKER_LOST.value,
+                completed_at=now,
+            )
+            state = _load(ConversationState, row.state)
+            binding_id = (
+                state.binding.id
+                if state.binding is not None
+                else state.conversation.current_binding_id
+            )
+            if binding_id is None:
+                raise DomainError(
+                    ErrorCode.INVALID_STATE,
+                    "active conversation missing binding for recovery",
+                    details={"conversation_id": str(row.conversation_id)},
+                )
+            attempt_id = uuid4()
+            RecoveryAttemptRecord.objects.create(
+                attempt_id=attempt_id,
+                conversation_id=row.conversation_id,
+                binding_id=binding_id,
+                command_id=None,
+                turn_id=None,
+                worker_id=worker_id,
+                fence=fence,
+                trigger=trigger,
+                observed_delivery_phase=ObservedDeliveryPhase.NONE.value,
+                action=RecoveryAction.NO_ACTION.value,
+                result=None,
+                reason_code=RecoveryReasonCode.WORKER_LOST.value,
+                started_at=now,
+                completed_at=None,
+            )
+            row.runtime_worker_id = worker_id
+            row.runtime_fence = fence
+            row.runtime_lease_expires_at = lease_expires
+            row.save(
+                update_fields=(
+                    "runtime_worker_id",
+                    "runtime_fence",
+                    "runtime_lease_expires_at",
+                )
+            )
+            claimed.append(
+                ConversationOwnership(
+                    conversation_id=row.conversation_id,
+                    worker_id=worker_id,
+                    fence=fence,
+                    lease_expires_at=lease_expires,
+                    recovery_attempt_id=attempt_id,
+                )
+            )
+        return tuple(claimed)
+
+    async def renew_owned_conversation_leases(
+        self,
+        worker_id: str,
+        *,
+        lease_duration: float,
+    ) -> Sequence[LostLease]:
+        return await sync_to_async(self._renew_owned_conversation_leases, thread_sensitive=True)(
+            worker_id, lease_duration
+        )
+
+    @transaction.atomic
+    def _renew_owned_conversation_leases(
+        self,
+        worker_id: str,
+        lease_duration: float,
+    ) -> tuple[LostLease, ...]:
+        now = _db_now()
+        lease_expires = now + timedelta(seconds=lease_duration)
+        rows = list(
+            ConversationAggregate.objects.select_for_update()
+            .filter(runtime_worker_id=worker_id)
+            .order_by("conversation_id")
+        )
+        lost: list[LostLease] = []
+        for row in rows:
+            if row.runtime_lease_expires_at is None or row.runtime_lease_expires_at < now:
+                lost.append(
+                    LostLease(conversation_id=row.conversation_id, fence=int(row.runtime_fence))
+                )
+                row.runtime_worker_id = None
+                row.runtime_lease_expires_at = None
+                row.save(update_fields=("runtime_worker_id", "runtime_lease_expires_at"))
+                continue
+            row.runtime_lease_expires_at = lease_expires
+            row.save(update_fields=("runtime_lease_expires_at",))
+        return tuple(lost)
+
+    async def release_conversation_lease(
+        self,
+        conversation_id: UUID,
+        worker_id: str,
+        fence: int,
+    ) -> None:
+        await sync_to_async(self._release_conversation_lease, thread_sensitive=True)(
+            conversation_id, worker_id, fence
+        )
+
+    @transaction.atomic
+    def _release_conversation_lease(
+        self,
+        conversation_id: UUID,
+        worker_id: str,
+        fence: int,
+    ) -> None:
+        row = (
+            ConversationAggregate.objects.select_for_update()
+            .filter(conversation_id=conversation_id)
+            .first()
+        )
+        if row is None:
+            raise DomainError(ErrorCode.INVALID_STATE, "conversation not found")
+        self._require_owner_on_row(row, worker_id, fence)
+        row.runtime_worker_id = None
+        row.runtime_lease_expires_at = None
+        row.save(update_fields=("runtime_worker_id", "runtime_lease_expires_at"))
+
+    async def complete_recovery_attempt(
+        self,
+        attempt_id: UUID,
+        *,
+        result: str,
+        reason_code: str,
+        completed_at: datetime,
+    ) -> None:
+        await sync_to_async(self._complete_recovery_attempt, thread_sensitive=True)(
+            attempt_id, result, reason_code, completed_at
+        )
+
+    async def commit_recovery_batch(
+        self,
+        conversation_id: UUID,
+        expected_version: int,
+        state: ConversationState,
+        events: Sequence[ConversationEvent],
+        commands: Sequence[Command],
+        *,
+        interrupted_turn_id: UUID | None,
+        attempt_id: UUID | None,
+        command_id: UUID | None,
+        turn_id: UUID | None,
+        trigger: str,
+        observed_delivery_phase: str,
+        action: str,
+        result: str,
+        reason_code: str,
+        completed_at: datetime,
+        worker_id: str,
+        fence: int,
+    ) -> Sequence[ConversationEvent]:
+        return await sync_to_async(self._commit_recovery_batch, thread_sensitive=True)(
+            conversation_id,
+            expected_version,
+            state,
+            tuple(events),
+            tuple(commands),
+            interrupted_turn_id,
+            attempt_id,
+            command_id,
+            turn_id,
+            trigger,
+            observed_delivery_phase,
+            action,
+            result,
+            reason_code,
+            completed_at,
+            worker_id,
+            fence,
+        )
+
+    @transaction.atomic
+    def _commit_recovery_batch(
+        self,
+        conversation_id: UUID,
+        expected_version: int,
+        state: ConversationState,
+        events: tuple[ConversationEvent, ...],
+        commands: tuple[Command, ...],
+        interrupted_turn_id: UUID | None,
+        attempt_id: UUID | None,
+        command_id: UUID | None,
+        turn_id: UUID | None,
+        trigger: str,
+        observed_delivery_phase: str,
+        action: str,
+        result: str,
+        reason_code: str,
+        completed_at: datetime,
+        worker_id: str,
+        fence: int,
+    ) -> tuple[ConversationEvent, ...]:
+        row = ConversationAggregate.objects.select_for_update().get(conversation_id=conversation_id)
+        self._require_owner_on_row(row, worker_id, fence)
+        previous = _load(ConversationState, row.state)
+        committed = self._commit_turn_batch_sync(
+            conversation_id,
+            expected_version,
+            state,
+            events,
+            commands,
+            worker_id=worker_id,
+            fence=fence,
+        )
+        if interrupted_turn_id is not None:
+            MessageRecord.objects.filter(
+                conversation_id=conversation_id,
+                turn_id=interrupted_turn_id,
+                role=MessageRole.ASSISTANT.value,
+                completed=False,
+            ).update(interrupted=True)
+
+        for interaction_id, answer in state.answers.items():
+            interaction = state.interactions.get(interaction_id)
+            if (
+                interaction is None
+                or interaction.status is not InteractionStatus.CANCELLED
+                or interaction_id in previous.answers
+                or InteractionAnswerRecord.objects.filter(interaction_id=interaction_id).exists()
+            ):
+                continue
+            interaction_row = InteractionRecord.objects.select_for_update().get(
+                interaction_id=interaction_id
+            )
+            resolution_sequence = next(
+                event.sequence
+                for event in events
+                if event.type == "interaction_resolved"
+                and getattr(event.payload, "interaction_id", None) == interaction_id
+            )
+            self._persist_interaction_answer(
+                conversation_id=conversation_id,
+                owner_id=state.conversation.owner_id,
+                state=state,
+                interaction_id=interaction_id,
+                answer=answer,
+                interaction_row=interaction_row,
+                automatic=False,
+                live_rule=None,
+                provider_kind=None,
+                provider_request_ids=None,
+                resolution_event_sequence=resolution_sequence,
+                suppress_answer_command=True,
+            )
+
+        if attempt_id is not None:
+            updated = RecoveryAttemptRecord.objects.filter(
+                attempt_id=attempt_id,
+                conversation_id=conversation_id,
+                worker_id=worker_id,
+                fence=fence,
+                result__isnull=True,
+            ).update(
+                command_id=command_id,
+                turn_id=turn_id,
+                trigger=trigger,
+                observed_delivery_phase=observed_delivery_phase,
+                action=action,
+                result=result,
+                reason_code=reason_code,
+                completed_at=completed_at,
+            )
+            if not updated:
+                raise _stale_owner(conversation_id=conversation_id)
+        return committed
+
+    @transaction.atomic
+    def _complete_recovery_attempt(
+        self,
+        attempt_id: UUID,
+        result: str,
+        reason_code: str,
+        completed_at: datetime,
+    ) -> None:
+        updated = RecoveryAttemptRecord.objects.filter(
+            attempt_id=attempt_id,
+            result__isnull=True,
+        ).update(
+            result=result,
+            reason_code=reason_code,
+            completed_at=completed_at,
+        )
+        if not updated:
+            raise DomainError(
+                ErrorCode.INVALID_STATE,
+                "recovery attempt not found or already completed",
+                details={"attempt_id": str(attempt_id)},
+            )
+
+    async def get_open_recovery_attempt(
+        self,
+        conversation_id: UUID,
+        worker_id: str,
+        fence: int,
+    ) -> RecoveryAttempt | None:
+        return await sync_to_async(self._get_open_recovery_attempt, thread_sensitive=True)(
+            conversation_id, worker_id, fence
+        )
+
+    async def update_recovery_attempt(
+        self,
+        attempt_id: UUID,
+        *,
+        command_id: UUID | None,
+        turn_id: UUID | None,
+        trigger: str,
+        observed_delivery_phase: str,
+        action: str,
+        reason_code: str,
+        worker_id: str,
+        fence: int,
+    ) -> None:
+        await sync_to_async(self._update_recovery_attempt, thread_sensitive=True)(
+            attempt_id,
+            command_id,
+            turn_id,
+            trigger,
+            observed_delivery_phase,
+            action,
+            reason_code,
+            worker_id,
+            fence,
+        )
+
+    @transaction.atomic
+    def _update_recovery_attempt(
+        self,
+        attempt_id: UUID,
+        command_id: UUID | None,
+        turn_id: UUID | None,
+        trigger: str,
+        observed_delivery_phase: str,
+        action: str,
+        reason_code: str,
+        worker_id: str,
+        fence: int,
+    ) -> None:
+        attempt = RecoveryAttemptRecord.objects.select_for_update().get(attempt_id=attempt_id)
+        row = ConversationAggregate.objects.select_for_update().get(
+            conversation_id=attempt.conversation_id
+        )
+        self._require_owner_on_row(row, worker_id, fence)
+        if attempt.worker_id != worker_id or attempt.fence != fence or attempt.result is not None:
+            raise _stale_owner(conversation_id=attempt.conversation_id)
+        attempt.command_id = command_id
+        attempt.turn_id = turn_id
+        attempt.trigger = trigger
+        attempt.observed_delivery_phase = observed_delivery_phase
+        attempt.action = action
+        attempt.reason_code = reason_code
+        attempt.save(
+            update_fields=(
+                "command_id",
+                "turn_id",
+                "trigger",
+                "observed_delivery_phase",
+                "action",
+                "reason_code",
+            )
+        )
+
+    def _get_open_recovery_attempt(
+        self,
+        conversation_id: UUID,
+        worker_id: str,
+        fence: int,
+    ) -> RecoveryAttempt | None:
+        row = (
+            RecoveryAttemptRecord.objects.filter(
+                conversation_id=conversation_id,
+                worker_id=worker_id,
+                fence=fence,
+                result__isnull=True,
+            )
+            .order_by("-started_at")
+            .first()
+        )
+        if row is None:
+            return None
+        return RecoveryAttempt(
+            id=row.attempt_id,
+            conversation_id=row.conversation_id,
+            binding_id=row.binding_id,
+            command_id=row.command_id,
+            turn_id=row.turn_id,
+            worker_id=row.worker_id,
+            fence=int(row.fence),
+            trigger=row.trigger,
+            observed_delivery_phase=row.observed_delivery_phase,
+            action=row.action,
+            result=row.result,
+            reason_code=row.reason_code,
+            started_at=row.started_at,
+            completed_at=row.completed_at,
+        )
+
+    async def mark_incomplete_assistant_messages_interrupted(
+        self,
+        conversation_id: UUID,
+        turn_id: UUID,
+    ) -> None:
+        await sync_to_async(
+            self._mark_incomplete_assistant_messages_interrupted,
+            thread_sensitive=True,
+        )(conversation_id, turn_id)
+
+    def _mark_incomplete_assistant_messages_interrupted(
+        self,
+        conversation_id: UUID,
+        turn_id: UUID,
+    ) -> None:
+        MessageRecord.objects.filter(
+            conversation_id=conversation_id,
+            turn_id=turn_id,
+            role=MessageRole.ASSISTANT.value,
+            completed=False,
+        ).update(interrupted=True)
 
     # ------------------------------------------------------------------
     # Phase 5 facade projection surface
@@ -1860,6 +2774,29 @@ class DjangoPersistence:
         if row is None:
             raise not_found("harness")
         return probe_from_row(row)
+
+    async def list_configured_harnesses_for_readiness(self) -> Sequence[HarnessProjection]:
+        return await sync_to_async(
+            self._list_configured_harnesses_for_readiness, thread_sensitive=True
+        )()
+
+    def _list_configured_harnesses_for_readiness(self) -> Sequence[HarnessProjection]:
+        rows = HarnessRecord.objects.order_by("harness_id")
+        return tuple(harness_from_row(row) for row in rows)
+
+    async def has_fresh_harness_probe(
+        self,
+        *,
+        now: datetime,
+        max_age_seconds: int = 300,
+    ) -> bool:
+        return await sync_to_async(self._has_fresh_harness_probe, thread_sensitive=True)(
+            now, max_age_seconds
+        )
+
+    def _has_fresh_harness_probe(self, now: datetime, max_age_seconds: int) -> bool:
+        cutoff = now - timedelta(seconds=max_age_seconds)
+        return HarnessRecord.objects.filter(last_probed_at__gt=cutoff).exists()
 
     async def list_conversations(
         self,

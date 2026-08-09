@@ -161,7 +161,7 @@ def test_fts_migration_reverse_preserves_search_document() -> None:
                 ["talktoharnesses_search_document"],
             )
             assert cursor.fetchone() is None
-    call_command("migrate", "talktoharnesses", "0006_phase8_fts", verbosity=0)
+    call_command("migrate", "talktoharnesses", "0007_phase9_recovery", verbosity=0)
     if connection.vendor == "sqlite":
         with connection.cursor() as cursor:
             cursor.execute(

@@ -18,7 +18,7 @@ from talktoharnesses.providers.opencode.sse import SseDecoder
 
 def test_load_and_match_release() -> None:
     doc = load_opencode_compatibility()
-    assert doc.adapter_version == "2026.8.0.dev8"
+    assert doc.adapter_version == "2026.8.0.dev9"
     release = match_release("1.2.27", platform="linux")
     assert release.id == "opencode-1.2.27"
 

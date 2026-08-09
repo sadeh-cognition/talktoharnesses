@@ -35,7 +35,7 @@ async def test_live_codex_probe_and_create(tmp_path: Path) -> None:
     launch = LaunchSnapshot(
         harness_version=caps.version,
         working_directory=str(tmp_path),
-        adapter_version="2026.8.0.dev8",
+        adapter_version="2026.8.0.dev9",
         capabilities=caps,
     )
     session = await adapter.start(

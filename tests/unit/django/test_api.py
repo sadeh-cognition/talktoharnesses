@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 from typing import Any
+from unittest.mock import Mock
 from uuid import UUID
 
 import pytest
@@ -104,9 +105,28 @@ def test_health_and_ready_public(service: TalkToHarnessesService) -> None:
     assert health.json()["status"] == "ok"
 
     ready = client.get("/api/v1/ready")
-    assert ready.status_code == 200
+    # Without worker lease / fresh harness probe the process is not ready.
+    assert ready.status_code == 503
     body = ready.json()
-    assert body["status"] == "ready"
+    assert body == {"ready": False, "reason": "not_ready"}
+
+
+@pytest.mark.django_db(transaction=True)
+def test_ready_true_with_worker_and_fresh_probe(service: TalkToHarnessesService) -> None:
+    coordinator = service.coordinator
+    coordinator._lease_healthy = True  # type: ignore[attr-defined]
+    coordinator._heartbeat_healthy = True  # type: ignore[attr-defined]
+    coordinator._initial_recovery_complete = True  # type: ignore[attr-defined]
+    coordinator._draining = False  # type: ignore[attr-defined]
+    coordinator._claims_healthy = True  # type: ignore[attr-defined]
+    service.processor._running = True  # type: ignore[attr-defined]
+    service.processor._claim_task = Mock(done=Mock(return_value=False))  # type: ignore[attr-defined]
+    service._readiness.notify_success(_now())  # type: ignore[attr-defined]
+
+    client = Client()
+    ready = client.get("/api/v1/ready")
+    assert ready.status_code == 200
+    assert ready.json() == {"ready": True, "reason": "ready"}
 
 
 @pytest.mark.django_db(transaction=True)

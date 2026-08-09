@@ -138,12 +138,12 @@ def talktoharnesses_lifespan(app: ASGIApp) -> ASGIApp:
             if msg_type == "lifespan.startup":
                 try:
                     await _startup()
-                except Exception as exc:
+                except Exception:
                     logger.exception("talktoharnesses lifespan startup failed")
                     await send(
                         {
                             "type": "lifespan.startup.failed",
-                            "message": str(exc) or exc.__class__.__name__,
+                            "message": "startup failed",
                         }
                     )
                     return
@@ -151,12 +151,12 @@ def talktoharnesses_lifespan(app: ASGIApp) -> ASGIApp:
             elif msg_type == "lifespan.shutdown":
                 try:
                     await _shutdown()
-                except Exception as exc:
+                except Exception:
                     logger.exception("talktoharnesses lifespan shutdown failed")
                     await send(
                         {
                             "type": "lifespan.shutdown.failed",
-                            "message": str(exc) or exc.__class__.__name__,
+                            "message": "shutdown failed",
                         }
                     )
                     return

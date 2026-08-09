@@ -149,11 +149,12 @@ async def test_claim_reclaims_only_expired_pre_delivery_command() -> None:
     )
     await persistence.accept_command(command)
 
-    claimed = await persistence.claim_commands("live-worker", 1)
+    claimed = await persistence.claim_commands("live-worker", 1, lease_duration=30.0)
 
     assert len(claimed) == 1
-    assert claimed[0].worker_id == "live-worker"
-    assert claimed[0].attempts == 2
+    assert claimed[0].command.worker_id == "live-worker"
+    assert claimed[0].command.attempts == 2
+    assert claimed[0].fence >= 1
 
 
 @pytest.mark.django_db(transaction=True)

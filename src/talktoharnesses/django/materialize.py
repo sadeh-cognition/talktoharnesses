@@ -288,6 +288,7 @@ def _apply_event(conversation_id: UUID, event: ConversationEvent) -> None:
                 "role": MessageRole.ASSISTANT.value,
                 "text": "",
                 "sequence": 0,
+                "completed": False,
                 "created_at": ts,
                 "order_index": _message_order_index(payload.message_id, event.sequence),
             },
@@ -303,7 +304,10 @@ def _apply_event(conversation_id: UUID, event: ConversationEvent) -> None:
         return
 
     if isinstance(payload, AssistantMessageCompletedPayload):
-        MessageRecord.objects.filter(message_id=payload.message_id).update(text=payload.text)
+        MessageRecord.objects.filter(message_id=payload.message_id).update(
+            text=payload.text,
+            completed=True,
+        )
         return
 
     if isinstance(payload, ReasoningStartedPayload):

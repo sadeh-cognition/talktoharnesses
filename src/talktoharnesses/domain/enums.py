@@ -106,6 +106,56 @@ class ProcessStatus(StrEnum):
     EXITED = "exited"
     FAILED = "failed"
     TERMINATED = "terminated"
+    ORPHANED = "orphaned"
+
+
+class RecoveryTrigger(StrEnum):
+    STARTUP = "startup"
+    TAKEOVER = "takeover"
+    SHUTDOWN = "shutdown"
+    LEGACY = "legacy"
+
+
+class RecoveryAction(StrEnum):
+    NO_ACTION = "no_action"
+    RECLAIM = "reclaim"
+    OUTCOME_UNKNOWN = "outcome_unknown"
+    NATIVE_RESUME = "native_resume"
+    HANDOFF_FALLBACK = "handoff_fallback"
+    INVARIANT_FAILURE = "invariant_failure"
+
+
+class RecoveryResultCode(StrEnum):
+    SUCCESS = "success"
+    ABANDONED = "abandoned"
+    FAILED = "failed"
+    NO_ACTION = "no_action"
+    LEGACY_UNKNOWN = "legacy_unknown"
+
+
+class RecoveryReasonCode(StrEnum):
+    WORKER_LOST = "worker_lost"
+    DELIVERY_AMBIGUOUS = "delivery_ambiguous"
+    RESUME_UNSUPPORTED = "resume_unsupported"
+    RESUME_REJECTED = "resume_rejected"
+    PROVIDER_INCOMPATIBLE = "provider_incompatible"
+    EXECUTABLE_CHANGED = "executable_changed"
+    UNCHANGED_LAUNCH = "unchanged_launch"
+    RECOVERY_FALLBACK = "recovery_fallback"
+    INVARIANT_FAILURE = "invariant_failure"
+    LEGACY_UNKNOWN = "legacy_unknown"
+    NO_ACTION = "no_action"
+
+
+class ObservedDeliveryPhase(StrEnum):
+    ACCEPTED = "accepted"
+    CLAIMED = "claimed"
+    DELIVERY_STARTED = "delivery_started"
+    DELIVERED = "delivered"
+    SETTLED = "settled"
+    COALESCED = "coalesced"
+    OUTCOME_UNKNOWN = "outcome_unknown"
+    NONE = "none"
 
 
 class FileOperation(StrEnum):
@@ -144,5 +194,7 @@ class ErrorCode(StrEnum):
     NO_QUEUED_PROMPT = "no_queued_prompt"
     IDEMPOTENCY_CONFLICT = "idempotency_conflict"
     OPTIMISTIC_CONFLICT = "optimistic_conflict"
+    STALE_OWNER = "stale_owner"
+    WORKER_LEASE_UNAVAILABLE = "worker_lease_unavailable"
     INVALID_CURSOR = "invalid_cursor"
     NOT_FOUND = "not_found"

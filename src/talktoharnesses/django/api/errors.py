@@ -14,7 +14,7 @@ from talktoharnesses.django.auth import (
     AuthenticationFailed,
 )
 from talktoharnesses.domain.enums import ErrorCode
-from talktoharnesses.domain.errors import DomainError
+from talktoharnesses.domain.errors import DomainError, public_message
 from talktoharnesses.domain.models import ErrorProjection
 
 logger = logging.getLogger(__name__)
@@ -49,6 +49,25 @@ def _json_error(code: str, message: str, status: int) -> HttpResponse:
     return response
 
 
+def domain_error_response(exc: DomainError) -> HttpResponse:
+    """Map a DomainError to a stable HTTP body without echoing raw messages."""
+    if isinstance(exc, AuthenticationFailed):
+        return _json_error(AUTH_FAILURE_CODE, AUTH_FAILURE_MESSAGE, 401)
+    if exc.code is ErrorCode.NOT_FOUND:
+        return _json_error(exc.code.value, public_message(exc.code), 404)
+    # get_snapshot still uses INVALID_STATE for missing/owner mismatch.
+    # Inspect the internal message only for status routing — never echo it.
+    if exc.code is ErrorCode.INVALID_STATE and "not found" in exc.message.lower():
+        return _json_error(ErrorCode.NOT_FOUND.value, public_message(ErrorCode.NOT_FOUND), 404)
+    if exc.code is ErrorCode.INVALID_STATE and "owner mismatch" in exc.message.lower():
+        return _json_error(ErrorCode.NOT_FOUND.value, public_message(ErrorCode.NOT_FOUND), 404)
+    if exc.code in _CONFLICT_CODES:
+        return _json_error(exc.code.value, public_message(exc.code), 409)
+    if exc.code in _UNPROCESSABLE_CODES or exc.code is ErrorCode.INVALID_CURSOR:
+        return _json_error(exc.code.value, public_message(exc.code), 422)
+    return _json_error(exc.code.value, public_message(exc.code), 409)
+
+
 def register_exception_handlers(api: NinjaAPI) -> None:
     def on_auth_failed(request: HttpRequest, exc: AuthenticationFailed) -> HttpResponse:
         return _json_error(AUTH_FAILURE_CODE, AUTH_FAILURE_MESSAGE, 401)
@@ -57,20 +76,7 @@ def register_exception_handlers(api: NinjaAPI) -> None:
         return _json_error(AUTH_FAILURE_CODE, AUTH_FAILURE_MESSAGE, 401)
 
     def on_domain(request: HttpRequest, exc: DomainError) -> HttpResponse:
-        if isinstance(exc, AuthenticationFailed):
-            return _json_error(AUTH_FAILURE_CODE, AUTH_FAILURE_MESSAGE, 401)
-        if exc.code is ErrorCode.NOT_FOUND:
-            return _json_error(exc.code.value, "not found", 404)
-        # get_snapshot still uses INVALID_STATE for missing/owner mismatch
-        if exc.code is ErrorCode.INVALID_STATE and "not found" in exc.message.lower():
-            return _json_error(ErrorCode.NOT_FOUND.value, "not found", 404)
-        if exc.code is ErrorCode.INVALID_STATE and "owner mismatch" in exc.message.lower():
-            return _json_error(ErrorCode.NOT_FOUND.value, "not found", 404)
-        if exc.code in _CONFLICT_CODES:
-            return _json_error(exc.code.value, exc.message, 409)
-        if exc.code in _UNPROCESSABLE_CODES or exc.code is ErrorCode.INVALID_CURSOR:
-            return _json_error(exc.code.value, exc.message, 422)
-        return _json_error(exc.code.value, exc.message, 409)
+        return domain_error_response(exc)
 
     def on_validation(request: HttpRequest, exc: ValidationError) -> HttpResponse:
         return _json_error("validation_error", "invalid request", 422)
@@ -78,7 +84,7 @@ def register_exception_handlers(api: NinjaAPI) -> None:
     def on_http(request: HttpRequest, exc: HttpError) -> HttpResponse:
         if exc.status_code == 401:
             return _json_error(AUTH_FAILURE_CODE, AUTH_FAILURE_MESSAGE, 401)
-        return _json_error("http_error", str(exc), exc.status_code)
+        return _json_error("http_error", "http error", exc.status_code)
 
     def on_unexpected(request: HttpRequest, exc: Exception) -> HttpResponse:
         logger.exception("unhandled API error")

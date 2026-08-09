@@ -20,5 +20,7 @@ class RuntimePolicy(BaseModel):
     graceful_close_timeout: float = Field(default=5.0, gt=0)
     terminate_escalation: float = Field(default=2.0, gt=0)
     shutdown_budget: float = Field(default=10.0, gt=0)
+    lease_duration: float = Field(default=30.0, gt=0)
+    lease_renewal_interval: float = Field(default=10.0, gt=0)
     # Live runtimes plus transient switch/rotation candidates.
     max_runtimes: int = Field(default=20, gt=0)
