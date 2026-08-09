@@ -7,6 +7,7 @@ from uuid import uuid4
 import pytest
 from tests.contract.fakes import capabilities_for, config_for, make_adapter_factory
 
+from talktoharnesses import __version__
 from talktoharnesses.domain.enums import HarnessKind
 from talktoharnesses.domain.models import LaunchSnapshot
 from talktoharnesses.providers.adapter import (
@@ -31,7 +32,7 @@ def _launch(kind: HarnessKind) -> LaunchSnapshot:
         resolved_executable="/bin/true" if kind is HarnessKind.OPENCODE else None,
         harness_version=caps.version,
         working_directory="/tmp",
-        adapter_version="2026.8.0.dev9",
+        adapter_version=__version__,
         capabilities=caps,
         model="default",
         mode="default",

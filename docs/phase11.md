@@ -2,9 +2,9 @@
 
 ## Summary
 
-- Start Phase 11 only from the released `2026.8.0` result and keep that release immutable. Develop
-  this increment as `2026.8.1.dev1`; change it to `2026.8.1` only after the complete Phase 11 gate
-  and the Phase 10 release gates pass again.
+- Start Phase 11 only from the released `2026.8.0` result produced by [Phase 12](phase12.md) and
+  keep that release immutable. Develop this increment as `2026.8.1.dev1`; change it to `2026.8.1`
+  only after the complete Phase 11 gate and the Phase 12 publication gates pass again.
 - Extend the existing Phase 8 search product with deterministic relevance ordering, bounded plain
   text snippets, and a deliberately small query language. Keep PostgreSQL full-text search and
   SQLite FTS5 as the only backends.
@@ -23,10 +23,10 @@
 
 ## Current Baseline and Entry Conditions
 
-Phase 11 begins after Phase 10 has released and verified `2026.8.0`. Before implementation, rerun
+Phase 11 begins after Phase 12 has released and verified `2026.8.0`. Before implementation, rerun
 the built-wheel definition-of-done journeys and confirm that the release checkout has no migration,
 compatibility-document, generated-document, or public-export drift. Product work must not be
-developed against a partially completed Phase 9 or Phase 10 branch.
+developed against a partially completed Phase 9, Phase 10, or Phase 12 branch.
 
 The roadmap's Phase 11 bullets identify the phase that would own several future product ideas; they
 are not a requirement to implement all of them together. This plan selects the smallest coherent

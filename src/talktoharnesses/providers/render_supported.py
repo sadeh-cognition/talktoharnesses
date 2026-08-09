@@ -5,7 +5,10 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from talktoharnesses.providers.compatibility import render_supported_harnesses_markdown
+from talktoharnesses.providers.compatibility import (
+    render_supported_harnesses_markdown,
+    validate_compatibility_documents,
+)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -16,12 +19,21 @@ def main(argv: list[str] | None = None) -> int:
         help="Exit non-zero if the on-disk file differs from regenerated content.",
     )
     parser.add_argument(
+        "--validate",
+        choices=("development", "stable"),
+        default=None,
+        help="Validate packaged compatibility documents before rendering.",
+    )
+    parser.add_argument(
         "--output",
         type=Path,
         default=None,
         help="Output path (default: repo-root SUPPORTED_HARNESSES.md).",
     )
     args = parser.parse_args(argv)
+
+    if args.validate is not None:
+        validate_compatibility_documents(mode=args.validate)
 
     content = render_supported_harnesses_markdown()
     if args.output is not None:

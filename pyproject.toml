@@ -85,3 +85,12 @@ pythonpath = ["."]
 DJANGO_SETTINGS_MODULE = "tests.django_settings"
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+
+[tool.coverage.run]
+source = ["talktoharnesses"]
+omit = ["*/django/migrations/*"]
+
+[tool.coverage.report]
+# The stable release gate enforces --cov-fail-under=91. Keep ordinary Phase 10
+# CI and local reports free of that threshold until the Phase 12 stable cut.
+omit = ["*/django/migrations/*"]

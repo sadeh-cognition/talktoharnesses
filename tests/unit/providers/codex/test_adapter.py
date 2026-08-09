@@ -201,8 +201,16 @@ async def test_two_conversations_isolated(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 @pytest.mark.asyncio
-async def test_unanswerable_approval_event_fails_closed() -> None:
+async def test_unanswerable_approval_event_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_probe(config: HarnessConfiguration):
+        from talktoharnesses.providers.codex.compatibility import match_release
+
+        release = match_release(sdk_version="0.144.4", runtime_version="0.144.4", platform="linux")
+        return release.to_harness_capabilities(), release
+
+    monkeypatch.setattr("talktoharnesses.providers.codex.adapter.probe_codex", fake_probe)
     adapter = CodexAdapter(client_factory=FakeCodex)
+    await adapter.probe(_config())
     session = await adapter.start(
         StartSessionRequest(
             conversation_id=uuid4(),

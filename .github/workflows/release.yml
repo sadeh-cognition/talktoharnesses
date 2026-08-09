@@ -1,0 +1,73 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+env:
+  UV_VERSION: "0.12.3"
+  PYTHON_VERSION: "3.11"
+
+jobs:
+  validate-tag:
+    name: Validate tag and stable gate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: ${{ env.UV_VERSION }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Sync dependencies
+        run: uv sync --locked --extra django --extra all
+      - id: version
+        name: Reject development/local tags and mismatched versions
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          PROJECT_VERSION="$(uv version --short)"
+          if [[ "${PROJECT_VERSION}" == *dev* || "${PROJECT_VERSION}" == *+* ]]; then
+            echo "refusing to release development/local version ${PROJECT_VERSION}" >&2
+            exit 1
+          fi
+          if [[ "${TAG}" != "v${PROJECT_VERSION}" ]]; then
+            echo "tag ${TAG} does not match project version v${PROJECT_VERSION}" >&2
+            exit 1
+          fi
+          echo "version=${PROJECT_VERSION}" >> "${GITHUB_OUTPUT}"
+      - name: Stable release gate
+        run: bash scripts/ci/run.sh stable-gate
+      - name: Upload distributions
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-distributions
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish to PyPI
+    needs: validate-tag
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: ${{ env.UV_VERSION }}
+      - name: Download exact build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: release-distributions
+          path: dist
+      - name: Publish downloaded artifacts
+        run: uv publish dist/*

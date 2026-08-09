@@ -1,34 +1,74 @@
 # talktoharnesses
 
 Unified coding-agent harness interface with an optional Django application
-scaffold. Pre-release (`*.devN`): domain models, pure transitions, adapter
-contracts, and Django-free process/runtime supervision (`talktoharnesses.runtime`)
-are available; no harness adapters or execution facade yet.
+surface. One distribution exposes five adapters (Grok, Cursor, Codex, Claude
+Code, OpenCode), a persistence-backed asynchronous facade, and authenticated
+HTTP/SSE APIs.
 
-Accepted architectural decisions live under [`docs/adr/`](docs/adr/).
+Accepted architectural decisions live under [`docs/adr/`](docs/adr/). Exact
+create/resume support claims are generated in
+[`SUPPORTED_HARNESSES.md`](SUPPORTED_HARNESSES.md). Operational detail lives in:
+
+- [`docs/deployment.md`](docs/deployment.md)
+- [`docs/upgrading.md`](docs/upgrading.md)
+- [`docs/live-testing.md`](docs/live-testing.md)
+- [`docs/releasing.md`](docs/releasing.md)
+- [`docs/performance.md`](docs/performance.md)
 
 ## Install
 
 Requires Python 3.11+.
 
 ```bash
-# Core library (Pydantic only)
+# Core library
 pip install talktoharnesses
 
-# Optional Django application surface
+# Django application surface (SQLite needs FTS5; no database extra)
 pip install "talktoharnesses[django]"
+
+# PostgreSQL multi-worker profile
+pip install "talktoharnesses[django,postgres]"
+
+# Individual provider extras
+pip install "talktoharnesses[grok]"      # marker only; external grok executable
+pip install "talktoharnesses[cursor]"    # marker only; external cursor executable
+pip install "talktoharnesses[codex]"     # pinned openai-codex SDK
+pip install "talktoharnesses[claude]"    # pinned claude-agent-sdk
+pip install "talktoharnesses[opencode]"  # httpx client; external opencode executable
+
+# Full surface
+pip install "talktoharnesses[all]"
 ```
 
 With [uv](https://docs.astral.sh/uv/):
 
 ```bash
 uv add talktoharnesses
-uv add "talktoharnesses[django]"
+uv add "talktoharnesses[django,postgres]"
+uv add "talktoharnesses[all]"
 ```
 
-Django app path for host projects: `talktoharnesses.django`.
+Grok, Cursor, and OpenCode executables are external. The package never discovers,
+installs, upgrades, or invents arbitrary flags for them. Provider SDK/executable
+versions are accepted only when listed in the generated compatibility matrix for
+the current operation and platform.
 
-### ASGI / API (django extra)
+OpenTelemetry's API is a core dependency and is a no-op without host
+configuration. Install and configure your own SDK/exporter packages separately;
+there is no package-owned `otel` extra.
+
+## Quick start (Django)
+
+```python
+# settings.py
+INSTALLED_APPS = [
+    "django.contrib.contenttypes",
+    "django.contrib.auth",
+    "talktoharnesses.django",
+    # ...
+]
+TALKTOHARNESSES_JWT_SIGNING_KEY = "replace-with-a-secret-at-least-32-bytes"
+```
 
 ```python
 # host/asgi.py
@@ -48,22 +88,25 @@ urlpatterns = [
 ```
 
 ```bash
+python manage.py migrate
 uvicorn host.asgi:application --host 127.0.0.1
 ```
 
-Required setting: `TALKTOHARNESSES_JWT_SIGNING_KEY` (≥32 bytes, must not equal
-`SECRET_KEY`). Authentication does not sandbox harness execution — authorized
-turn submitters run local programs as the Django OS user.
+Issue tokens in-process with `talktoharnesses.django.auth.issue_token(user)`.
+The JWT signing key must be at least 32 bytes and must not equal `SECRET_KEY`.
+
+Authenticated submissions execute local harnesses with the Django OS user's
+workspace access. This is not a sandbox.
 
 ## Development
 
 ```bash
-uv sync --extra django   # package + dev tools + Django extra
+uv sync --extra django
 uv run ruff check .
 uv run ruff format --check .
 uv run pyright
-uv run pytest --cov=talktoharnesses
-uv lock                  # refresh lockfile after pyproject edits
+uv run pytest --cov=talktoharnesses --cov-fail-under=91
+uv lock
 ```
 
 ## Build
@@ -74,5 +117,5 @@ uv build --no-sources
 
 ## Versioning
 
-Versions remain pre-releases (`*.devN`) until the five-harness milestone is
-complete. Versioning follows CalVer (`YYYY.M.PATCH`).
+Versions use CalVer (`YYYY.M.PATCH`). Pre-releases remain `*.devN` until the
+stable Phase 12 publication gate passes.

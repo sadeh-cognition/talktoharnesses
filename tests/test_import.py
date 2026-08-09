@@ -87,9 +87,11 @@ def test_acp_and_grok_import_do_not_load_django() -> None:
 import sys
 
 import talktoharnesses.providers.acp
+import talktoharnesses.providers.acp.connection
 import talktoharnesses.providers.grok
 
-assert talktoharnesses.providers.acp.AcpConnection is not None
+assert talktoharnesses.providers.acp.__all__ == []
+assert talktoharnesses.providers.acp.connection.AcpConnection is not None
 assert talktoharnesses.providers.grok.GrokAdapter is not None
 assert "django" not in sys.modules, sorted(sys.modules)
 """

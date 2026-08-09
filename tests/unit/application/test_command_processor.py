@@ -104,9 +104,7 @@ class _Runtime:
         state = await self.persistence.get_worker_snapshot(conversation_id)
         assert state.binding is not None
         binding = state.binding.model_copy(update={"native_session_id": "session-1"})
-        state = state.model_copy(
-            update={"binding": binding}
-        )
+        state = state.model_copy(update={"binding": binding})
         next_state, events = append_events(
             state,
             datetime.now(UTC),

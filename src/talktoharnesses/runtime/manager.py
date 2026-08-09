@@ -8,7 +8,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import cast
+from typing import Literal, cast
 from uuid import UUID, uuid4
 
 from talktoharnesses.application.faults import FaultCallback, FaultPoint, checkpoint
@@ -80,6 +80,15 @@ def _empty_tasks() -> list[asyncio.Task[None]]:
 
 def _is_sdk_managed(adapter: HarnessAdapter) -> bool:
     return isinstance(adapter, SdkManagedAdapter) or getattr(adapter, "sdk_managed", False) is True
+
+
+def _preflight_process_operation(
+    adapter: HarnessAdapter,
+    mode: Literal["create", "resume"],
+) -> None:
+    preflight = getattr(adapter, "preflight_operation", None)
+    if callable(preflight):
+        preflight(mode)
 
 
 def _map_resume_reason(exc: DomainError) -> RecoveryReasonCode:
@@ -324,6 +333,7 @@ class RuntimeManager:
                 configuration=configuration,
                 adapter_version=adapter_version,
             )
+            _preflight_process_operation(plan.adapter, "resume")
         except DomainError as exc:
             raise DomainError(
                 ErrorCode.PROVIDER_INCOMPATIBLE,
@@ -624,6 +634,10 @@ class RuntimeManager:
                 plan,
                 configuration=configuration,
                 adapter_version=adapter_version,
+            )
+            _preflight_process_operation(
+                adapter,
+                "create" if resume_native_id is None else "resume",
             )
             if not sdk_managed:
                 handle = await self._spawn_process(
@@ -1150,6 +1164,7 @@ class RuntimeManager:
                 configuration=configuration,
                 adapter_version=adapter_version,
             )
+            _preflight_process_operation(plan.adapter, "create")
             if not plan.sdk_managed:
                 handle = await self._spawn_process(
                     plan,

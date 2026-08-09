@@ -13,7 +13,13 @@ from pydantic import BaseModel, ConfigDict, Field
 from talktoharnesses.domain.enums import ErrorCode, HarnessKind
 from talktoharnesses.domain.errors import DomainError
 from talktoharnesses.domain.models import HarnessCapabilities
-from talktoharnesses.providers.compatibility import ReleaseCapabilities, yes_no
+from talktoharnesses.providers.compatibility import (
+    CompatibilityMatrixEntry,
+    ReleaseCapabilities,
+    assert_matrix_membership,
+    validate_matrices,
+    yes_no,
+)
 
 _COMPAT = ConfigDict(extra="forbid", frozen=True)
 
@@ -46,15 +52,26 @@ class ClaudeCompatibilityDoc(BaseModel):
 
     adapter_version: str
     releases: list[ClaudeReleaseRecord] = Field(default_factory=list[ClaudeReleaseRecord])
-    create_matrix: list[str] = Field(default_factory=list[str])
-    resume_matrix: list[str] = Field(default_factory=list[str])
+    create_matrix: list[CompatibilityMatrixEntry] = Field(
+        default_factory=list[CompatibilityMatrixEntry]
+    )
+    resume_matrix: list[CompatibilityMatrixEntry] = Field(
+        default_factory=list[CompatibilityMatrixEntry]
+    )
 
 
 @lru_cache(maxsize=1)
 def load_claude_compatibility() -> ClaudeCompatibilityDoc:
     root = resources.files("talktoharnesses.data.compatibility")
     data = (root / "claude.json").read_text(encoding="utf-8")
-    return ClaudeCompatibilityDoc.model_validate(json.loads(data))
+    doc = ClaudeCompatibilityDoc.model_validate(json.loads(data))
+    validate_matrices(
+        releases=doc.releases,
+        create_matrix=doc.create_matrix,
+        resume_matrix=doc.resume_matrix,
+        harness_label="claude",
+    )
+    return doc
 
 
 def match_release(
@@ -95,6 +112,25 @@ def match_release(
     )
 
 
+def enforce_published_operation(
+    release: ClaudeReleaseRecord,
+    *,
+    mode: Literal["create", "resume"],
+    platform: str | None = None,
+    enforce_published: bool = True,
+) -> None:
+    doc = load_claude_compatibility()
+    matrix = doc.create_matrix if mode == "create" else doc.resume_matrix
+    assert_matrix_membership(
+        release_id=release.id,
+        platform=platform or sys.platform,
+        matrix=matrix,
+        mode=mode,
+        harness_label="claude",
+        enforce_published=enforce_published,
+    )
+
+
 class ClaudeCompatibilitySection:
     def __init__(self, doc: ClaudeCompatibilityDoc | None = None) -> None:
         self._doc = doc or load_claude_compatibility()
@@ -108,11 +144,11 @@ class ClaudeCompatibilitySection:
         return self._doc.adapter_version
 
     @property
-    def create_matrix(self) -> list[str]:
+    def create_matrix(self) -> list[CompatibilityMatrixEntry]:
         return list(self._doc.create_matrix)
 
     @property
-    def resume_matrix(self) -> list[str]:
+    def resume_matrix(self) -> list[CompatibilityMatrixEntry]:
         return list(self._doc.resume_matrix)
 
     def render_release_rows(self) -> list[str]:

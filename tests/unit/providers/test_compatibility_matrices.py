@@ -1,0 +1,209 @@
+"""Shared exact create/resume matrix validation and membership tests."""
+
+from __future__ import annotations
+
+import json
+from typing import Any
+
+import pytest
+from pydantic import ValidationError
+
+from talktoharnesses.domain.enums import ErrorCode
+from talktoharnesses.domain.errors import DomainError
+from talktoharnesses.providers.claude.compatibility import load_claude_compatibility
+from talktoharnesses.providers.codex.compatibility import load_codex_compatibility
+from talktoharnesses.providers.compatibility import (
+    CompatibilityMatrixEntry,
+    ReleaseCapabilities,
+    assert_matrix_membership,
+    is_development_version,
+    validate_compatibility_documents,
+    validate_matrices,
+)
+from talktoharnesses.providers.cursor.compatibility import load_cursor_compatibility
+from talktoharnesses.providers.grok.compatibility import load_grok_compatibility
+from talktoharnesses.providers.opencode.compatibility import load_opencode_compatibility
+
+
+class _Release:
+    def __init__(
+        self,
+        release_id: str,
+        *,
+        platforms: list[str],
+        supports_resume: bool = True,
+    ) -> None:
+        self.id = release_id
+        self.platforms = platforms
+        self.capabilities = ReleaseCapabilities(supports_resume=supports_resume)
+
+
+PROVIDERS = (
+    ("grok", load_grok_compatibility),
+    ("cursor", load_cursor_compatibility),
+    ("codex", load_codex_compatibility),
+    ("claude", load_claude_compatibility),
+    ("opencode", load_opencode_compatibility),
+)
+
+
+@pytest.mark.parametrize("label,loader", PROVIDERS)
+def test_packaged_documents_load_with_empty_matrices(label: str, loader: Any) -> None:
+    del label
+    doc = loader()
+    assert doc.adapter_version == "2026.8.0.dev9"
+    assert doc.create_matrix == []
+    assert doc.resume_matrix == []
+    assert doc.releases
+
+
+def test_development_validation_allows_empty_matrices() -> None:
+    validate_compatibility_documents(mode="development")
+
+
+def test_stable_validation_rejects_empty_matrices() -> None:
+    with pytest.raises(DomainError) as exc:
+        validate_compatibility_documents(mode="stable")
+    assert exc.value.code is ErrorCode.PROVIDER_INCOMPATIBLE
+
+
+def test_matrix_entry_rejects_extra_fields() -> None:
+    with pytest.raises(ValidationError):
+        CompatibilityMatrixEntry.model_validate(
+            {"release_id": "x", "platform": "linux", "extra": True}
+        )
+
+
+def test_matrix_entry_rejects_unknown_platform() -> None:
+    with pytest.raises(ValidationError):
+        CompatibilityMatrixEntry.model_validate({"release_id": "x", "platform": "freebsd"})
+
+
+def test_validate_matrices_rejects_unknown_release() -> None:
+    releases = [_Release("known", platforms=["linux"])]
+    with pytest.raises(DomainError) as exc:
+        validate_matrices(
+            releases=releases,
+            create_matrix=[CompatibilityMatrixEntry(release_id="missing", platform="linux")],
+            resume_matrix=[],
+            harness_label="test",
+        )
+    assert exc.value.code is ErrorCode.PROVIDER_INCOMPATIBLE
+
+
+def test_validate_matrices_rejects_duplicate_entries() -> None:
+    releases = [_Release("known", platforms=["linux"])]
+    entry = CompatibilityMatrixEntry(release_id="known", platform="linux")
+    with pytest.raises(DomainError) as exc:
+        validate_matrices(
+            releases=releases,
+            create_matrix=[entry, entry],
+            resume_matrix=[],
+            harness_label="test",
+        )
+    assert "duplicate" in str(exc.value).lower()
+
+
+def test_validate_matrices_rejects_platform_absent_from_release() -> None:
+    releases = [_Release("known", platforms=["linux"])]
+    with pytest.raises(DomainError) as exc:
+        validate_matrices(
+            releases=releases,
+            create_matrix=[CompatibilityMatrixEntry(release_id="known", platform="darwin")],
+            resume_matrix=[],
+            harness_label="test",
+        )
+    assert exc.value.code is ErrorCode.PROVIDER_INCOMPATIBLE
+
+
+def test_validate_matrices_rejects_release_with_no_platforms() -> None:
+    releases = [_Release("known", platforms=[])]
+    with pytest.raises(DomainError) as exc:
+        validate_matrices(
+            releases=releases,
+            create_matrix=[CompatibilityMatrixEntry(release_id="known", platform="linux")],
+            resume_matrix=[],
+            harness_label="test",
+        )
+    assert exc.value.code is ErrorCode.PROVIDER_INCOMPATIBLE
+
+
+def test_validate_matrices_rejects_resume_without_capability() -> None:
+    releases = [_Release("known", platforms=["linux"], supports_resume=False)]
+    with pytest.raises(DomainError) as exc:
+        validate_matrices(
+            releases=releases,
+            create_matrix=[],
+            resume_matrix=[CompatibilityMatrixEntry(release_id="known", platform="linux")],
+            harness_label="test",
+        )
+    assert "resume" in str(exc.value).lower()
+
+
+def test_membership_allows_empty_matrix_on_dev_version() -> None:
+    assert_matrix_membership(
+        release_id="known",
+        platform="linux",
+        matrix=[],
+        mode="create",
+        harness_label="test",
+        package_version="2026.8.0.dev9",
+    )
+
+
+def test_membership_rejects_empty_matrix_on_stable_version() -> None:
+    with pytest.raises(DomainError) as exc:
+        assert_matrix_membership(
+            release_id="known",
+            platform="linux",
+            matrix=[],
+            mode="create",
+            harness_label="test",
+            package_version="2026.8.0",
+        )
+    assert exc.value.code is ErrorCode.PROVIDER_INCOMPATIBLE
+
+
+def test_membership_requires_exact_platform() -> None:
+    matrix = [CompatibilityMatrixEntry(release_id="known", platform="linux")]
+    assert_matrix_membership(
+        release_id="known",
+        platform="linux",
+        matrix=matrix,
+        mode="create",
+        harness_label="test",
+        package_version="2026.8.0",
+    )
+    with pytest.raises(DomainError):
+        assert_matrix_membership(
+            release_id="known",
+            platform="darwin",
+            matrix=matrix,
+            mode="create",
+            harness_label="test",
+            package_version="2026.8.0",
+        )
+
+
+def test_membership_bypass_for_fixtures() -> None:
+    assert_matrix_membership(
+        release_id="missing",
+        platform="linux",
+        matrix=[CompatibilityMatrixEntry(release_id="known", platform="linux")],
+        mode="create",
+        harness_label="test",
+        package_version="2026.8.0",
+        enforce_published=False,
+    )
+
+
+def test_is_development_version() -> None:
+    assert is_development_version("2026.8.0.dev9") is True
+    assert is_development_version("2026.8.0") is False
+
+
+def test_matrix_entry_round_trip_json() -> None:
+    raw = json.dumps([{"release_id": "known", "platform": "linux"}])
+    entries = [CompatibilityMatrixEntry.model_validate(item) for item in json.loads(raw)]
+    assert entries[0].release_id == "known"
+    assert entries[0].platform == "linux"
