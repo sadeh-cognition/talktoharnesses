@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 from unittest.mock import Mock
 from uuid import UUID
 
@@ -16,7 +16,10 @@ from pydantic import ValidationError
 from talktoharnesses.application.broker import InProcessCommittedEventBroker
 from talktoharnesses.application.service import TalkToHarnessesService
 from talktoharnesses.django import asgi as asgi_mod
-from talktoharnesses.django.api.schemas import ApprovalRuleBody
+from talktoharnesses.django.api import api
+from talktoharnesses.django.api.schemas import (
+    ApprovalRuleBody,
+)
 from talktoharnesses.django.asgi import reset_service_for_tests
 from talktoharnesses.django.auth import (
     authenticate_bearer_sync,
@@ -58,6 +61,21 @@ def test_approval_rule_body_uses_strict_discriminated_unions() -> None:
                 "matcher": {"kind": "exact_argv", "argv": ["ls"]},
             }
         )
+
+
+def test_openapi_describes_cursor_model_selector_on_existing_fields() -> None:
+    openapi = cast(dict[str, Any], api.get_openapi_schema(path_prefix="/api/v1"))
+    schemas = cast(dict[str, Any], openapi["components"])["schemas"]
+    configuration_model = cast(dict[str, Any], schemas["HarnessConfigurationBody"])["properties"][
+        "model"
+    ]
+    turn_model = cast(dict[str, Any], schemas["SubmitTurnBody"])["properties"]["model"]
+
+    for field in (configuration_model, turn_model):
+        assert "model[key=value,...]" in field["description"]
+        assert "composer-2.5[fast=false]" in field["description"]
+    assert "session baseline" in configuration_model["description"]
+    assert "one-turn" in turn_model["description"]
 
 
 @pytest.fixture

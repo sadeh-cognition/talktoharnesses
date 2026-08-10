@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import logging
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from typing import Any, Literal, cast
 from uuid import UUID, uuid4
 
@@ -20,9 +21,15 @@ from talktoharnesses.domain.models import (
 )
 from talktoharnesses.providers.acp.connection import AcpConnection
 from talktoharnesses.providers.acp.jsonrpc import JsonRpcRemoteError, ProtocolCloseError
-from talktoharnesses.providers.acp.protocol import cursor_acp_protocol
-from talktoharnesses.providers.acp.schemas.base import ALLOWED_OUTBOUND_METHODS
-from talktoharnesses.providers.acp.schemas.cursor_ext import CURSOR_CONTROL_NOTIFICATIONS
+from talktoharnesses.providers.acp.protocol import (
+    CURSOR_ALLOWED_OUTBOUND_METHODS,
+    cursor_acp_protocol,
+)
+from talktoharnesses.providers.acp.schemas.cursor_ext import (
+    CURSOR_CONTROL_NOTIFICATIONS,
+    CursorSelectConfigOption,
+    parse_cursor_config_options,
+)
 from talktoharnesses.providers.adapter import (
     HarnessInteractionRequest,
     HarnessSession,
@@ -44,6 +51,8 @@ logger = logging.getLogger(__name__)
 
 CLIENT_INFO = {"name": "talktoharnesses", "version": __version__}
 
+_MODEL_PARAMETER_CATEGORIES: frozenset[str] = frozenset({"model_config", "thought_level"})
+
 
 def _map_dict(value: object) -> dict[str, Any]:
     # Accept partially-unknown JSON dicts under strict Pyright.
@@ -51,6 +60,12 @@ def _map_dict(value: object) -> dict[str, Any]:
         return {}
     raw = cast(dict[object, object], cast(object, value))
     return {str(k): v for k, v in raw.items()}
+
+
+@dataclass(frozen=True, slots=True)
+class _CursorModelSelection:
+    model_id: str
+    parameters: tuple[tuple[str, str], ...] = ()
 
 
 class CursorAdapter:
@@ -72,6 +87,9 @@ class CursorAdapter:
         self._pending_interactions: dict[UUID, tuple[str | int, list[dict[str, Any]]]] = {}
         self._closed = False
         self._active_prompt_request_id: int | None = None
+        self._config_options: tuple[CursorSelectConfigOption, ...] = ()
+        self._session_model_selection: _CursorModelSelection | None = None
+        self._current_model_selection: _CursorModelSelection | None = None
 
     def bind_process(self, process: ProcessHandle) -> None:
         self._process = process
@@ -90,10 +108,10 @@ class CursorAdapter:
         return self._normalizer.export_seen()
 
     def build_argv(self, config: HarnessConfiguration) -> tuple[str, ...]:
-        return build_cursor_argv(model=config.model, mode=config.mode)
+        del config
+        return build_cursor_argv()
 
     async def probe(self, config: HarnessConfiguration) -> HarnessCapabilities:
-        build_cursor_argv(model=config.model, mode=config.mode)
         caps, release = await probe_cursor(config)
         self._capabilities = caps
         self._release = release
@@ -118,6 +136,12 @@ class CursorAdapter:
         )
         result = await future
         session_id = _require_session_id(result)
+        await self._apply_session_configuration(
+            session_id=session_id,
+            session_result=result,
+            configured_model=request.configuration.model,
+            configured_mode=request.configuration.mode,
+        )
         self._normalizer.set_session(session_id, resync=False)
         session = HarnessSession(
             conversation_id=request.conversation_id,
@@ -149,6 +173,12 @@ class CursorAdapter:
         session_id = _session_id_or_none(result) or request.native_session_id
         if not session_id:
             raise DomainError(ErrorCode.PROTOCOL_ERROR, "session result missing sessionId")
+        await self._apply_session_configuration(
+            session_id=session_id,
+            session_result=result,
+            configured_model=request.configuration.model,
+            configured_mode=request.configuration.mode,
+        )
         self._normalizer.set_session(session_id, resync=False)
         session = HarnessSession(
             conversation_id=request.conversation_id,
@@ -166,6 +196,10 @@ class CursorAdapter:
         assert self._connection is not None
         if not session.native_session_id:
             raise DomainError(ErrorCode.INVALID_STATE, "session has no native_session_id")
+        await self._apply_turn_model_selection(
+            session_id=session.native_session_id,
+            request_model=request.model,
+        )
         self._normalizer.begin_turn(request.turn_id)
         future, _delivered = await self._connection.request(
             "session/prompt",
@@ -294,8 +328,12 @@ class CursorAdapter:
             {
                 "protocolVersion": 1,
                 "clientInfo": CLIENT_INFO,
-                # No client fs/terminal capabilities unless fixtures prove reverse handlers.
-                "clientCapabilities": {},
+                # Only the parameterized model picker; no fs/terminal reverse handlers.
+                "clientCapabilities": {
+                    "_meta": {
+                        "parameterizedModelPicker": True,
+                    }
+                },
             },
         )
         result = await future
@@ -344,13 +382,231 @@ class CursorAdapter:
                 "initialize result does not advertise session loading",
                 details={"release_id": self._release.id},
             )
-        missing_methods = set(self._release.required_agent_methods) - ALLOWED_OUTBOUND_METHODS
+        missing_methods = (
+            set(self._release.required_agent_methods) - CURSOR_ALLOWED_OUTBOUND_METHODS
+        )
         if missing_methods:
             raise DomainError(
                 ErrorCode.PROVIDER_INCOMPATIBLE,
                 "adapter does not implement required agent methods",
                 details={"missing_methods": sorted(missing_methods)},
             )
+
+    async def _apply_session_configuration(
+        self,
+        *,
+        session_id: str,
+        session_result: object,
+        configured_model: str | None,
+        configured_mode: str | None,
+    ) -> None:
+        options = parse_cursor_config_options(session_result)
+        model_opt = _find_config_option(options, "model")
+        mode_opt = _find_config_option(options, "mode")
+        if model_opt is None or mode_opt is None:
+            raise DomainError(
+                ErrorCode.PROVIDER_INCOMPATIBLE,
+                "Cursor session did not advertise required model and mode configuration options",
+                details={
+                    "has_model": model_opt is not None,
+                    "has_mode": mode_opt is not None,
+                },
+            )
+
+        if configured_model is not None:
+            selection = _parse_model_selector(configured_model)
+            options = await self._apply_model_selection(
+                session_id=session_id,
+                selection=selection,
+                options=options,
+                complete=False,
+            )
+
+        if configured_mode is not None:
+            options = await self._set_config_option(
+                session_id=session_id,
+                config_id="mode",
+                value=configured_mode,
+                options=options,
+            )
+
+        captured = self._record_config_options(options)
+        self._session_model_selection = captured
+
+    async def _apply_turn_model_selection(
+        self,
+        *,
+        session_id: str,
+        request_model: str | None,
+    ) -> None:
+        if request_model is not None:
+            selection = _parse_model_selector(request_model)
+            options = await self._apply_model_selection(
+                session_id=session_id,
+                selection=selection,
+                options=self._config_options,
+                complete=False,
+            )
+            self._record_config_options(options)
+            return
+
+        baseline = self._session_model_selection
+        if baseline is None:
+            return
+        if self._current_model_selection == baseline:
+            return
+        options = await self._apply_model_selection(
+            session_id=session_id,
+            selection=baseline,
+            options=self._config_options,
+            complete=True,
+        )
+        self._record_config_options(options)
+
+    def _record_config_options(
+        self,
+        options: tuple[CursorSelectConfigOption, ...],
+    ) -> _CursorModelSelection:
+        current = _capture_model_selection(options)
+        self._config_options = options
+        self._current_model_selection = current
+        return current
+
+    async def _apply_model_selection(
+        self,
+        *,
+        session_id: str,
+        selection: _CursorModelSelection,
+        options: tuple[CursorSelectConfigOption, ...],
+        complete: bool,
+    ) -> tuple[CursorSelectConfigOption, ...]:
+        """Apply a parsed model selection.
+
+        When ``complete`` is True, ``selection.parameters`` is the full desired
+        parameter set (session baseline restore). When False, only explicit
+        selector parameters are set; other parameters keep Cursor defaults after
+        the model change.
+        """
+        if complete:
+            current = _capture_model_selection(options)
+            if current == selection:
+                return options
+
+        model_opt = _find_config_option(options, "model")
+        if model_opt is None:
+            raise DomainError(
+                ErrorCode.PROVIDER_INCOMPATIBLE,
+                "Cursor session has no model configuration option",
+            )
+        if model_opt.currentValue != selection.model_id:
+            options = await self._set_config_option(
+                session_id=session_id,
+                config_id="model",
+                value=selection.model_id,
+                options=options,
+            )
+        elif not complete and not selection.parameters:
+            # Model already active and no explicit parameters — nothing to set.
+            return options
+
+        for param_id, value in selection.parameters:
+            option = _find_config_option(options, param_id)
+            if option is None:
+                raise DomainError(
+                    ErrorCode.PROVIDER_INCOMPATIBLE,
+                    "Cursor model parameter is not advertised for the selected model",
+                    details={"parameter_id": param_id, "model_id": selection.model_id},
+                )
+            if option.category not in _MODEL_PARAMETER_CATEGORIES:
+                raise DomainError(
+                    ErrorCode.PROVIDER_INCOMPATIBLE,
+                    "configuration option is not a model parameter",
+                    details={
+                        "parameter_id": param_id,
+                        "category": option.category,
+                    },
+                )
+            if option.currentValue == value:
+                continue
+            options = await self._set_config_option(
+                session_id=session_id,
+                config_id=param_id,
+                value=value,
+                options=options,
+            )
+        return options
+
+    async def _set_config_option(
+        self,
+        *,
+        session_id: str,
+        config_id: str,
+        value: str,
+        options: tuple[CursorSelectConfigOption, ...],
+    ) -> tuple[CursorSelectConfigOption, ...]:
+        option = _find_config_option(options, config_id)
+        if option is None:
+            raise DomainError(
+                ErrorCode.PROVIDER_INCOMPATIBLE,
+                "Cursor configuration option is not advertised",
+                details={"config_id": config_id},
+            )
+        advertised = tuple(item.value for item in option.options)
+        if value not in advertised:
+            raise DomainError(
+                ErrorCode.PROVIDER_INCOMPATIBLE,
+                "Cursor configuration value is not advertised",
+                details={
+                    "config_id": config_id,
+                    "value": value,
+                    "advertised_values": list(advertised),
+                },
+            )
+        if option.currentValue == value:
+            return options
+
+        assert self._connection is not None
+        try:
+            future, _ = await self._connection.request(
+                "session/set_config_option",
+                {
+                    "sessionId": session_id,
+                    "configId": config_id,
+                    "value": value,
+                },
+            )
+            result = await future
+        except JsonRpcRemoteError as exc:
+            raise DomainError(
+                ErrorCode.PROVIDER_INCOMPATIBLE,
+                "Cursor rejected configuration option",
+                details={"config_id": config_id, "remote_code": exc.code},
+            ) from exc
+
+        try:
+            new_options = parse_cursor_config_options(result)
+        except DomainError:
+            raise
+        except Exception as exc:
+            raise DomainError(
+                ErrorCode.PROTOCOL_ERROR,
+                "malformed Cursor set_config_option response",
+                details={"config_id": config_id},
+            ) from exc
+
+        updated = _find_config_option(new_options, config_id)
+        if updated is None or updated.currentValue != value:
+            raise DomainError(
+                ErrorCode.PROTOCOL_ERROR,
+                "Cursor set_config_option response did not reflect requested value",
+                details={
+                    "config_id": config_id,
+                    "requested": value,
+                    "currentValue": None if updated is None else updated.currentValue,
+                },
+            )
+        self._record_config_options(new_options)
+        return new_options
 
     async def _watch_prompt(self, future: asyncio.Future[Any]) -> None:
         try:
@@ -446,6 +702,113 @@ class CursorAdapter:
             raise DomainError(ErrorCode.INVALID_STATE, "adapter has no active session")
         if self._closed:
             raise DomainError(ErrorCode.INVALID_STATE, "adapter is closed")
+
+
+def _parse_model_selector(value: str) -> _CursorModelSelection:
+    selector = value.strip()
+    if not selector:
+        raise DomainError(
+            ErrorCode.PROVIDER_INCOMPATIBLE,
+            "Cursor model selector is empty",
+        )
+
+    if "[" not in selector:
+        model_id = selector
+        if not model_id:
+            raise DomainError(
+                ErrorCode.PROVIDER_INCOMPATIBLE,
+                "Cursor model selector is missing a model ID",
+            )
+        if model_id == "auto":
+            model_id = "default"
+        return _CursorModelSelection(model_id=model_id)
+
+    if selector.count("[") != 1:
+        raise DomainError(
+            ErrorCode.PROVIDER_INCOMPATIBLE,
+            "Cursor model selector may contain at most one parameter section",
+            details={"selector": selector},
+        )
+    open_idx = selector.index("[")
+    if selector.count("]") != 1 or not selector.endswith("]"):
+        raise DomainError(
+            ErrorCode.PROVIDER_INCOMPATIBLE,
+            "Cursor model selector must contain exactly one closing bracket",
+            details={"selector": selector},
+        )
+    # After strip, ] must be the final character (no trailing content).
+    model_id = selector[:open_idx].strip()
+    if not model_id:
+        raise DomainError(
+            ErrorCode.PROVIDER_INCOMPATIBLE,
+            "Cursor model selector is missing a model ID",
+            details={"selector": selector},
+        )
+    params_body = selector[open_idx + 1 : -1]
+    parameters: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    if params_body.strip():
+        for raw_entry in params_body.split(","):
+            entry = raw_entry.strip()
+            if not entry:
+                raise DomainError(
+                    ErrorCode.PROVIDER_INCOMPATIBLE,
+                    "Cursor model selector has an empty parameter entry",
+                    details={"selector": selector},
+                )
+            if entry.count("=") != 1:
+                raise DomainError(
+                    ErrorCode.PROVIDER_INCOMPATIBLE,
+                    "Cursor model selector parameter must contain exactly one '='",
+                    details={"selector": selector, "entry": entry},
+                )
+            raw_id, raw_value = entry.split("=", 1)
+            param_id = raw_id.strip()
+            param_value = raw_value.strip()
+            if not param_id or not param_value:
+                raise DomainError(
+                    ErrorCode.PROVIDER_INCOMPATIBLE,
+                    "Cursor model selector parameter ID and value must be non-empty",
+                    details={"selector": selector},
+                )
+            if param_id in seen:
+                raise DomainError(
+                    ErrorCode.PROVIDER_INCOMPATIBLE,
+                    "Cursor model selector has a duplicate parameter ID",
+                    details={"selector": selector, "parameter_id": param_id},
+                )
+            seen.add(param_id)
+            parameters.append((param_id, param_value))
+
+    if model_id == "auto":
+        model_id = "default"
+    return _CursorModelSelection(model_id=model_id, parameters=tuple(parameters))
+
+
+def _find_config_option(
+    options: tuple[CursorSelectConfigOption, ...],
+    config_id: str,
+) -> CursorSelectConfigOption | None:
+    for option in options:
+        if option.id == config_id:
+            return option
+    return None
+
+
+def _capture_model_selection(
+    options: tuple[CursorSelectConfigOption, ...],
+) -> _CursorModelSelection:
+    model_opt = _find_config_option(options, "model")
+    if model_opt is None:
+        raise DomainError(
+            ErrorCode.PROVIDER_INCOMPATIBLE,
+            "Cursor session has no model configuration option",
+        )
+    parameters: list[tuple[str, str]] = []
+    for option in options:
+        if option.category in _MODEL_PARAMETER_CATEGORIES:
+            parameters.append((option.id, option.currentValue))
+    return _CursorModelSelection(model_id=model_opt.currentValue, parameters=tuple(parameters))
 
 
 def _session_id_or_none(result: Any) -> str | None:

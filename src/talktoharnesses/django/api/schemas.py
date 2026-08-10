@@ -19,6 +19,12 @@ from talktoharnesses.domain.models import (
 # Request models are non-strict so JSON strings coerce to enums.
 _REQUEST = ConfigDict(extra="forbid", strict=False)
 
+_CURSOR_MODEL_SELECTOR_DESCRIPTION = (
+    "For Cursor, this existing string field accepts either a model ID or "
+    "`model[key=value,...]`, for example `composer-2.5[fast=false]`. "
+    "Parameter names and values are model-specific and must be advertised by Cursor."
+)
+
 
 class HarnessConfigurationBody(BaseModel):
     """Wire request shape for harness configuration (coerces JSON enums)."""
@@ -27,7 +33,13 @@ class HarnessConfigurationBody(BaseModel):
 
     kind: HarnessKind
     executable_path: str | None = None
-    model: str | None = None
+    model: str | None = Field(
+        default=None,
+        description=(
+            "Provider model selector used as the session baseline. "
+            f"{_CURSOR_MODEL_SELECTOR_DESCRIPTION}"
+        ),
+    )
     mode: str | None = None
     working_directory: str
     workspace_roots: tuple[str, ...] = ()
@@ -86,7 +98,14 @@ class SubmitTurnBody(BaseModel):
     model_config = _REQUEST
 
     prompt: str = Field(min_length=1)
-    model: str | None = None
+    model: str | None = Field(
+        default=None,
+        description=(
+            "Optional one-turn provider model override. "
+            f"{_CURSOR_MODEL_SELECTOR_DESCRIPTION} "
+            "For Cursor, the session baseline is restored before the next turn without an override."
+        ),
+    )
 
 
 class EditQueuedPromptBody(BaseModel):

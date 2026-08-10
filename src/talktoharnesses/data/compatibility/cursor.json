@@ -23,10 +23,13 @@
         "session/new",
         "session/load",
         "session/prompt",
-        "session/cancel"
+        "session/cancel",
+        "session/set_config_option"
       ],
-      "allowlisted_extensions": [],
-      "notes": "Live create/resume/interaction proven on linux."
+      "allowlisted_extensions": [
+        "clientCapabilities._meta.parameterizedModelPicker"
+      ],
+      "notes": "Live create/resume, permissions, model-family selection, parameter selection, and Agent/Plan/Ask selection proven on linux."
     }
   ],
   "create_matrix": [

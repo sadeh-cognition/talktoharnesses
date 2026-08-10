@@ -29,6 +29,15 @@ PROVIDER_KINDS = (
 
 def _launch(kind: HarnessKind) -> LaunchSnapshot:
     caps = capabilities_for(kind)
+    if kind is HarnessKind.CURSOR:
+        model = "composer-2.5[fast=false]"
+        mode = "ask"
+    elif kind in {HarnessKind.OPENCODE, HarnessKind.PRIME_AGENT}:
+        model = "test/default"
+        mode = "high" if kind is HarnessKind.PRIME_AGENT else "default"
+    else:
+        model = "default"
+        mode = "default"
     return LaunchSnapshot(
         resolved_executable=(
             "/bin/true" if kind in {HarnessKind.OPENCODE, HarnessKind.PRIME_AGENT} else None
@@ -37,10 +46,8 @@ def _launch(kind: HarnessKind) -> LaunchSnapshot:
         working_directory="/tmp",
         adapter_version=__version__,
         capabilities=caps,
-        model=(
-            "test/default" if kind in {HarnessKind.OPENCODE, HarnessKind.PRIME_AGENT} else "default"
-        ),
-        mode="high" if kind is HarnessKind.PRIME_AGENT else "default",
+        model=model,
+        mode=mode,
     )
 
 

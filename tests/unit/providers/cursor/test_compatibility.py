@@ -23,6 +23,8 @@ def test_load_and_match_release() -> None:
     caps = release.to_harness_capabilities()
     assert caps.supports_resume is True
     assert caps.supports_steer is False
+    assert "session/set_config_option" in release.required_agent_methods
+    assert "clientCapabilities._meta.parameterizedModelPicker" in release.allowlisted_extensions
 
 
 def test_unknown_version_fails() -> None:
@@ -43,11 +45,5 @@ def test_markdown_includes_cursor() -> None:
     assert "cursor-2026.08.04-aaa8809" in md
 
 
-def test_build_argv() -> None:
+def test_build_argv_accepts_no_model_mode_flags() -> None:
     assert build_cursor_argv() == ("acp",)
-    with pytest.raises(DomainError) as model_error:
-        build_cursor_argv(model="auto")
-    assert model_error.value.code is ErrorCode.PROVIDER_INCOMPATIBLE
-    with pytest.raises(DomainError) as mode_error:
-        build_cursor_argv(mode="plan")
-    assert mode_error.value.code is ErrorCode.PROVIDER_INCOMPATIBLE

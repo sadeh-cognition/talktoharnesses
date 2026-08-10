@@ -231,3 +231,31 @@ async def test_inbound_request_without_handler_and_control_notification() -> Non
         await asyncio.wait_for(pending, timeout=1)
     assert exc.value.code is ErrorCode.UNSUPPORTED_NATIVE_EVENT
     await conn.close()
+
+
+@pytest.mark.asyncio
+async def test_cursor_protocol_allows_set_config_option_grok_rejects() -> None:
+    from talktoharnesses.providers.acp.protocol import cursor_acp_protocol, grok_acp_protocol
+
+    cursor_proc = FakeProcess()
+    cursor_conn = AcpConnection(cursor_proc, protocol=cursor_acp_protocol())  # type: ignore[arg-type]
+    await cursor_conn.start()
+    future, _ = await cursor_conn.request(
+        "session/set_config_option",
+        {"sessionId": "s", "configId": "mode", "value": "ask"},
+    )
+    await cursor_proc.feed('{"jsonrpc":"2.0","id":1,"result":{"configOptions":[]}}')
+    result = await asyncio.wait_for(future, timeout=1)
+    assert result == {"configOptions": []}
+    await cursor_conn.close()
+
+    grok_proc = FakeProcess()
+    grok_conn = AcpConnection(grok_proc, protocol=grok_acp_protocol())  # type: ignore[arg-type]
+    await grok_conn.start()
+    with pytest.raises(DomainError) as exc:
+        await grok_conn.request(
+            "session/set_config_option",
+            {"sessionId": "s", "configId": "mode", "value": "ask"},
+        )
+    assert exc.value.code is ErrorCode.UNSUPPORTED_NATIVE_EVENT
+    await grok_conn.close()

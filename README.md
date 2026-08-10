@@ -100,6 +100,51 @@ The JWT signing key must be at least 32 bytes and must not equal `SECRET_KEY`.
 Authenticated submissions execute local harnesses with the Django OS user's
 workspace access. This is not a sandbox.
 
+## Cursor model selectors
+
+Cursor model parameters use the existing string-valued `model` field; there is
+no separate provider-neutral parameter object. The accepted forms are:
+
+```text
+model-id
+model-id[key=value,...]
+```
+
+For example, a Cursor harness can set its session baseline with:
+
+```json
+{
+  "kind": "cursor",
+  "executable_path": "/path/to/cursor-agent",
+  "working_directory": "/workspace",
+  "model": "composer-2.5[fast=false]",
+  "mode": "ask"
+}
+```
+
+The `model` field on `POST /conversations/{conversation_id}/turns` accepts the
+same syntax for a one-turn override:
+
+```json
+{
+  "prompt": "Review this change",
+  "model": "gpt-5.6-sol[context=272k,reasoning=high,fast=false]"
+}
+```
+
+Parameter names and values are case-sensitive, model-specific, and validated
+against the options advertised by the active Cursor release. Whitespace around
+the selector, IDs, and values is ignored; duplicate keys, empty keys or values,
+and commas or brackets inside values are invalid. `auto` selects Cursor's
+default model. Parameters omitted from a selector retain the values Cursor
+advertises after selecting that model.
+
+`HarnessConfiguration.model` establishes the baseline for create and resume.
+After a turn-level override, the next turn without a `model` restores that
+baseline. Model selectors do not change the separately configured Cursor
+workflow `mode` (`agent`, `plan`, or `ask`). Invalid selectors fail before the
+prompt is sent.
+
 ## Development
 
 ```bash

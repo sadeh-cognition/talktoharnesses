@@ -2,29 +2,11 @@
 
 from __future__ import annotations
 
-from talktoharnesses.domain.enums import ErrorCode
-from talktoharnesses.domain.errors import DomainError
 
-
-def build_cursor_argv(
-    *,
-    model: str | None = None,
-    mode: str | None = None,
-) -> tuple[str, ...]:
+def build_cursor_argv() -> tuple[str, ...]:
     """Build argv after the resolved executable.
 
-    The pinned ACP surface does not expose model or mode selection.
+    Model family, parameters, and workflow mode are selected via ACP
+    ``session/set_config_option`` after initialize — not via CLI flags.
     """
-    if model:
-        raise DomainError(
-            ErrorCode.PROVIDER_INCOMPATIBLE,
-            "cursor model selection is not supported by the pinned ACP release",
-            details={"model": model},
-        )
-    if mode:
-        raise DomainError(
-            ErrorCode.PROVIDER_INCOMPATIBLE,
-            "cursor mode selection is not supported by the pinned ACP release",
-            details={"mode": mode},
-        )
     return ("acp",)

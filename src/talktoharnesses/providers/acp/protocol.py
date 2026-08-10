@@ -13,6 +13,12 @@ from talktoharnesses.providers.acp.schemas.base import (
     is_allowlisted_permission_request,
     is_allowlisted_session_update,
 )
+from talktoharnesses.providers.acp.schemas.cursor_ext import CURSOR_EXTRA_OUTBOUND_METHODS
+
+# Cursor may call session/set_config_option; Grok must not gain that method.
+CURSOR_ALLOWED_OUTBOUND_METHODS: frozenset[str] = (
+    ALLOWED_OUTBOUND_METHODS | CURSOR_EXTRA_OUTBOUND_METHODS
+)
 
 ParamsValidator = Callable[[dict[str, Any] | None], bool]
 
@@ -70,7 +76,7 @@ def cursor_acp_protocol() -> AcpProtocolConfig:
     )
 
     return AcpProtocolConfig(
-        outbound_methods=ALLOWED_OUTBOUND_METHODS,
+        outbound_methods=CURSOR_ALLOWED_OUTBOUND_METHODS,
         inbound_request_methods=ALLOWED_INBOUND_METHODS,
         control_notifications=CURSOR_CONTROL_NOTIFICATIONS,
         session_update_validator=is_allowlisted_cursor_session_update,
