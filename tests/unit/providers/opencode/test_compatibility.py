@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from talktoharnesses._sse import SseDecoder
 from talktoharnesses.domain.enums import ErrorCode
 from talktoharnesses.domain.errors import DomainError
 from talktoharnesses.providers.compatibility import render_supported_harnesses_markdown
@@ -13,7 +14,6 @@ from talktoharnesses.providers.opencode.compatibility import (
     match_release,
     parse_version_stdout,
 )
-from talktoharnesses.providers.opencode.sse import SseDecoder
 
 
 def test_load_and_match_release() -> None:

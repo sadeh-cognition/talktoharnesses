@@ -15,6 +15,7 @@ create/resume support claims are generated in
 - [`docs/releasing.md`](docs/releasing.md)
 - [`docs/performance.md`](docs/performance.md)
 - [`docs/search-retention-transcripts.md`](docs/search-retention-transcripts.md)
+- [`docs/http-client.md`](docs/http-client.md)
 
 ## Install
 
@@ -29,6 +30,9 @@ pip install "talktoharnesses[django]"
 
 # PostgreSQL multi-worker profile
 pip install "talktoharnesses[django,postgres]"
+
+# Official async HTTP client
+pip install "talktoharnesses[client]"
 
 # Individual provider extras
 pip install "talktoharnesses[grok]"      # marker only; external grok executable
@@ -148,7 +152,7 @@ prompt is sent.
 ## Development
 
 ```bash
-uv sync --extra django
+uv sync --extra django --extra client
 uv run ruff check .
 uv run ruff format --check .
 uv run pyright

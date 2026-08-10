@@ -31,6 +31,7 @@ MIGRATIONS = (
 REQUIRED_EXTRAS = (
     "django",
     "postgres",
+    "client",
     "grok",
     "cursor",
     "codex",
@@ -155,6 +156,41 @@ assert find_spec("psycopg") is None
 assert find_spec("httpx") is None
 assert find_spec("openai_codex") is None
 assert find_spec("claude_agent_sdk") is None
+
+try:
+    import talktoharnesses.client  # noqa: F401
+except ModuleNotFoundError as exc:
+    assert "talktoharnesses[client]" in str(exc)
+else:
+    raise AssertionError("expected ModuleNotFoundError for talktoharnesses.client")
+""",
+    )
+
+
+def test_client_extra_installs_without_django(dist_dir: Path) -> None:
+    wheel = _wheel(dist_dir)
+    _run_isolated(
+        f"talktoharnesses[client] @ {wheel.as_uri()}",
+        """
+import asyncio
+from importlib.util import find_spec
+from talktoharnesses.client import APIError, AsyncTalkToHarnessesClient, ConversationStreamItem
+
+assert find_spec("httpx") is not None
+assert find_spec("django") is None
+assert find_spec("ninja") is None
+assert find_spec("jwt") is None
+assert find_spec("psycopg") is None
+assert find_spec("openai_codex") is None
+assert find_spec("claude_agent_sdk") is None
+assert APIError is not None
+assert ConversationStreamItem is not None
+
+async def _run() -> None:
+    client = AsyncTalkToHarnessesClient("http://example.invalid/api/v1/")
+    await client.aclose()
+
+asyncio.run(_run())
 """,
     )
 

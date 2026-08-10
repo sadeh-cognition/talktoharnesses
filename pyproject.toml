@@ -23,6 +23,9 @@ django = [
 postgres = [
     "psycopg[binary]>=3.2,<4",
 ]
+client = [
+    "httpx>=0.28,<0.29",
+]
 grok = []
 cursor = []
 codex = [
@@ -32,11 +35,11 @@ claude = [
     "claude-agent-sdk==0.1.53",
 ]
 opencode = [
-    "httpx>=0.28,<0.29",
+    "talktoharnesses[client]",
 ]
 prime-agent = []
 all = [
-    "talktoharnesses[django,postgres,grok,cursor,codex,claude,opencode,prime-agent]",
+    "talktoharnesses[django,postgres,grok,cursor,codex,claude,opencode,prime-agent,client]",
 ]
 
 [dependency-groups]

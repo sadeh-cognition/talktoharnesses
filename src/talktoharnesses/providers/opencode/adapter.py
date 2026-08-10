@@ -11,6 +11,7 @@ from collections.abc import AsyncIterator, Callable
 from typing import Any, Literal, cast
 from uuid import UUID, uuid4
 
+from talktoharnesses._sse import SseDecoder
 from talktoharnesses.domain.enums import ApprovalDecision, ErrorCode, HarnessKind
 from talktoharnesses.domain.errors import DomainError
 from talktoharnesses.domain.events import HarnessEvent, InteractionRequestedPayload
@@ -35,7 +36,6 @@ from talktoharnesses.providers.opencode.compatibility import (
 from talktoharnesses.providers.opencode.normalizer import OpenCodeNormalizer
 from talktoharnesses.providers.opencode.probe import probe_opencode
 from talktoharnesses.providers.opencode.schemas import OpenCodeHealth, OpenCodeSession
-from talktoharnesses.providers.opencode.sse import SseDecoder
 from talktoharnesses.runtime.handle import ProcessHandle
 
 logger = logging.getLogger(__name__)

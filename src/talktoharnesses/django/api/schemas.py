@@ -2,17 +2,15 @@
 
 from __future__ import annotations
 
-import json
 from datetime import datetime
-from typing import Any, cast
+from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator
+from pydantic import BaseModel, ConfigDict, Field
 
-from talktoharnesses.domain.enums import ApprovalDecision, ApprovalRuleDecision, HarnessKind
+from talktoharnesses.domain.enums import ApprovalDecision, HarnessKind
 from talktoharnesses.domain.models import (
-    ApprovalMatcher,
-    ApprovalRuleScope,
+    ApprovalRuleInput,
     HarnessConfiguration,
 )
 
@@ -132,32 +130,10 @@ class InteractionDraftBody(BaseModel):
     draft: dict[str, Any] = Field(default_factory=dict)
 
 
-class ApprovalRuleBody(BaseModel):
+class ApprovalRuleBody(ApprovalRuleInput):
     """Create/replace rule payload using the public discriminated unions."""
 
     model_config = _REQUEST
-
-    decision: ApprovalRuleDecision
-    scope: ApprovalRuleScope
-    matcher: ApprovalMatcher
-
-    @field_validator("scope", mode="before")
-    @classmethod
-    def _scope(cls, value: object) -> ApprovalRuleScope:
-        encoded = value.model_dump_json() if isinstance(value, BaseModel) else json.dumps(value)
-        return cast(
-            ApprovalRuleScope,
-            TypeAdapter(ApprovalRuleScope).validate_json(encoded),
-        )
-
-    @field_validator("matcher", mode="before")
-    @classmethod
-    def _matcher(cls, value: object) -> ApprovalMatcher:
-        encoded = value.model_dump_json() if isinstance(value, BaseModel) else json.dumps(value)
-        return cast(
-            ApprovalMatcher,
-            TypeAdapter(ApprovalMatcher).validate_json(encoded),
-        )
 
 
 class ResolveInteractionBody(BaseModel):

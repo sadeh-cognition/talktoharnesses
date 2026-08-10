@@ -1,4 +1,4 @@
-"""Minimal SSE decoder for OpenCode /event streams."""
+"""Minimal shared SSE decoder for provider streams and the official HTTP client."""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ class SseDecoder:
     _event: str | None = None
     _data_lines: list[str] = field(default_factory=list[str])
     _id: str | None = None
-    max_partial_bytes: int = 1_048_576
+    max_partial_bytes: int | None = 1_048_576
 
     def feed(self, chunk: bytes) -> list[SseEvent]:
         if not chunk:
@@ -28,7 +28,7 @@ class SseDecoder:
         # Allow split multi-byte UTF-8 sequences across chunks; full frames are
         # decoded when a blank-line boundary is reached.
         self._buf.extend(chunk)
-        if len(self._buf) > self.max_partial_bytes:
+        if self.max_partial_bytes is not None and len(self._buf) > self.max_partial_bytes:
             raise ValueError("SSE partial frame exceeded max_partial_bytes")
         events: list[SseEvent] = []
         while True:

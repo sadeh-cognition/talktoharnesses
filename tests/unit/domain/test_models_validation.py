@@ -51,6 +51,44 @@ def test_utc_datetime_accepted() -> None:
     assert conv.next_event_sequence == 1
 
 
+def test_display_title_prefers_native_manual_then_derived() -> None:
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    native = Conversation(
+        owner_id="u1",
+        title_native="Native title",
+        title_manual="Manual title",
+        title_derived="Derived title",
+        created_at=now,
+        updated_at=now,
+    )
+    assert native.display_title == "Native title"
+    manual = Conversation(
+        owner_id="u1",
+        title_manual="Manual title",
+        title_derived="Derived title",
+        created_at=now,
+        updated_at=now,
+    )
+    assert manual.display_title == "Manual title"
+    derived = Conversation(
+        owner_id="u1",
+        title_derived="Derived title",
+        created_at=now,
+        updated_at=now,
+    )
+    assert derived.display_title == "Derived title"
+
+
+def test_lazy_module_getattr_unknown_names() -> None:
+    import talktoharnesses.application as application
+    import talktoharnesses.django as django_pkg
+
+    with pytest.raises(AttributeError):
+        _ = application.not_a_real_export  # type: ignore[attr-defined]
+    with pytest.raises(AttributeError):
+        _ = django_pkg.not_a_real_export  # type: ignore[attr-defined]
+
+
 def test_tool_output_tail_byte_limit() -> None:
     big = "discarded" + "ä" * 2000 + "latest result"
     result = CanonicalToolResult(

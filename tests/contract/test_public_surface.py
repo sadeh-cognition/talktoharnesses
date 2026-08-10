@@ -11,6 +11,13 @@ import pytest
 
 APPROVED: dict[str, frozenset[str]] = {
     "talktoharnesses": frozenset({"__version__"}),
+    "talktoharnesses.client": frozenset(
+        {
+            "APIError",
+            "AsyncTalkToHarnessesClient",
+            "ConversationStreamItem",
+        }
+    ),
     "talktoharnesses.application": frozenset(
         {
             "CommittedEventBroker",
@@ -69,6 +76,7 @@ APPROVED: dict[str, frozenset[str]] = {
             "ApprovalRequestPayload",
             "ApprovalRule",
             "ApprovalRuleDecision",
+            "ApprovalRuleInput",
             "ApprovalRuleProjection",
             "ApprovalRuleScope",
             "ApprovalRuleScopeKind",

@@ -1276,6 +1276,9 @@ all = [
 claude = [
     { name = "claude-agent-sdk" },
 ]
+client = [
+    { name = "httpx" },
+]
 codex = [
     { name = "openai-codex" },
 ]
@@ -1311,17 +1314,18 @@ requires-dist = [
     { name = "claude-agent-sdk", marker = "extra == 'claude'", specifier = "==0.1.53" },
     { name = "django", marker = "extra == 'django'", specifier = ">=5.2,<5.3" },
     { name = "django-ninja", marker = "extra == 'django'" },
-    { name = "httpx", marker = "extra == 'opencode'", specifier = ">=0.28,<0.29" },
+    { name = "httpx", marker = "extra == 'client'", specifier = ">=0.28,<0.29" },
     { name = "openai-codex", marker = "extra == 'codex'", specifier = "==0.144.4" },
     { name = "opentelemetry-api", specifier = ">=1,<2" },
     { name = "psycopg", extras = ["binary"], marker = "extra == 'postgres'", specifier = ">=3.2,<4" },
     { name = "pydantic", specifier = ">=2" },
     { name = "pyjwt", marker = "extra == 'django'", specifier = ">=2.8" },
     { name = "pywin32", marker = "sys_platform == 'win32'", specifier = "==312" },
-    { name = "talktoharnesses", extras = ["django", "postgres", "grok", "cursor", "codex", "claude", "opencode", "prime-agent"], marker = "extra == 'all'" },
+    { name = "talktoharnesses", extras = ["client"], marker = "extra == 'opencode'" },
+    { name = "talktoharnesses", extras = ["django", "postgres", "grok", "cursor", "codex", "claude", "opencode", "prime-agent", "client"], marker = "extra == 'all'" },
     { name = "uvicorn", marker = "extra == 'django'" },
 ]
-provides-extras = ["django", "postgres", "grok", "cursor", "codex", "claude", "opencode", "prime-agent", "all"]
+provides-extras = ["django", "postgres", "client", "grok", "cursor", "codex", "claude", "opencode", "prime-agent", "all"]
 
 [package.metadata.requires-dev]
 dev = [

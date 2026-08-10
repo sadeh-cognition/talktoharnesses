@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import json
 from decimal import Decimal
-from typing import Annotated, Any, Generic, Literal, TypeVar
+from typing import Annotated, Any, Generic, Literal, TypeVar, cast
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, TypeAdapter, field_validator, model_validator
 
 from talktoharnesses.domain._base import FROZEN, UtcDateTime
 from talktoharnesses.domain.enums import (
@@ -531,6 +532,34 @@ ApprovalMatcher = Annotated[
     ExactArgvMatcher | ExactPathMatcher | RecursiveDirectoryMatcher | BlanketNetworkMatcher,
     Field(discriminator="kind"),
 ]
+
+
+class ApprovalRuleInput(BaseModel):
+    """Shared create/replace approval-rule body (no server-owned identity fields)."""
+
+    model_config = FROZEN
+
+    decision: ApprovalRuleDecision
+    scope: ApprovalRuleScope
+    matcher: ApprovalMatcher
+
+    @field_validator("scope", mode="before")
+    @classmethod
+    def _scope(cls, value: object) -> ApprovalRuleScope:
+        encoded = value.model_dump_json() if isinstance(value, BaseModel) else json.dumps(value)
+        return cast(
+            ApprovalRuleScope,
+            TypeAdapter(ApprovalRuleScope).validate_json(encoded),
+        )
+
+    @field_validator("matcher", mode="before")
+    @classmethod
+    def _matcher(cls, value: object) -> ApprovalMatcher:
+        encoded = value.model_dump_json() if isinstance(value, BaseModel) else json.dumps(value)
+        return cast(
+            ApprovalMatcher,
+            TypeAdapter(ApprovalMatcher).validate_json(encoded),
+        )
 
 
 class ApprovalRule(BaseModel):

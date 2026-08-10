@@ -21,7 +21,7 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Sync dependencies
-        run: uv sync --locked --extra django
+        run: uv sync --locked --extra django --extra client
       - name: Static gate
         run: bash scripts/ci/run.sh static
 

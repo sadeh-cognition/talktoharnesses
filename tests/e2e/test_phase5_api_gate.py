@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 from unittest.mock import Mock
 
 import pytest
@@ -205,6 +205,73 @@ def test_phase5_authenticated_conversation_gate(
 
     # Owner id derivation is the authenticated user primary key string.
     assert owner_id_for_user(user_a) == str(user_a.pk)
+
+    # Official async HTTP client smoke path against the real ASGI app.
+    async def _client_smoke() -> None:
+        from unittest.mock import patch
+
+        import httpx
+        from django.core.asgi import get_asgi_application
+
+        from talktoharnesses.client import APIError, AsyncTalkToHarnessesClient
+        from talktoharnesses.domain import (
+            ConversationSnapshot,
+            HarnessConfiguration,
+            HarnessKind,
+            HarnessProjection,
+            SubmitTurnResult,
+        )
+
+        asgi_app = get_asgi_application()
+        transport = httpx.ASGITransport(app=cast(Any, asgi_app))
+        real_cls = httpx.AsyncClient
+
+        def factory(*args: Any, **kwargs: Any) -> httpx.AsyncClient:
+            kwargs["transport"] = transport
+            return real_cls(*args, **kwargs)
+
+        with patch("talktoharnesses.client.httpx.AsyncClient", side_effect=factory):
+            async with AsyncTalkToHarnessesClient(
+                "http://testserver/api/v1/",
+                token=token_a.token,
+            ) as official:
+                health = await official.health()
+                assert health["status"] == "ok"
+
+                harness = await official.create_harness(
+                    name="official-client",
+                    configuration=HarnessConfiguration(
+                        kind=HarnessKind.GROK,
+                        working_directory="/tmp/ws-client",
+                    ),
+                )
+                assert isinstance(harness, HarnessProjection)
+
+                snapshot = await official.create_conversation(
+                    harness.id,
+                    title="official client smoke",
+                )
+                assert isinstance(snapshot, ConversationSnapshot)
+                conversation_id = snapshot.detail.conversation.id
+
+                turn = await official.submit_turn(
+                    conversation_id,
+                    prompt="hello official client",
+                    idempotency_key="official-client-k1",
+                )
+                assert isinstance(turn, SubmitTurnResult)
+                assert turn.command.idempotency_key == "official-client-k1"
+
+            async with AsyncTalkToHarnessesClient(
+                "http://testserver/api/v1/",
+                token=token_b.token,
+            ) as other:
+                with pytest.raises(APIError) as missing:
+                    await other.get_conversation(conversation_id)
+                assert missing.value.status_code == 404
+                assert missing.value.code == "not_found"
+
+    asyncio.run(_client_smoke())
 
 
 @pytest.mark.django_db(transaction=True)

@@ -27,7 +27,15 @@ from talktoharnesses.django.auth import (
     owner_id_for_user,
 )
 from talktoharnesses.django.persistence import DjangoPersistence
-from talktoharnesses.domain import HarnessCapabilities, HarnessConfiguration, HarnessKind
+from talktoharnesses.domain import (
+    ApprovalRuleDecision,
+    ApprovalRuleInput,
+    ExactArgvMatcher,
+    HarnessCapabilities,
+    HarnessConfiguration,
+    HarnessKind,
+    PrincipalGlobalRuleScope,
+)
 from talktoharnesses.providers.registry import AdapterRegistry
 from talktoharnesses.runtime.manager import RuntimeManager
 
@@ -61,6 +69,25 @@ def test_approval_rule_body_uses_strict_discriminated_unions() -> None:
                 "matcher": {"kind": "exact_argv", "argv": ["ls"]},
             }
         )
+    with pytest.raises(ValidationError):
+        ApprovalRuleBody.model_validate(
+            {
+                "decision": "allow",
+                "scope": {"kind": "principal_global"},
+                "matcher": {"kind": "exact_argv", "argv": ["ls"]},
+                "extra": True,
+            }
+        )
+
+    domain = ApprovalRuleInput(
+        decision=ApprovalRuleDecision.ALLOW,
+        scope=PrincipalGlobalRuleScope(),
+        matcher=ExactArgvMatcher(argv=("ls",)),
+    )
+    wire = domain.model_dump(mode="json")
+    body = ApprovalRuleBody.model_validate(wire)
+    assert body.model_dump(mode="json") == wire
+    assert body.decision == ApprovalRuleDecision.ALLOW
 
 
 def test_openapi_describes_cursor_model_selector_on_existing_fields() -> None:
