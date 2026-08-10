@@ -1,0 +1,33 @@
+{
+  "adapter_version": "2026.8.1",
+  "releases": [
+    {
+      "id": "prime-agent-0.7.1",
+      "cli_version": "0.7.1",
+      "platforms": [
+        "linux",
+        "darwin"
+      ],
+      "capabilities": {
+        "supports_resume": true,
+        "supports_interrupt": true,
+        "supports_steer": true,
+        "supports_multi_interaction": false,
+        "supports_nested_activity": false
+      },
+      "notes": "Uses Prime Agent's official JSONL RPC mode; create, resume, streaming, steer, and interrupt are covered by adapter contract fixtures."
+    }
+  ],
+  "create_matrix": [
+    {
+      "release_id": "prime-agent-0.7.1",
+      "platform": "linux"
+    }
+  ],
+  "resume_matrix": [
+    {
+      "release_id": "prime-agent-0.7.1",
+      "platform": "linux"
+    }
+  ]
+}

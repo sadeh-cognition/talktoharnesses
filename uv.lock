@@ -1318,10 +1318,10 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2" },
     { name = "pyjwt", marker = "extra == 'django'", specifier = ">=2.8" },
     { name = "pywin32", marker = "sys_platform == 'win32'", specifier = "==312" },
-    { name = "talktoharnesses", extras = ["django", "postgres", "grok", "cursor", "codex", "claude", "opencode"], marker = "extra == 'all'" },
+    { name = "talktoharnesses", extras = ["django", "postgres", "grok", "cursor", "codex", "claude", "opencode", "prime-agent"], marker = "extra == 'all'" },
     { name = "uvicorn", marker = "extra == 'django'" },
 ]
-provides-extras = ["django", "postgres", "grok", "cursor", "codex", "claude", "opencode", "all"]
+provides-extras = ["django", "postgres", "grok", "cursor", "codex", "claude", "opencode", "prime-agent", "all"]
 
 [package.metadata.requires-dev]
 dev = [

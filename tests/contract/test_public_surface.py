@@ -57,6 +57,7 @@ APPROVED: dict[str, frozenset[str]] = {
     "talktoharnesses.providers.codex": frozenset({"CodexAdapter"}),
     "talktoharnesses.providers.claude": frozenset({"ClaudeAdapter"}),
     "talktoharnesses.providers.opencode": frozenset({"OpenCodeAdapter"}),
+    "talktoharnesses.providers.prime_agent": frozenset({"PrimeAgentAdapter"}),
     "talktoharnesses.providers.acp": frozenset(),
     "talktoharnesses.domain": frozenset(
         {
@@ -255,6 +256,14 @@ IMPLEMENTATION_ONLY = {
             "OpenCodeCompatibilityDoc",
             "OpenCodeReleaseRecord",
             "load_opencode_compatibility",
+            "match_release",
+        }
+    ),
+    "talktoharnesses.providers.prime_agent": frozenset(
+        {
+            "PrimeAgentCompatibilityDoc",
+            "PrimeAgentReleaseRecord",
+            "load_prime_agent_compatibility",
             "match_release",
         }
     ),

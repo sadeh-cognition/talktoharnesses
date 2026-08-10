@@ -34,8 +34,9 @@ claude = [
 opencode = [
     "httpx>=0.28,<0.29",
 ]
+prime-agent = []
 all = [
-    "talktoharnesses[django,postgres,grok,cursor,codex,claude,opencode]",
+    "talktoharnesses[django,postgres,grok,cursor,codex,claude,opencode,prime-agent]",
 ]
 
 [dependency-groups]

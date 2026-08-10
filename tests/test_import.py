@@ -113,11 +113,13 @@ import talktoharnesses.providers.cursor
 import talktoharnesses.providers.codex
 import talktoharnesses.providers.claude
 import talktoharnesses.providers.opencode
+import talktoharnesses.providers.prime_agent
 
 assert talktoharnesses.providers.cursor.CursorAdapter is not None
 assert talktoharnesses.providers.codex.CodexAdapter is not None
 assert talktoharnesses.providers.claude.ClaudeAdapter is not None
 assert talktoharnesses.providers.opencode.OpenCodeAdapter is not None
+assert talktoharnesses.providers.prime_agent.PrimeAgentAdapter is not None
 assert "django" not in sys.modules, sorted(sys.modules)
 """
     result = subprocess.run(

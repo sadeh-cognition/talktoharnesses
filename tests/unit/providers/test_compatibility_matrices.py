@@ -23,6 +23,7 @@ from talktoharnesses.providers.compatibility import (
 from talktoharnesses.providers.cursor.compatibility import load_cursor_compatibility
 from talktoharnesses.providers.grok.compatibility import load_grok_compatibility
 from talktoharnesses.providers.opencode.compatibility import load_opencode_compatibility
+from talktoharnesses.providers.prime_agent.compatibility import load_prime_agent_compatibility
 
 
 class _Release:
@@ -44,6 +45,7 @@ PROVIDERS = (
     ("codex", load_codex_compatibility),
     ("claude", load_claude_compatibility),
     ("opencode", load_opencode_compatibility),
+    ("prime_agent", load_prime_agent_compatibility),
 )
 
 

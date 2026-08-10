@@ -271,6 +271,15 @@ def _default_loaders() -> list[_SectionLoader]:
     else:
         loaders.append(opencode_compatibility_section)
 
+    try:
+        from talktoharnesses.providers.prime_agent.compatibility import (
+            prime_agent_compatibility_section,
+        )
+    except ImportError:
+        pass
+    else:
+        loaders.append(prime_agent_compatibility_section)
+
     return loaders
 
 
@@ -328,6 +337,8 @@ def render_supported_harnesses_markdown(
             title = "OpenCode"
         elif section.kind is HarnessKind.CLAUDE:
             title = "Claude Code"
+        elif section.kind is HarnessKind.PRIME_AGENT:
+            title = "Prime Agent"
         lines.append(f"## {title}")
         lines.append("")
         lines.append(f"- Adapter version: `{section.adapter_version}`")
@@ -379,12 +390,13 @@ def _load_provider_documents() -> list[
         Sequence[CompatibilityMatrixEntry],
     ]
 ]:
-    """Load all five packaged documents for validation."""
+    """Load every packaged provider document for validation."""
     from talktoharnesses.providers.claude.compatibility import load_claude_compatibility
     from talktoharnesses.providers.codex.compatibility import load_codex_compatibility
     from talktoharnesses.providers.cursor.compatibility import load_cursor_compatibility
     from talktoharnesses.providers.grok.compatibility import load_grok_compatibility
     from talktoharnesses.providers.opencode.compatibility import load_opencode_compatibility
+    from talktoharnesses.providers.prime_agent.compatibility import load_prime_agent_compatibility
 
     docs: list[
         tuple[
@@ -401,6 +413,7 @@ def _load_provider_documents() -> list[
         ("codex", load_codex_compatibility),
         ("claude", load_claude_compatibility),
         ("opencode", load_opencode_compatibility),
+        ("prime_agent", load_prime_agent_compatibility),
     ):
         doc = loader()
         docs.append(
@@ -419,10 +432,10 @@ def validate_compatibility_documents(*, mode: ValidationMode = "development") ->
     """Validate packaged compatibility documents for development or stable release."""
     installed = installed_package_version()
     docs = _load_provider_documents()
-    if len(docs) != 5:
+    if len(docs) != len(HarnessKind):
         raise DomainError(
             ErrorCode.PROVIDER_INCOMPATIBLE,
-            "expected five compatibility documents",
+            "expected one compatibility document per harness kind",
             details={"count": len(docs)},
         )
     for label, adapter_version, releases, create_matrix, resume_matrix in docs:

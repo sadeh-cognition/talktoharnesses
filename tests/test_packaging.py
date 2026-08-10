@@ -17,6 +17,7 @@ COMPAT_FILES = (
     "codex.json",
     "claude.json",
     "opencode.json",
+    "prime_agent.json",
 )
 MIGRATIONS = (
     "0001_initial.py",
@@ -35,6 +36,7 @@ REQUIRED_EXTRAS = (
     "codex",
     "claude",
     "opencode",
+    "prime-agent",
     "all",
 )
 
@@ -200,11 +202,13 @@ from talktoharnesses.providers.codex import CodexAdapter
 from talktoharnesses.providers.cursor import CursorAdapter
 from talktoharnesses.providers.grok import GrokAdapter
 from talktoharnesses.providers.opencode import OpenCodeAdapter
+from talktoharnesses.providers.prime_agent import PrimeAgentAdapter
 from talktoharnesses.providers.claude.compatibility import load_claude_compatibility
 from talktoharnesses.providers.codex.compatibility import load_codex_compatibility
 from talktoharnesses.providers.cursor.compatibility import load_cursor_compatibility
 from talktoharnesses.providers.grok.compatibility import load_grok_compatibility
 from talktoharnesses.providers.opencode.compatibility import load_opencode_compatibility
+from talktoharnesses.providers.prime_agent.compatibility import load_prime_agent_compatibility
 
 settings.configure(
     SECRET_KEY="test-not-for-production",
@@ -216,12 +220,15 @@ settings.configure(
     DATABASES={"default": {"ENGINE": "django.db.backends.sqlite3", "NAME": ":memory:"}},
 )
 django.setup()
-assert ClaudeAdapter and CodexAdapter and CursorAdapter and GrokAdapter and OpenCodeAdapter
+assert all(
+    (ClaudeAdapter, CodexAdapter, CursorAdapter, GrokAdapter, OpenCodeAdapter, PrimeAgentAdapter)
+)
 assert load_grok_compatibility().releases
 assert load_cursor_compatibility().releases
 assert load_codex_compatibility().releases
 assert load_claude_compatibility().releases
 assert load_opencode_compatibility().releases
+assert load_prime_agent_compatibility().releases
 assert find_spec("psycopg") is not None
 """,
     )

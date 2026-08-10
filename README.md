@@ -1,8 +1,8 @@
 # talktoharnesses
 
 Unified coding-agent harness interface with an optional Django application
-surface. One distribution exposes five adapters (Grok, Cursor, Codex, Claude
-Code, OpenCode), a persistence-backed asynchronous facade, and authenticated
+surface. One distribution exposes six adapters (Grok, Cursor, Codex, Claude
+Code, OpenCode, Prime Agent), a persistence-backed asynchronous facade, and authenticated
 HTTP/SSE APIs.
 
 Accepted architectural decisions live under [`docs/adr/`](docs/adr/). Exact
@@ -36,6 +36,7 @@ pip install "talktoharnesses[cursor]"    # marker only; external cursor executab
 pip install "talktoharnesses[codex]"     # pinned openai-codex SDK
 pip install "talktoharnesses[claude]"    # pinned claude-agent-sdk
 pip install "talktoharnesses[opencode]"  # httpx client; external opencode executable
+pip install "talktoharnesses[prime-agent]" # marker only; external prime-agent executable
 
 # Full surface
 pip install "talktoharnesses[all]"
@@ -49,7 +50,7 @@ uv add "talktoharnesses[django,postgres]"
 uv add "talktoharnesses[all]"
 ```
 
-Grok, Cursor, and OpenCode executables are external. The package never discovers,
+Grok, Cursor, OpenCode, and Prime Agent executables are external. The package never discovers,
 installs, upgrades, or invents arbitrary flags for them. Provider SDK/executable
 versions are accepted only when listed in the generated compatibility matrix for
 the current operation and platform.

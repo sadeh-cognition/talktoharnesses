@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       providers:
-        description: Comma-separated providers to run (grok,cursor,codex,claude,opencode) or all
+        description: Comma-separated providers to run (grok,cursor,codex,claude,opencode,prime_agent) or all
         required: true
         default: all
 
@@ -107,3 +107,22 @@ jobs:
         env:
           TALKTOHARNESSES_LIVE_OPENCODE: "1"
         run: uv run pytest tests/live/test_opencode_live.py -q --tb=short
+
+  live-prime-agent:
+    name: Live Prime Agent
+    if: ${{ inputs.providers == 'all' || contains(inputs.providers, 'prime_agent') }}
+    runs-on: [self-hosted, linux, talktoharnesses-live, prime-agent]
+    environment: live-prime-agent
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: ${{ env.UV_VERSION }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: uv sync --locked --extra django --extra prime-agent
+      - name: Create/resume gate
+        env:
+          TALKTOHARNESSES_LIVE_PRIME_AGENT: "1"
+        run: uv run pytest tests/live/test_prime_agent_live.py -q --tb=short

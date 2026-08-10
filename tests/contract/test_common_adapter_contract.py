@@ -23,19 +23,24 @@ PROVIDER_KINDS = (
     HarnessKind.CODEX,
     HarnessKind.CLAUDE,
     HarnessKind.OPENCODE,
+    HarnessKind.PRIME_AGENT,
 )
 
 
 def _launch(kind: HarnessKind) -> LaunchSnapshot:
     caps = capabilities_for(kind)
     return LaunchSnapshot(
-        resolved_executable="/bin/true" if kind is HarnessKind.OPENCODE else None,
+        resolved_executable=(
+            "/bin/true" if kind in {HarnessKind.OPENCODE, HarnessKind.PRIME_AGENT} else None
+        ),
         harness_version=caps.version,
         working_directory="/tmp",
         adapter_version=__version__,
         capabilities=caps,
-        model="test/default" if kind is HarnessKind.OPENCODE else "default",
-        mode="default",
+        model=(
+            "test/default" if kind in {HarnessKind.OPENCODE, HarnessKind.PRIME_AGENT} else "default"
+        ),
+        mode="high" if kind is HarnessKind.PRIME_AGENT else "default",
     )
 
 

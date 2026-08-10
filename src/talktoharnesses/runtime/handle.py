@@ -113,6 +113,11 @@ class ProcessHandle:
         self._process.stdin.write(data)
         await self._process.stdin.drain()
 
+    async def close_stdin(self) -> None:
+        """Close stdin so protocols with EOF shutdown can exit cleanly."""
+        if self._process.stdin is not None:
+            self._process.stdin.close()
+
     def stdout(self) -> AsyncIterator[bytes]:
         if self._stdout_consumer_taken:
             msg = "stdout stream allows a single consumer"

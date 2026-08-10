@@ -29,6 +29,8 @@ from talktoharnesses.providers.opencode.compatibility import (
 from talktoharnesses.providers.opencode.compatibility import (
     match_release as match_opencode,
 )
+from talktoharnesses.providers.prime_agent.adapter import PrimeAgentAdapter
+from talktoharnesses.providers.prime_agent.compatibility import match_release as match_prime_agent
 
 
 def _launch(kind: HarnessKind) -> LaunchSnapshot:
@@ -52,6 +54,7 @@ async def test_adapters_require_probe_before_start() -> None:
         (CodexAdapter(), HarnessKind.CODEX),
         (ClaudeAdapter(), HarnessKind.CLAUDE),
         (OpenCodeAdapter(), HarnessKind.OPENCODE),
+        (PrimeAgentAdapter(), HarnessKind.PRIME_AGENT),
     ]
     for adapter, kind in adapters:
         with pytest.raises(DomainError) as exc:
@@ -74,6 +77,7 @@ async def test_adapters_require_probe_before_resume() -> None:
         (CodexAdapter(), HarnessKind.CODEX),
         (ClaudeAdapter(), HarnessKind.CLAUDE),
         (OpenCodeAdapter(), HarnessKind.OPENCODE),
+        (PrimeAgentAdapter(), HarnessKind.PRIME_AGENT),
     ]
     for adapter, kind in adapters:
         with pytest.raises(DomainError) as exc:
@@ -111,3 +115,4 @@ def test_known_release_helpers_resolve() -> None:
     ).id
     release = load_opencode_compatibility().releases[0]
     assert match_opencode(release.cli_version, platform="linux").id == release.id
+    assert match_prime_agent("0.7.1", platform="linux").id == "prime-agent-0.7.1"

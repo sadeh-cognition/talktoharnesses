@@ -18,6 +18,7 @@ from talktoharnesses.providers.codex.adapter import CodexAdapter
 from talktoharnesses.providers.cursor.adapter import CursorAdapter
 from talktoharnesses.providers.grok.adapter import GrokAdapter
 from talktoharnesses.providers.opencode.adapter import OpenCodeAdapter
+from talktoharnesses.providers.prime_agent.adapter import PrimeAgentAdapter
 
 
 def _option_get(options: object, key: str) -> object | None:
@@ -309,6 +310,37 @@ class _FakeAcpProcess:
         return _gen()
 
 
+class _FakePrimeProcess(_FakeAcpProcess):
+    def __init__(self) -> None:
+        super().__init__()
+        self._session_file = f"/tmp/prime-{uuid4()}.jsonl"
+
+    async def _respond(self, msg: dict[str, Any]) -> None:
+        request_id = msg.get("id")
+        command = msg.get("type")
+        if command == "switch_session":
+            selected = msg.get("sessionPath")
+            if isinstance(selected, str):
+                self._session_file = selected
+        response: dict[str, Any] = {
+            "id": request_id,
+            "type": "response",
+            "command": command,
+            "success": True,
+        }
+        if command == "get_state":
+            response["data"] = {
+                "sessionFile": self._session_file,
+                "sessionId": self._session_file.rsplit("/", 1)[-1].removesuffix(".jsonl"),
+            }
+        await self._stdout_q.put((json.dumps(response) + "\n").encode())
+        if command == "prompt":
+            await self._stdout_q.put(b'{"type":"agent_end","messages":[]}\n')
+
+    async def close_stdin(self) -> None:
+        await self.close()
+
+
 def _patch_probe(monkeypatch: Any, kind: HarnessKind) -> None:
     if kind is HarnessKind.CODEX:
 
@@ -345,6 +377,18 @@ def _patch_probe(monkeypatch: Any, kind: HarnessKind) -> None:
 
         monkeypatch.setattr(
             "talktoharnesses.providers.opencode.adapter.probe_opencode", probe_opencode
+        )
+    elif kind is HarnessKind.PRIME_AGENT:
+
+        async def probe_prime_agent(config: HarnessConfiguration):
+            from talktoharnesses.providers.prime_agent.compatibility import match_release
+
+            release = match_release("0.7.1", platform="linux")
+            return release.to_harness_capabilities(), release
+
+        monkeypatch.setattr(
+            "talktoharnesses.providers.prime_agent.adapter.probe_prime_agent",
+            probe_prime_agent,
         )
     elif kind is HarnessKind.GROK:
 
@@ -389,6 +433,15 @@ def make_adapter_factory(
             adapter = OpenCodeAdapter(http_client_factory=_FakeOpenCodeHttp)
             adapter.prepare_port(18080)
             return adapter, _noop_bind
+        if kind is HarnessKind.PRIME_AGENT:
+            proc = _FakePrimeProcess()
+            adapter = PrimeAgentAdapter()
+
+            def bind_prime(bound: HarnessAdapter) -> None:
+                assert isinstance(bound, ProcessBoundAdapter)
+                bound.bind_process(proc)  # type: ignore[arg-type]
+
+            return adapter, bind_prime
         # Grok / Cursor process-bound ACP
         if kind is HarnessKind.CURSOR:
             proc = _FakeAcpProcess(
@@ -412,7 +465,12 @@ def make_adapter_factory(
 
 def config_for(kind: HarnessKind) -> HarnessConfiguration:
     executable = None
-    if kind in {HarnessKind.GROK, HarnessKind.CURSOR, HarnessKind.OPENCODE}:
+    if kind in {
+        HarnessKind.GROK,
+        HarnessKind.CURSOR,
+        HarnessKind.OPENCODE,
+        HarnessKind.PRIME_AGENT,
+    }:
         executable = "/bin/true"
     return HarnessConfiguration(
         kind=kind,
@@ -421,9 +479,17 @@ def config_for(kind: HarnessKind) -> HarnessConfiguration:
         model=(
             None
             if kind is HarnessKind.CURSOR
-            else ("test/default" if kind is HarnessKind.OPENCODE else "default")
+            else (
+                "test/default"
+                if kind in {HarnessKind.OPENCODE, HarnessKind.PRIME_AGENT}
+                else "default"
+            )
         ),
-        mode=None if kind is HarnessKind.CURSOR else "default",
+        mode=(
+            None
+            if kind is HarnessKind.CURSOR
+            else ("high" if kind is HarnessKind.PRIME_AGENT else "default")
+        ),
     )
 
 

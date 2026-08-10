@@ -125,3 +125,29 @@ Do not edit provider tables by hand; regenerate via
 ### Notes
 
 - `opencode-1.2.27`: Live create/resume/interaction proven on linux for opencode serve loopback HTTP/SSE.
+
+## Prime Agent
+
+- Adapter version: `2026.8.1`
+
+### Known releases (implementation targets)
+
+| Release ID | CLI version | Transport | Platforms | Resume | Steer |
+| --- | --- | --- | --- | --- | --- |
+| `prime-agent-0.7.1` | 0.7.1 | JSONL RPC | linux, darwin | yes | yes |
+
+### Published create matrix
+
+| Release ID | Platform |
+| --- | --- |
+| `prime-agent-0.7.1` | `linux` |
+
+### Published resume matrix
+
+| Release ID | Platform |
+| --- | --- |
+| `prime-agent-0.7.1` | `linux` |
+
+### Notes
+
+- `prime-agent-0.7.1`: Uses Prime Agent's official JSONL RPC mode; create, resume, streaming, steer, and interrupt are covered by adapter contract fixtures.
