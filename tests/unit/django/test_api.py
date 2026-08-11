@@ -26,6 +26,7 @@ from talktoharnesses.django.auth import (
     issue_token_sync,
     owner_id_for_user,
 )
+from talktoharnesses.django.models import ConversationAggregate
 from talktoharnesses.django.persistence import DjangoPersistence
 from talktoharnesses.domain import (
     ApprovalRuleDecision,
@@ -201,6 +202,13 @@ def test_create_harness_and_conversation(service: TalkToHarnessesService, auth_h
     assert create.status_code == 201, create.content
     harness_id = create.json()["id"]
 
+    fetched = client.get(
+        f"/api/v1/harnesses/{harness_id}",
+        HTTP_AUTHORIZATION=auth_header,
+    )
+    assert fetched.status_code == 200
+    assert fetched.json()["id"] == harness_id
+
     conv = _post_json(
         client,
         "/api/v1/conversations",
@@ -214,6 +222,75 @@ def test_create_harness_and_conversation(service: TalkToHarnessesService, auth_h
     listed = client.get("/api/v1/conversations", HTTP_AUTHORIZATION=auth_header)
     assert listed.status_code == 200
     assert len(listed.json()["items"]) == 1
+
+
+@pytest.mark.django_db(transaction=True)
+def test_delete_idle_harness(service: TalkToHarnessesService, auth_header: str) -> None:
+    client = Client()
+    created = _post_json(
+        client,
+        "/api/v1/harnesses",
+        {
+            "name": "temporary",
+            "configuration": {"kind": "grok", "working_directory": "/tmp/ws"},
+        },
+        HTTP_AUTHORIZATION=auth_header,
+    )
+    harness_id = created.json()["id"]
+
+    deleted = client.delete(
+        f"/api/v1/harnesses/{harness_id}",
+        HTTP_AUTHORIZATION=auth_header,
+    )
+    assert deleted.status_code == 204
+    missing = client.get(
+        f"/api/v1/harnesses/{harness_id}",
+        HTTP_AUTHORIZATION=auth_header,
+    )
+    assert missing.status_code == 404
+
+
+@pytest.mark.django_db(transaction=True)
+def test_delete_harness_with_active_turn_returns_conflict(
+    service: TalkToHarnessesService, auth_header: str
+) -> None:
+    client = Client()
+    created = _post_json(
+        client,
+        "/api/v1/harnesses",
+        {
+            "name": "active",
+            "configuration": {"kind": "grok", "working_directory": "/tmp/ws"},
+        },
+        HTTP_AUTHORIZATION=auth_header,
+    )
+    harness_id = created.json()["id"]
+    conversation = _post_json(
+        client,
+        "/api/v1/conversations",
+        {"harness_id": harness_id},
+        HTTP_AUTHORIZATION=auth_header,
+    ).json()
+    conversation_id = conversation["detail"]["conversation"]["id"]
+    submitted = _post_json(
+        client,
+        f"/api/v1/conversations/{conversation_id}/turns",
+        {"prompt": "keep running"},
+        HTTP_AUTHORIZATION=auth_header,
+        HTTP_IDEMPOTENCY_KEY="active-delete",
+    )
+    assert submitted.status_code == 202
+    ConversationAggregate.objects.filter(conversation_id=conversation_id).update(
+        status="running"
+    )
+
+    deleted = client.delete(
+        f"/api/v1/harnesses/{harness_id}",
+        HTTP_AUTHORIZATION=auth_header,
+    )
+
+    assert deleted.status_code == 409
+    assert deleted.json()["code"] == "harness_in_use"
 
 
 @pytest.mark.django_db(transaction=True)

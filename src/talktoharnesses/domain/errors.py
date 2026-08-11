@@ -30,6 +30,7 @@ _PUBLIC_MESSAGES: Final[dict[ErrorCode, str]] = {
     ErrorCode.NO_ACTIVE_TURN: "no active turn",
     ErrorCode.NO_QUEUED_PROMPT: "no queued prompt",
     ErrorCode.IDEMPOTENCY_CONFLICT: "idempotency conflict",
+    ErrorCode.HARNESS_IN_USE: "harness in use",
     ErrorCode.OPTIMISTIC_CONFLICT: "optimistic conflict",
     ErrorCode.STALE_OWNER: "stale owner",
     ErrorCode.WORKER_LEASE_UNAVAILABLE: "worker lease unavailable",

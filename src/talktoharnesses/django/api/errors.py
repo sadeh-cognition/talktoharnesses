@@ -23,6 +23,7 @@ _CONFLICT_CODES = frozenset(
     {
         ErrorCode.CONVERSATION_BUSY,
         ErrorCode.IDEMPOTENCY_CONFLICT,
+        ErrorCode.HARNESS_IN_USE,
         ErrorCode.OPTIMISTIC_CONFLICT,
         ErrorCode.INTERACTION_ALREADY_RESOLVED,
         ErrorCode.PROVIDER_INCOMPATIBLE,

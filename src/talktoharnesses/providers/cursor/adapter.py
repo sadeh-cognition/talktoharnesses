@@ -11,7 +11,7 @@ from typing import Any, Literal, cast
 from uuid import UUID, uuid4
 
 from talktoharnesses import __version__
-from talktoharnesses.domain.enums import ErrorCode, HarnessKind
+from talktoharnesses.domain.enums import ApprovalDecision, ErrorCode, HarnessKind
 from talktoharnesses.domain.errors import DomainError
 from talktoharnesses.domain.events import HarnessEvent, InteractionRequestedPayload
 from talktoharnesses.domain.models import (
@@ -90,6 +90,7 @@ class CursorAdapter:
         self._config_options: tuple[CursorSelectConfigOption, ...] = ()
         self._session_model_selection: _CursorModelSelection | None = None
         self._current_model_selection: _CursorModelSelection | None = None
+        self._force = False
 
     def bind_process(self, process: ProcessHandle) -> None:
         self._process = process
@@ -125,6 +126,7 @@ class CursorAdapter:
         enforce_published_operation(self._release, mode=mode)
 
     async def start(self, request: StartSessionRequest) -> HarnessSession:
+        self._force = request.configuration.force
         self.preflight_operation("create")
         await self._ensure_connection()
         assert self._connection is not None
@@ -155,6 +157,7 @@ class CursorAdapter:
         return session
 
     async def resume(self, request: ResumeSessionRequest) -> HarnessSession:
+        self._force = request.configuration.force
         self.preflight_operation("resume")
         await self._ensure_connection()
         assert self._connection is not None
@@ -667,6 +670,24 @@ class CursorAdapter:
                 mapped = _map_dict(item)
                 if mapped:
                     options.append(mapped)
+        if self._force:
+            assert self._connection is not None
+            result = self._normalizer.map_approval_decision(
+                ApprovalDecision.ALLOW_SESSION,
+                options,
+            )
+            if _map_dict(result.get("outcome")).get("outcome") == "cancelled":
+                result = self._normalizer.map_approval_decision(
+                    ApprovalDecision.ALLOW_ONCE,
+                    options,
+                )
+            if _map_dict(result.get("outcome")).get("outcome") == "cancelled":
+                raise DomainError(
+                    ErrorCode.INVALID_STATE,
+                    "force permission request has no allow option",
+                )
+            await self._connection.respond(request.id, result)
+            return None
         self._pending_interactions[interaction_id] = (request.id, options)
         events = self._normalizer.on_permission_request(
             params,

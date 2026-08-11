@@ -684,6 +684,10 @@ class Persistence(Protocol):
         """Load one owner-scoped harness; cross-owner ≡ missing."""
         ...
 
+    async def delete_harness(self, harness_id: UUID, owner_id: str) -> None:
+        """Delete an idle owner-scoped harness while retaining copied binding history."""
+        ...
+
     async def save_harness_probe(
         self,
         harness_id: UUID,

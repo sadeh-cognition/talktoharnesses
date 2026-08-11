@@ -39,6 +39,7 @@ class HarnessConfigurationBody(BaseModel):
         ),
     )
     mode: str | None = None
+    force: bool = False
     working_directory: str
     workspace_roots: tuple[str, ...] = ()
 
@@ -48,6 +49,7 @@ class HarnessConfigurationBody(BaseModel):
             executable_path=self.executable_path,
             model=self.model,
             mode=self.mode,
+            force=self.force,
             working_directory=self.working_directory,
             workspace_roots=self.workspace_roots,
         )

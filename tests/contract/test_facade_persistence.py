@@ -224,6 +224,10 @@ async def test_memory_facade_mutation_metadata_and_harness() -> None:
     assert probe.capabilities.version == "1.0.0"
     loaded = await p.get_harness_probe(harness.id, "owner-a")
     assert loaded.capabilities.version == "1.0.0"
+    await p.delete_harness(harness.id, "owner-a")
+    with pytest.raises(DomainError) as missing:
+        await p.get_harness(harness.id, "owner-a")
+    assert missing.value.code is ErrorCode.NOT_FOUND
 
 
 @pytest.mark.asyncio

@@ -509,6 +509,17 @@ async def test_harness_methods(handler: RecordingHandler) -> None:
             }
             assert handler.requests[-1].method == "POST"
 
+            handler.respond(200, _harness())
+            fetched = await client.get_harness(_HARNESS_ID)
+            assert fetched.id == _HARNESS_ID
+            assert handler.requests[-1].method == "GET"
+            _assert_url(handler.requests[-1], f"harnesses/{_HARNESS_ID}")
+
+            handler.respond(204)
+            await client.delete_harness(_HARNESS_ID)
+            assert handler.requests[-1].method == "DELETE"
+            _assert_url(handler.requests[-1], f"harnesses/{_HARNESS_ID}")
+
             handler.respond(200, _probe())
             assert (await client.probe_harness(_HARNESS_ID)).harness_id == _HARNESS_ID
             assert handler.requests[-1].method == "POST"

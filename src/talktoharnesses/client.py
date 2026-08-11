@@ -253,6 +253,21 @@ class AsyncTalkToHarnessesClient:
         )
         return self._parse_model(HarnessProjection, response)
 
+    async def get_harness(self, harness_id: UUID) -> HarnessProjection:
+        response = await self._request(
+            "GET",
+            f"harnesses/{harness_id}",
+            accepted=200,
+        )
+        return self._parse_model(HarnessProjection, response)
+
+    async def delete_harness(self, harness_id: UUID) -> None:
+        await self._request(
+            "DELETE",
+            f"harnesses/{harness_id}",
+            accepted=204,
+        )
+
     async def probe_harness(self, harness_id: UUID) -> HarnessProbeProjection:
         response = await self._request(
             "POST",

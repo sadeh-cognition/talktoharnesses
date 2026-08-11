@@ -48,6 +48,8 @@ async def main() -> None:
                 working_directory="/workspace",
             ),
         )
+        same_harness = await client.get_harness(harness.id)
+        print(same_harness.name)
         snapshot = await client.create_conversation(
             harness.id,
             title="First conversation",
@@ -86,6 +88,12 @@ async def main() -> None:
 
 asyncio.run(main())
 ```
+
+`list_harnesses()` and `get_harness()` support selecting an existing
+owner-scoped harness. `delete_harness()` removes an idle harness and returns
+normally on HTTP 204; the server returns `harness_in_use` (409) while a bound
+conversation is active. Retained conversations keep their copied binding
+configuration after the harness record is deleted.
 
 ## Errors
 

@@ -313,6 +313,9 @@ class TalkToHarnessesService:
     async def get_harness(self, owner_id: str, harness_id: UUID) -> HarnessProjection:
         return await self._persistence.get_harness(harness_id, owner_id)
 
+    async def delete_harness(self, owner_id: str, harness_id: UUID) -> None:
+        await self._persistence.delete_harness(harness_id, owner_id)
+
     async def probe_harness(self, owner_id: str, harness_id: UUID) -> HarnessProbeProjection:
         harness = await self._persistence.get_harness(harness_id, owner_id)
         adapter = self._registry.create(harness.kind)

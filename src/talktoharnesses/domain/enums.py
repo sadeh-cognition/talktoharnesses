@@ -194,6 +194,7 @@ class ErrorCode(StrEnum):
     NO_ACTIVE_TURN = "no_active_turn"
     NO_QUEUED_PROMPT = "no_queued_prompt"
     IDEMPOTENCY_CONFLICT = "idempotency_conflict"
+    HARNESS_IN_USE = "harness_in_use"
     OPTIMISTIC_CONFLICT = "optimistic_conflict"
     STALE_OWNER = "stale_owner"
     WORKER_LEASE_UNAVAILABLE = "worker_lease_unavailable"

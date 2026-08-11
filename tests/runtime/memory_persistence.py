@@ -1805,6 +1805,21 @@ class MemoryPersistence:
             raise _not_found("harness")
         return self._harness_proj(harness)
 
+    async def delete_harness(self, harness_id: UUID, owner_id: str) -> None:
+        harness = self.harnesses.get(harness_id)
+        if harness is None or harness.owner_id != owner_id:
+            raise _not_found("harness")
+        if any(
+            state.binding is not None
+            and state.binding.is_active
+            and state.binding.harness_instance_id == harness_id
+            and state.active_turn is not None
+            for state in self.states.values()
+        ):
+            raise DomainError(ErrorCode.HARNESS_IN_USE, "harness has an active turn")
+        del self.harnesses[harness_id]
+        self.harness_probes.pop(harness_id, None)
+
     async def save_harness_probe(
         self,
         harness_id: UUID,

@@ -6,7 +6,7 @@ Do not edit provider tables by hand; regenerate via
 
 ## Grok
 
-- Adapter version: `2026.8.1`
+- Adapter version: `2026.8.2`
 
 ### Known releases (implementation targets)
 
@@ -28,7 +28,7 @@ Do not edit provider tables by hand; regenerate via
 
 ## Cursor
 
-- Adapter version: `2026.8.1`
+- Adapter version: `2026.8.2`
 
 ### Known releases (implementation targets)
 
@@ -50,7 +50,7 @@ Do not edit provider tables by hand; regenerate via
 
 ## Codex
 
-- Adapter version: `2026.8.1`
+- Adapter version: `2026.8.2`
 
 ### Known releases (implementation targets)
 
@@ -76,7 +76,7 @@ Do not edit provider tables by hand; regenerate via
 
 ## Claude Code
 
-- Adapter version: `2026.8.1`
+- Adapter version: `2026.8.2`
 
 ### Known releases (implementation targets)
 
@@ -102,7 +102,7 @@ Do not edit provider tables by hand; regenerate via
 
 ## OpenCode
 
-- Adapter version: `2026.8.1`
+- Adapter version: `2026.8.2`
 
 ### Known releases (implementation targets)
 
@@ -128,7 +128,7 @@ Do not edit provider tables by hand; regenerate via
 
 ## Prime Agent
 
-- Adapter version: `2026.8.1`
+- Adapter version: `2026.8.2`
 
 ### Known releases (implementation targets)
 

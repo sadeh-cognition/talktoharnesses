@@ -146,6 +146,17 @@ async def create_harness(
     return 201, result
 
 
+@router.get("/harnesses/{harness_id}", response=HarnessProjection)
+async def get_harness(request: HttpRequest, harness_id: UUID) -> HarnessProjection:
+    return await get_service().get_harness(_owner(request), harness_id)
+
+
+@router.delete("/harnesses/{harness_id}", response={204: None})
+async def delete_harness(request: HttpRequest, harness_id: UUID) -> tuple[int, None]:
+    await get_service().delete_harness(_owner(request), harness_id)
+    return 204, None
+
+
 @router.post("/harnesses/{harness_id}/probe", response={200: HarnessProbeProjection})
 async def probe_harness(request: HttpRequest, harness_id: UUID) -> HarnessProbeProjection:
     return await get_service().probe_harness(_owner(request), harness_id)

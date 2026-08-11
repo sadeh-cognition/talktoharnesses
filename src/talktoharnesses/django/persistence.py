@@ -117,6 +117,7 @@ from .models import (
     ApprovalRuleRecord,
     CommandRecord,
     ConversationAggregate,
+    ConversationBindingRecord,
     ConversationEventRecord,
     HarnessRecord,
     InteractionAnswerRecord,
@@ -3026,6 +3027,30 @@ class DjangoPersistence:
         if row is None:
             raise not_found("harness")
         return harness_from_row(row)
+
+    async def delete_harness(self, harness_id: UUID, owner_id: str) -> None:
+        await sync_to_async(self._delete_harness, thread_sensitive=True)(harness_id, owner_id)
+
+    @transaction.atomic
+    def _delete_harness(self, harness_id: UUID, owner_id: str) -> None:
+        row = (
+            HarnessRecord.objects.select_for_update()
+            .filter(harness_id=harness_id, owner_id=owner_id)
+            .first()
+        )
+        if row is None:
+            raise not_found("harness")
+        if ConversationBindingRecord.objects.filter(
+            harness_instance_id=harness_id,
+            is_active=True,
+            conversation__status__in=(
+                ConversationStatus.RUNNING.value,
+                ConversationStatus.WAITING.value,
+                ConversationStatus.BACKGROUND_ACTIVE.value,
+            ),
+        ).exists():
+            raise DomainError(ErrorCode.HARNESS_IN_USE, "harness has an active turn")
+        row.delete()
 
     async def save_harness_probe(
         self,
