@@ -21,6 +21,7 @@ the workflow does not install native harnesses or synthesize credential files.
 | Codex | `TALKTOHARNESSES_LIVE_CODEX=1` | `codex` extra + provider auth in the OS environment | `tests/live/test_codex_live.py` |
 | Claude Code | `TALKTOHARNESSES_LIVE_CLAUDE=1` | `claude` extra; optional `TALKTOHARNESSES_CLAUDE_EXECUTABLE` | `tests/live/test_claude_live.py` |
 | OpenCode | `TALKTOHARNESSES_LIVE_OPENCODE=1` | `opencode` extra + `TALKTOHARNESSES_OPENCODE_EXECUTABLE` | `tests/live/test_opencode_live.py` |
+| Prime Agent | `TALKTOHARNESSES_LIVE_PRIME_AGENT=1` | `TALKTOHARNESSES_PRIME_AGENT_EXECUTABLE` | `tests/live/test_prime_agent_live.py` |
 
 Example:
 
