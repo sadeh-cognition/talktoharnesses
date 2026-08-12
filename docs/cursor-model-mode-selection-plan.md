@@ -367,8 +367,8 @@ Keep the simpler existing responses for Grok.
 Update the common contract's Cursor configuration to use a valid non-empty model and mode, such as:
 
 ```python
-model="composer-2.5[fast=false]"
-mode="ask"
+model = "composer-2.5[fast=false]"
+mode = "ask"
 ```
 
 Ensure the Cursor launch snapshot uses matching values where the contract expects configuration and launch metadata to agree.

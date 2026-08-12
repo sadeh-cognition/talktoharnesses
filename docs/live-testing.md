@@ -1,8 +1,8 @@
 # Live harness testing
 
-Opt-in live gates prove exact create/resume support claims. They use disposable
-workspaces, may incur provider cost, and must never run against an untrusted
-repository change with production credentials.
+Opt-in live gates prove exact create, resume, and advertised-capability support
+claims. They use disposable workspaces, may incur provider cost, and must never
+run against an untrusted repository change with production credentials.
 
 When a live flag is enabled, missing credentials, SDKs, executables, exact
 versions, or capabilities are **failures**, not skips.
@@ -43,7 +43,14 @@ uv run pytest tests/live/test_cursor_live.py -q
    second unique prompt, and assert the first turn is not replayed.
 5. Exercise broker-compatible approval/question handling when the live stream
    surfaces interactions for advertised capabilities.
-6. Interrupt/close remaining activity with no owned resources left.
+6. For each advertised capability, run the matching feature gate on the resumed
+   session:
+   - **multi-interaction** — one turn that defers at least two interactions
+   - **nested activity** — observe `activity_started` (unpublished until a
+     normalizer emits it)
+   - **steer** — steer an in-flight turn and reach `turn_completed`
+   - **interrupt** — interrupt an in-flight turn and reach `turn_interrupted`
+7. Close remaining activity with no owned resources left.
 
 Live tests may print fixed release IDs and pass/fail state. They must not print
 prompts, credentials, environment values, native payloads, or executable paths
@@ -52,5 +59,10 @@ beyond the configured path already known to the operator.
 ## Publishing matrix rows
 
 After a live gate passes on a platform, add only that exact
-`{release_id, platform}` create/resume row to the packaged JSON document and
-regenerate `SUPPORTED_HARNESSES.md`. Do not list untested platforms.
+`{release_id, platform}` row to the matching packaged matrix (`create_matrix`,
+`resume_matrix`, `steer_matrix`, `interrupt_matrix`,
+`multi_interaction_matrix`, or `nested_activity_matrix`) and regenerate
+`SUPPORTED_HARNESSES.md`. Do not list untested platforms. A capability flag on
+the release record is an implementation target; only a matrix row is a published
+support claim. Stable validation rejects an advertised capability with no matrix
+row.

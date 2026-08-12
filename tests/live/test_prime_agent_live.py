@@ -12,7 +12,12 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
-from tests.live.helpers import assert_no_duplicate_first_turn, collect_turn, make_launch
+from tests.live.helpers import (
+    assert_no_duplicate_first_turn,
+    collect_turn,
+    exercise_advertised_features,
+    make_launch,
+)
 
 from talktoharnesses.domain.enums import HarnessKind
 from talktoharnesses.domain.models import HarnessConfiguration, LaunchSnapshot
@@ -135,7 +140,7 @@ async def test_live_prime_agent_create_resume(tmp_path: Path) -> None:
             second_events,
             first_turn_id=first_turn_id,
         )
-        await second.interrupt(resumed)
+        await exercise_advertised_features(second, resumed, caps, use_shell=False)
     finally:
         try:
             if resumed is not None:

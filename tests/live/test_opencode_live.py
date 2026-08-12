@@ -14,6 +14,7 @@ import pytest
 from tests.live.helpers import (
     assert_no_duplicate_first_turn,
     collect_turn,
+    exercise_advertised_features,
     make_launch,
     unique_prompt,
 )
@@ -134,7 +135,7 @@ async def test_live_opencode_create_resume_interaction(tmp_path: Path) -> None:
         # Resume still proves native session continuity; interaction was exercised on create.
         second_events = await collect_turn(second, resumed, require_interaction=False)
         assert_no_duplicate_first_turn(first_events, second_events, first_turn_id=first_turn_id)
-        await second.interrupt(resumed)
+        await exercise_advertised_features(second, resumed, caps)
     finally:
         try:
             if resumed is not None:

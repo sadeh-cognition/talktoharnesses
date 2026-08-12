@@ -101,8 +101,11 @@ async def test_probe_start_resume_submit_terminal_steer_interrupt_close_isolatio
     turn_id = uuid4()
     await adapter.submit(session, TurnRequest(turn_id=turn_id, prompt="hello"))
     steered = await adapter.steer(session, SteerRequest(turn_id=turn_id, prompt="more"))
-    # Steer either succeeds once or returns False without losing the prompt.
-    assert steered in {True, False}
+    if caps.supports_steer:
+        # Fakes may complete before steer; False means orchestration queues.
+        assert steered in {True, False}
+    else:
+        assert steered is False
 
     # Terminal without requiring a final assistant message.
     saw_terminal = False

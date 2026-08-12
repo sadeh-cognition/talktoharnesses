@@ -18,7 +18,7 @@
         "supports_multi_interaction": false,
         "supports_nested_activity": false
       },
-      "notes": "Broker-compatible approvals use public CodexClient(approval_handler=...) with ApprovalsReviewer.user. Live create/resume/interaction proven on linux."
+      "notes": "Broker-compatible approvals use public CodexClient(approval_handler=...) with ApprovalsReviewer.user. Live create/resume/interaction proven on linux. Steer and interrupt are published for the same linux gate."
     }
   ],
   "create_matrix": [
@@ -32,5 +32,19 @@
       "release_id": "codex-openai-codex-0.144.4",
       "platform": "linux"
     }
-  ]
+  ],
+  "steer_matrix": [
+    {
+      "release_id": "codex-openai-codex-0.144.4",
+      "platform": "linux"
+    }
+  ],
+  "interrupt_matrix": [
+    {
+      "release_id": "codex-openai-codex-0.144.4",
+      "platform": "linux"
+    }
+  ],
+  "multi_interaction_matrix": [],
+  "nested_activity_matrix": []
 }

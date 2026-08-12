@@ -16,9 +16,9 @@
         "supports_interrupt": true,
         "supports_steer": false,
         "supports_multi_interaction": true,
-        "supports_nested_activity": true
+        "supports_nested_activity": false
       },
-      "notes": "Live create/resume/interaction proven on linux with SDK-bundled Claude Code CLI."
+      "notes": "Live create/resume/interaction proven on linux with SDK-bundled Claude Code CLI. Interrupt and multi-interaction are published for the same linux gate. Nested activity is not published: adapters do not emit activity_started."
     }
   ],
   "create_matrix": [
@@ -32,5 +32,19 @@
       "release_id": "claude-agent-sdk-0.1.53-bundled-2.1.88",
       "platform": "linux"
     }
-  ]
+  ],
+  "steer_matrix": [],
+  "interrupt_matrix": [
+    {
+      "release_id": "claude-agent-sdk-0.1.53-bundled-2.1.88",
+      "platform": "linux"
+    }
+  ],
+  "multi_interaction_matrix": [
+    {
+      "release_id": "claude-agent-sdk-0.1.53-bundled-2.1.88",
+      "platform": "linux"
+    }
+  ],
+  "nested_activity_matrix": []
 }

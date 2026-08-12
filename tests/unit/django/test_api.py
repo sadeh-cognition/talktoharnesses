@@ -280,9 +280,7 @@ def test_delete_harness_with_active_turn_returns_conflict(
         HTTP_IDEMPOTENCY_KEY="active-delete",
     )
     assert submitted.status_code == 202
-    ConversationAggregate.objects.filter(conversation_id=conversation_id).update(
-        status="running"
-    )
+    ConversationAggregate.objects.filter(conversation_id=conversation_id).update(status="running")
 
     deleted = client.delete(
         f"/api/v1/harnesses/{harness_id}",

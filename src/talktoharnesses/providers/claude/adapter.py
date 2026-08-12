@@ -149,10 +149,15 @@ class ClaudeAdapter:
     async def steer(self, session: HarnessSession, request: SteerRequest) -> bool:
         self._require_session(session)
         del request
+        if self._release is None or not self._release.capabilities.supports_steer:
+            return False
+        enforce_published_operation(self._release, mode="steer")
         return False
 
     async def interrupt(self, session: HarnessSession) -> None:
         self._require_session(session)
+        if self._release is not None and self._release.capabilities.supports_interrupt:
+            enforce_published_operation(self._release, mode="interrupt")
         for interaction_id, future in list(self._pending_interactions.items()):
             if not future.done():
                 future.set_result(ApprovalDecision.CANCEL)

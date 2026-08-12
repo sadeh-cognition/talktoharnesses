@@ -14,6 +14,7 @@ import pytest
 from tests.live.helpers import (
     assert_no_duplicate_first_turn,
     collect_turn,
+    exercise_advertised_features,
     make_launch,
     unique_prompt,
 )
@@ -88,7 +89,7 @@ async def test_live_claude_create_resume_interaction(tmp_path: Path) -> None:
         )
         second_events = await collect_turn(second, resumed)
         assert_no_duplicate_first_turn(first_events, second_events, first_turn_id=first_turn_id)
-        await second.interrupt(resumed)
+        await exercise_advertised_features(second, resumed, caps)
     finally:
         await second.close(resumed)
     print(f"live_gate_passed release_id={release.id}")

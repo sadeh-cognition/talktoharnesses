@@ -22,6 +22,7 @@ from talktoharnesses.providers.codex.compatibility import load_codex_compatibili
 from talktoharnesses.providers.cursor.compatibility import load_cursor_compatibility
 from talktoharnesses.providers.grok.compatibility import load_grok_compatibility
 from talktoharnesses.providers.opencode.compatibility import load_opencode_compatibility
+from talktoharnesses.providers.prime_agent.compatibility import load_prime_agent_compatibility
 
 docs = {
     "grok": load_grok_compatibility(),
@@ -29,13 +30,18 @@ docs = {
     "codex": load_codex_compatibility(),
     "claude": load_claude_compatibility(),
     "opencode": load_opencode_compatibility(),
+    "prime_agent": load_prime_agent_compatibility(),
 }
 ready = True
 for name, doc in docs.items():
-    create_n = len(doc.create_matrix)
-    resume_n = len(doc.resume_matrix)
-    print(f"{name}: create={create_n} resume={resume_n} adapter_version={doc.adapter_version}")
-    if create_n == 0 or resume_n == 0:
+    mapping = doc.as_mapping()
+    print(
+        f"{name}: create={len(mapping['create'])} resume={len(mapping['resume'])} "
+        f"steer={len(mapping['steer'])} interrupt={len(mapping['interrupt'])} "
+        f"multi={len(mapping['multi_interaction'])} nested={len(mapping['nested_activity'])} "
+        f"adapter_version={doc.adapter_version}"
+    )
+    if len(mapping["create"]) == 0 or len(mapping["resume"]) == 0:
         ready = False
 if not ready:
     raise SystemExit(

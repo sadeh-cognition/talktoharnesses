@@ -29,7 +29,7 @@
       "allowlisted_extensions": [
         "clientCapabilities._meta.parameterizedModelPicker"
       ],
-      "notes": "Live create/resume, permissions, model-family selection, parameter selection, and Agent/Plan/Ask selection proven on linux."
+      "notes": "Live create/resume, permissions, model-family selection, parameter selection, and Agent/Plan/Ask selection proven on linux. Interrupt and multi-interaction are published for the same linux gate."
     }
   ],
   "create_matrix": [
@@ -43,5 +43,19 @@
       "release_id": "cursor-2026.08.04-aaa8809",
       "platform": "linux"
     }
-  ]
+  ],
+  "steer_matrix": [],
+  "interrupt_matrix": [
+    {
+      "release_id": "cursor-2026.08.04-aaa8809",
+      "platform": "linux"
+    }
+  ],
+  "multi_interaction_matrix": [
+    {
+      "release_id": "cursor-2026.08.04-aaa8809",
+      "platform": "linux"
+    }
+  ],
+  "nested_activity_matrix": []
 }

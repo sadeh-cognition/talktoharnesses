@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+import sys
+from collections.abc import Callable, Mapping, Sequence
 from importlib.metadata import version as package_version
 from typing import Literal, Protocol, runtime_checkable
 
@@ -14,13 +15,63 @@ from talktoharnesses.domain.errors import DomainError
 _COMPAT = ConfigDict(extra="forbid", frozen=True)
 
 PlatformName = Literal["linux", "darwin", "win32"]
-MatrixMode = Literal["create", "resume"]
+MatrixMode = Literal[
+    "create",
+    "resume",
+    "steer",
+    "interrupt",
+    "multi_interaction",
+    "nested_activity",
+]
 ValidationMode = Literal["development", "stable"]
 _KNOWN_PLATFORMS: frozenset[str] = frozenset({"linux", "darwin", "win32"})
+MATRIX_MODES: tuple[MatrixMode, ...] = (
+    "create",
+    "resume",
+    "steer",
+    "interrupt",
+    "multi_interaction",
+    "nested_activity",
+)
+CAPABILITY_FLAG_FOR_MODE: dict[MatrixMode, str] = {
+    "resume": "supports_resume",
+    "steer": "supports_steer",
+    "interrupt": "supports_interrupt",
+    "multi_interaction": "supports_multi_interaction",
+    "nested_activity": "supports_nested_activity",
+}
+_MATRIX_HEADINGS: dict[MatrixMode, tuple[str, str]] = {
+    "create": (
+        "### Published create matrix",
+        "Create rows are added only after the opt-in create suite passes.",
+    ),
+    "resume": (
+        "### Published resume matrix",
+        "Resume rows are added only after the opt-in resume suite passes.",
+    ),
+    "steer": (
+        "### Published steer matrix",
+        "Steer rows are added only after the opt-in steer gate passes.",
+    ),
+    "interrupt": (
+        "### Published interrupt matrix",
+        "Interrupt rows are added only after the opt-in interrupt gate passes.",
+    ),
+    "multi_interaction": (
+        "### Published multi-interaction matrix",
+        "Multi-interaction rows are added only after the opt-in multi-interaction gate passes.",
+    ),
+    "nested_activity": (
+        "### Published nested-activity matrix",
+        "Nested-activity rows are added only after the opt-in nested-activity gate passes.",
+    ),
+}
+CAPABILITY_TABLE_HEADER = "Resume | Interrupt | Steer | Multi-interaction | Nested"
+CAPABILITY_TABLE_DIVIDER = "--- | --- | --- | --- | ---"
 
 
 class CompatibilityMatrixEntry(BaseModel):
-    """Exact create/resume support claim for one release on one platform."""
+    """Exact support claim for one release on one platform."""
 
     model_config = _COMPAT
 
@@ -63,11 +114,9 @@ class CompatibilitySection(Protocol):
     @property
     def adapter_version(self) -> str: ...
 
-    @property
-    def create_matrix(self) -> Sequence[CompatibilityMatrixEntry]: ...
-
-    @property
-    def resume_matrix(self) -> Sequence[CompatibilityMatrixEntry]: ...
+    def matrix(self, mode: MatrixMode) -> Sequence[CompatibilityMatrixEntry]:
+        """Return the published matrix for one operation or capability."""
+        ...
 
     def render_release_rows(self) -> list[str]:
         """Return Markdown table rows (without header) for known releases."""
@@ -76,6 +125,25 @@ class CompatibilitySection(Protocol):
     def render_extra_notes(self) -> list[str]:
         """Optional trailing Markdown lines for this harness section."""
         ...
+
+
+@runtime_checkable
+class CompatibilityDocument(Protocol):
+    """Packaged JSON document shape used by validation."""
+
+    @property
+    def adapter_version(self) -> str: ...
+
+    @property
+    def releases(self) -> Sequence[ReleaseLike]: ...
+
+    @property
+    def create_matrix(self) -> Sequence[CompatibilityMatrixEntry]: ...
+
+    @property
+    def resume_matrix(self) -> Sequence[CompatibilityMatrixEntry]: ...
+
+    def as_mapping(self) -> Mapping[MatrixMode, Sequence[CompatibilityMatrixEntry]]: ...
 
 
 _SectionLoader = Callable[[], CompatibilitySection]
@@ -108,13 +176,13 @@ def _release_map(releases: Sequence[ReleaseLike]) -> dict[str, ReleaseLike]:
 def validate_matrices(
     *,
     releases: Sequence[ReleaseLike],
-    create_matrix: Sequence[CompatibilityMatrixEntry],
-    resume_matrix: Sequence[CompatibilityMatrixEntry],
+    matrices: Mapping[MatrixMode, Sequence[CompatibilityMatrixEntry]],
     harness_label: str,
 ) -> None:
-    """Reject unknown, duplicate, platform-mismatched, or resume-incapable matrix rows."""
+    """Reject unknown, duplicate, platform-mismatched, or capability-mismatched rows."""
     by_id = _release_map(releases)
-    for mode, matrix in (("create", create_matrix), ("resume", resume_matrix)):
+    for mode in MATRIX_MODES:
+        matrix = matrices.get(mode, ())
         seen: set[tuple[str, str]] = set()
         for entry in matrix:
             key = (entry.release_id, entry.platform)
@@ -161,10 +229,11 @@ def validate_matrices(
                         "supported_platforms": list(release.platforms),
                     },
                 )
-            if mode == "resume" and not release.capabilities.supports_resume:
+            flag = CAPABILITY_FLAG_FOR_MODE.get(mode)
+            if flag is not None and not bool(getattr(release.capabilities, flag)):
                 raise DomainError(
                     ErrorCode.PROVIDER_INCOMPATIBLE,
-                    "resume matrix entry for release without resume capability",
+                    f"{mode} matrix entry for release without {flag}",
                     details={
                         "harness": harness_label,
                         "release_id": entry.release_id,
@@ -353,26 +422,17 @@ def render_supported_harnesses_markdown(
             lines.extend(rows)
             if rows and not rows[-1].endswith("\n") and rows[-1] != "":
                 lines.append("")
-        lines.extend(
-            _render_matrix_section(
-                "### Published create matrix",
-                section.create_matrix,
-                empty_message=(
-                    "_No published create combinations yet. "
-                    "Create rows are added only after the opt-in create suite passes._"
-                ),
+        for mode in MATRIX_MODES:
+            heading, empty_reason = _MATRIX_HEADINGS[mode]
+            lines.extend(
+                _render_matrix_section(
+                    heading,
+                    section.matrix(mode),
+                    empty_message=(
+                        f"_No published {mode.replace('_', '-')} combinations yet. {empty_reason}_"
+                    ),
+                )
             )
-        )
-        lines.extend(
-            _render_matrix_section(
-                "### Published resume matrix",
-                section.resume_matrix,
-                empty_message=(
-                    "_No published resume combinations yet. "
-                    "Resume rows are added only after the opt-in resume suite passes._"
-                ),
-            )
-        )
         extra = section.render_extra_notes()
         if extra:
             lines.extend(extra)
@@ -381,15 +441,7 @@ def render_supported_harnesses_markdown(
     return "\n".join(lines)
 
 
-def _load_provider_documents() -> list[
-    tuple[
-        str,
-        str,
-        Sequence[ReleaseLike],
-        Sequence[CompatibilityMatrixEntry],
-        Sequence[CompatibilityMatrixEntry],
-    ]
-]:
+def _load_provider_documents() -> list[tuple[str, CompatibilityDocument]]:
     """Load every packaged provider document for validation."""
     from talktoharnesses.providers.claude.compatibility import load_claude_compatibility
     from talktoharnesses.providers.codex.compatibility import load_codex_compatibility
@@ -398,34 +450,37 @@ def _load_provider_documents() -> list[
     from talktoharnesses.providers.opencode.compatibility import load_opencode_compatibility
     from talktoharnesses.providers.prime_agent.compatibility import load_prime_agent_compatibility
 
-    docs: list[
-        tuple[
-            str,
-            str,
-            Sequence[ReleaseLike],
-            Sequence[CompatibilityMatrixEntry],
-            Sequence[CompatibilityMatrixEntry],
-        ]
-    ] = []
-    for label, loader in (
-        ("grok", load_grok_compatibility),
-        ("cursor", load_cursor_compatibility),
-        ("codex", load_codex_compatibility),
-        ("claude", load_claude_compatibility),
-        ("opencode", load_opencode_compatibility),
-        ("prime_agent", load_prime_agent_compatibility),
-    ):
-        doc = loader()
-        docs.append(
-            (
-                label,
-                doc.adapter_version,
-                doc.releases,
-                doc.create_matrix,
-                doc.resume_matrix,
-            )
-        )
-    return docs
+    return [
+        ("grok", load_grok_compatibility()),
+        ("cursor", load_cursor_compatibility()),
+        ("codex", load_codex_compatibility()),
+        ("claude", load_claude_compatibility()),
+        ("opencode", load_opencode_compatibility()),
+        ("prime_agent", load_prime_agent_compatibility()),
+    ]
+
+
+def _require_advertised_matrix_rows(
+    *,
+    releases: Sequence[ReleaseLike],
+    matrices: Mapping[MatrixMode, Sequence[CompatibilityMatrixEntry]],
+    harness_label: str,
+) -> None:
+    """Stable releases must publish a row for every advertised capability."""
+    for release in releases:
+        for mode, flag in CAPABILITY_FLAG_FOR_MODE.items():
+            if not bool(getattr(release.capabilities, flag)):
+                continue
+            matrix = matrices.get(mode, ())
+            if not any(entry.release_id == release.id for entry in matrix):
+                raise DomainError(
+                    ErrorCode.PROVIDER_INCOMPATIBLE,
+                    f"advertised {flag} requires a published {mode} matrix row",
+                    details={
+                        "harness": harness_label,
+                        "release_id": release.id,
+                    },
+                )
 
 
 def validate_compatibility_documents(*, mode: ValidationMode = "development") -> None:
@@ -438,50 +493,55 @@ def validate_compatibility_documents(*, mode: ValidationMode = "development") ->
             "expected one compatibility document per harness kind",
             details={"count": len(docs)},
         )
-    for label, adapter_version, releases, create_matrix, resume_matrix in docs:
+    for label, doc in docs:
+        matrices = doc.as_mapping()
         validate_matrices(
-            releases=releases,
-            create_matrix=create_matrix,
-            resume_matrix=resume_matrix,
+            releases=doc.releases,
+            matrices=matrices,
             harness_label=label,
         )
         if mode == "stable":
-            if is_development_version(installed) or is_development_version(adapter_version):
+            if is_development_version(installed) or is_development_version(doc.adapter_version):
                 raise DomainError(
                     ErrorCode.PROVIDER_INCOMPATIBLE,
                     "stable validation rejects development versions",
                     details={
                         "harness": label,
                         "package_version": installed,
-                        "adapter_version": adapter_version,
+                        "adapter_version": doc.adapter_version,
                     },
                 )
-            if adapter_version != installed:
+            if doc.adapter_version != installed:
                 raise DomainError(
                     ErrorCode.PROVIDER_INCOMPATIBLE,
                     "adapter version must equal installed package version",
                     details={
                         "harness": label,
-                        "adapter_version": adapter_version,
+                        "adapter_version": doc.adapter_version,
                         "package_version": installed,
                     },
                 )
-            if not create_matrix or not resume_matrix:
+            if not doc.create_matrix or not doc.resume_matrix:
                 raise DomainError(
                     ErrorCode.PROVIDER_INCOMPATIBLE,
                     "stable release requires non-empty create and resume matrices",
                     details={
                         "harness": label,
-                        "create_count": len(create_matrix),
-                        "resume_count": len(resume_matrix),
+                        "create_count": len(doc.create_matrix),
+                        "resume_count": len(doc.resume_matrix),
                     },
                 )
-            if not releases:
+            if not doc.releases:
                 raise DomainError(
                     ErrorCode.PROVIDER_INCOMPATIBLE,
                     "stable release requires pinned release records",
                     details={"harness": label},
                 )
+            _require_advertised_matrix_rows(
+                releases=doc.releases,
+                matrices=matrices,
+                harness_label=label,
+            )
 
 
 class EmptyExtraNotes(BaseModel):
@@ -497,8 +557,41 @@ def yes_no(value: bool) -> str:
     return "yes" if value else "no"
 
 
+def capability_cells(caps: ReleaseCapabilities) -> str:
+    """Markdown cells for the shared capability columns."""
+    return " | ".join(
+        (
+            yes_no(caps.supports_resume),
+            yes_no(caps.supports_interrupt),
+            yes_no(caps.supports_steer),
+            yes_no(caps.supports_multi_interaction),
+            yes_no(caps.supports_nested_activity),
+        )
+    )
+
+
+def enforce_doc_operation(
+    doc: SharedMatrices,
+    release_id: str,
+    *,
+    mode: MatrixMode,
+    harness_label: str,
+    platform: str | None = None,
+    enforce_published: bool = True,
+) -> None:
+    """Validate a probed release against one published matrix on ``doc``."""
+    assert_matrix_membership(
+        release_id=release_id,
+        platform=platform or sys.platform,
+        matrix=getattr(doc, f"{mode}_matrix"),
+        mode=mode,
+        harness_label=harness_label,
+        enforce_published=enforce_published,
+    )
+
+
 class SharedMatrices(BaseModel):
-    """Shared create/resume matrix containers."""
+    """Shared published-matrix containers for every harness document."""
 
     model_config = _COMPAT
 
@@ -508,3 +601,18 @@ class SharedMatrices(BaseModel):
     resume_matrix: list[CompatibilityMatrixEntry] = Field(
         default_factory=list[CompatibilityMatrixEntry]
     )
+    steer_matrix: list[CompatibilityMatrixEntry] = Field(
+        default_factory=list[CompatibilityMatrixEntry]
+    )
+    interrupt_matrix: list[CompatibilityMatrixEntry] = Field(
+        default_factory=list[CompatibilityMatrixEntry]
+    )
+    multi_interaction_matrix: list[CompatibilityMatrixEntry] = Field(
+        default_factory=list[CompatibilityMatrixEntry]
+    )
+    nested_activity_matrix: list[CompatibilityMatrixEntry] = Field(
+        default_factory=list[CompatibilityMatrixEntry]
+    )
+
+    def as_mapping(self) -> dict[MatrixMode, list[CompatibilityMatrixEntry]]:
+        return {mode: list(getattr(self, f"{mode}_matrix")) for mode in MATRIX_MODES}

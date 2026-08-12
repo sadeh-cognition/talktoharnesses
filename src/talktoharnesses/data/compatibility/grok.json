@@ -34,7 +34,7 @@
         "_x.ai/models/update",
         "_x.ai/mcp_initialized"
       ],
-      "notes": "Live create/resume/interaction proven on linux."
+      "notes": "Live create/resume/interaction proven on linux. Interrupt and multi-interaction are published for the same linux gate."
     }
   ],
   "create_matrix": [
@@ -48,5 +48,19 @@
       "release_id": "grok-1.0.0-3cd0d0cbce",
       "platform": "linux"
     }
-  ]
+  ],
+  "steer_matrix": [],
+  "interrupt_matrix": [
+    {
+      "release_id": "grok-1.0.0-3cd0d0cbce",
+      "platform": "linux"
+    }
+  ],
+  "multi_interaction_matrix": [
+    {
+      "release_id": "grok-1.0.0-3cd0d0cbce",
+      "platform": "linux"
+    }
+  ],
+  "nested_activity_matrix": []
 }

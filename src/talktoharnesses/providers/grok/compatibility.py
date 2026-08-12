@@ -7,7 +7,6 @@ import re
 import sys
 from functools import lru_cache
 from importlib import resources
-from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -15,11 +14,15 @@ from talktoharnesses.domain.enums import ErrorCode, HarnessKind
 from talktoharnesses.domain.errors import DomainError
 from talktoharnesses.domain.models import HarnessCapabilities
 from talktoharnesses.providers.compatibility import (
+    CAPABILITY_TABLE_DIVIDER,
+    CAPABILITY_TABLE_HEADER,
     CompatibilityMatrixEntry,
+    MatrixMode,
     ReleaseCapabilities,
-    assert_matrix_membership,
+    SharedMatrices,
+    capability_cells,
+    enforce_doc_operation,
     validate_matrices,
-    yes_no,
 )
 
 _COMPAT = ConfigDict(extra="forbid", frozen=True)
@@ -56,17 +59,11 @@ class GrokReleaseRecord(BaseModel):
         )
 
 
-class GrokCompatibilityDoc(BaseModel):
+class GrokCompatibilityDoc(SharedMatrices):
     model_config = _COMPAT
 
     adapter_version: str
     releases: list[GrokReleaseRecord] = Field(default_factory=list[GrokReleaseRecord])
-    create_matrix: list[CompatibilityMatrixEntry] = Field(
-        default_factory=list[CompatibilityMatrixEntry]
-    )
-    resume_matrix: list[CompatibilityMatrixEntry] = Field(
-        default_factory=list[CompatibilityMatrixEntry]
-    )
 
     def release_by_id(self, release_id: str) -> GrokReleaseRecord | None:
         for release in self.releases:
@@ -89,8 +86,7 @@ def load_grok_compatibility() -> GrokCompatibilityDoc:
     doc = GrokCompatibilityDoc.model_validate(json.loads(data))
     validate_matrices(
         releases=doc.releases,
-        create_matrix=doc.create_matrix,
-        resume_matrix=doc.resume_matrix,
+        matrices=doc.as_mapping(),
         harness_label="grok",
     )
     return doc
@@ -161,19 +157,17 @@ def match_release(
 def enforce_published_operation(
     release: GrokReleaseRecord,
     *,
-    mode: Literal["create", "resume"],
+    mode: MatrixMode,
     platform: str | None = None,
     enforce_published: bool = True,
 ) -> None:
-    """Validate the probed release against the published create/resume matrix."""
-    doc = load_grok_compatibility()
-    matrix = doc.create_matrix if mode == "create" else doc.resume_matrix
-    assert_matrix_membership(
-        release_id=release.id,
-        platform=platform or sys.platform,
-        matrix=matrix,
+    """Validate the probed release against the published operation matrix."""
+    enforce_doc_operation(
+        load_grok_compatibility(),
+        release.id,
         mode=mode,
         harness_label="grok",
+        platform=platform,
         enforce_published=enforce_published,
     )
 
@@ -192,21 +186,16 @@ class GrokCompatibilitySection:
     def adapter_version(self) -> str:
         return self._doc.adapter_version
 
-    @property
-    def create_matrix(self) -> list[CompatibilityMatrixEntry]:
-        return list(self._doc.create_matrix)
-
-    @property
-    def resume_matrix(self) -> list[CompatibilityMatrixEntry]:
-        return list(self._doc.resume_matrix)
+    def matrix(self, mode: MatrixMode) -> list[CompatibilityMatrixEntry]:
+        return list(getattr(self._doc, f"{mode}_matrix"))
 
     def render_release_rows(self) -> list[str]:
         doc = self._doc
         if not doc.releases:
             return []
         lines = [
-            "| Release ID | CLI version | Build | ACP | Platforms | Resume | Steer |",
-            "| --- | --- | --- | --- | --- | --- | --- |",
+            f"| Release ID | CLI version | Build | ACP | Platforms | {CAPABILITY_TABLE_HEADER} |",
+            f"| --- | --- | --- | --- | --- | {CAPABILITY_TABLE_DIVIDER} |",
         ]
         for release in doc.releases:
             platforms = ", ".join(release.platforms) if release.platforms else "—"
@@ -214,8 +203,7 @@ class GrokCompatibilitySection:
             lines.append(
                 f"| `{release.id}` | {release.cli_version} | `{release.cli_build}` | "
                 f"v{release.acp_protocol_version} | {platforms} | "
-                f"{yes_no(caps.supports_resume)} | "
-                f"{yes_no(caps.supports_steer)} |"
+                f"{capability_cells(caps)} |"
             )
         return lines
 

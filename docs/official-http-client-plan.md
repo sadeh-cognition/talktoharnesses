@@ -135,9 +135,7 @@ Behavior:
 Define:
 
 ```python
-ConversationStreamItem: TypeAlias = (
-    ConversationEvent | ConversationSnapshot | SyncProjection
-)
+ConversationStreamItem: TypeAlias = ConversationEvent | ConversationSnapshot | SyncProjection
 ```
 
 ### Client constructor and lifecycle

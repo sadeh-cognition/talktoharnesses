@@ -15,7 +15,7 @@
         "supports_multi_interaction": false,
         "supports_nested_activity": false
       },
-      "notes": "Uses Prime Agent's official JSONL RPC mode; create, resume, streaming, steer, and interrupt are covered by adapter contract fixtures."
+      "notes": "Uses Prime Agent's official JSONL RPC mode. Create, resume, steer, and interrupt are published for the linux live gate."
     }
   ],
   "create_matrix": [
@@ -29,5 +29,19 @@
       "release_id": "prime-agent-0.7.1",
       "platform": "linux"
     }
-  ]
+  ],
+  "steer_matrix": [
+    {
+      "release_id": "prime-agent-0.7.1",
+      "platform": "linux"
+    }
+  ],
+  "interrupt_matrix": [
+    {
+      "release_id": "prime-agent-0.7.1",
+      "platform": "linux"
+    }
+  ],
+  "multi_interaction_matrix": [],
+  "nested_activity_matrix": []
 }

@@ -6,7 +6,6 @@ import json
 import sys
 from functools import lru_cache
 from importlib import resources
-from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -14,11 +13,15 @@ from talktoharnesses.domain.enums import ErrorCode, HarnessKind
 from talktoharnesses.domain.errors import DomainError
 from talktoharnesses.domain.models import HarnessCapabilities, HarnessModeInfo
 from talktoharnesses.providers.compatibility import (
+    CAPABILITY_TABLE_DIVIDER,
+    CAPABILITY_TABLE_HEADER,
     CompatibilityMatrixEntry,
+    MatrixMode,
     ReleaseCapabilities,
-    assert_matrix_membership,
+    SharedMatrices,
+    capability_cells,
+    enforce_doc_operation,
     validate_matrices,
-    yes_no,
 )
 from talktoharnesses.providers.prime_agent.argv import THINKING_LEVELS
 
@@ -49,17 +52,11 @@ class PrimeAgentReleaseRecord(BaseModel):
         )
 
 
-class PrimeAgentCompatibilityDoc(BaseModel):
+class PrimeAgentCompatibilityDoc(SharedMatrices):
     model_config = _COMPAT
 
     adapter_version: str
     releases: list[PrimeAgentReleaseRecord] = Field(default_factory=list[PrimeAgentReleaseRecord])
-    create_matrix: list[CompatibilityMatrixEntry] = Field(
-        default_factory=list[CompatibilityMatrixEntry]
-    )
-    resume_matrix: list[CompatibilityMatrixEntry] = Field(
-        default_factory=list[CompatibilityMatrixEntry]
-    )
 
 
 @lru_cache(maxsize=1)
@@ -69,8 +66,7 @@ def load_prime_agent_compatibility() -> PrimeAgentCompatibilityDoc:
     doc = PrimeAgentCompatibilityDoc.model_validate(json.loads(data))
     validate_matrices(
         releases=doc.releases,
-        create_matrix=doc.create_matrix,
-        resume_matrix=doc.resume_matrix,
+        matrices=doc.as_mapping(),
         harness_label="prime_agent",
     )
     return doc
@@ -123,18 +119,16 @@ def match_release(
 def enforce_published_operation(
     release: PrimeAgentReleaseRecord,
     *,
-    mode: Literal["create", "resume"],
+    mode: MatrixMode,
     platform: str | None = None,
     enforce_published: bool = True,
 ) -> None:
-    doc = load_prime_agent_compatibility()
-    matrix = doc.create_matrix if mode == "create" else doc.resume_matrix
-    assert_matrix_membership(
-        release_id=release.id,
-        platform=platform or sys.platform,
-        matrix=matrix,
+    enforce_doc_operation(
+        load_prime_agent_compatibility(),
+        release.id,
         mode=mode,
         harness_label="prime_agent",
+        platform=platform,
         enforce_published=enforce_published,
     )
 
@@ -151,27 +145,21 @@ class PrimeAgentCompatibilitySection:
     def adapter_version(self) -> str:
         return self._doc.adapter_version
 
-    @property
-    def create_matrix(self) -> list[CompatibilityMatrixEntry]:
-        return list(self._doc.create_matrix)
-
-    @property
-    def resume_matrix(self) -> list[CompatibilityMatrixEntry]:
-        return list(self._doc.resume_matrix)
+    def matrix(self, mode: MatrixMode) -> list[CompatibilityMatrixEntry]:
+        return list(getattr(self._doc, f"{mode}_matrix"))
 
     def render_release_rows(self) -> list[str]:
         if not self._doc.releases:
             return []
         lines = [
-            "| Release ID | CLI version | Transport | Platforms | Resume | Steer |",
-            "| --- | --- | --- | --- | --- | --- |",
+            f"| Release ID | CLI version | Transport | Platforms | {CAPABILITY_TABLE_HEADER} |",
+            f"| --- | --- | --- | --- | {CAPABILITY_TABLE_DIVIDER} |",
         ]
         for release in self._doc.releases:
             platforms = ", ".join(release.platforms) if release.platforms else "—"
             lines.append(
                 f"| `{release.id}` | {release.cli_version} | JSONL RPC | {platforms} | "
-                f"{yes_no(release.capabilities.supports_resume)} | "
-                f"{yes_no(release.capabilities.supports_steer)} |"
+                f"{capability_cells(release.capabilities)} |"
             )
         return lines
 

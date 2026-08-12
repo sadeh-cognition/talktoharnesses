@@ -222,10 +222,13 @@ class CursorAdapter:
         # Interject extension not proven for 1.0.0 fixtures yet.
         if self._release is None or not self._release.capabilities.supports_steer:
             return False
+        enforce_published_operation(self._release, mode="steer")
         return False
 
     async def interrupt(self, session: HarnessSession) -> None:
         self._require_session(session)
+        if self._release is not None and self._release.capabilities.supports_interrupt:
+            enforce_published_operation(self._release, mode="interrupt")
         assert self._connection is not None
         # Cancel pending permission waiters as cancelled outcomes.
         for interaction_id, (rpc_id, _options) in list(self._pending_interactions.items()):

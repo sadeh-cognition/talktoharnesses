@@ -694,9 +694,7 @@ async def test_force_permission_request_prefers_session_and_emits_no_interaction
         )
     )
 
-    assert responded == [
-        ("rpc-force", {"outcome": {"outcome": "selected", "optionId": "always"}})
-    ]
+    assert responded == [("rpc-force", {"outcome": {"outcome": "selected", "optionId": "always"}})]
     assert adapter._event_q.empty()  # pyright: ignore[reportPrivateUsage]
     assert adapter._pending_interactions == {}  # pyright: ignore[reportPrivateUsage]
 
