@@ -12,6 +12,7 @@ venv/
 .coverage
 htmlcov/
 *.log
+host/db.sqlite3
 .DS_Store
 
 # uv.lock is committed for reproducible installs
