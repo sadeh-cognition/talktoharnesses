@@ -35,6 +35,7 @@ from talktoharnesses.domain import (
     HarnessCapabilities,
     HarnessConfiguration,
     HarnessKind,
+    HarnessModelInfo,
     PrincipalGlobalRuleScope,
 )
 from talktoharnesses.providers.registry import AdapterRegistry
@@ -254,6 +255,43 @@ def test_create_harness_yolo_round_trip(service: TalkToHarnessesService, auth_he
     )
     assert fetched.status_code == 200
     assert fetched.json()["configuration"]["yolo"] is True
+
+
+@pytest.mark.django_db(transaction=True)
+def test_harness_models_returns_persisted_probe_models(
+    service: TalkToHarnessesService, auth_header: str
+) -> None:
+    user = authenticate_bearer_sync(auth_header)
+    owner = owner_id_for_user(user)
+
+    import asyncio
+
+    async def setup() -> UUID:
+        harness = await service.create_harness(
+            owner,
+            name="models",
+            configuration=HarnessConfiguration(kind=HarnessKind.CODEX, working_directory="/tmp"),
+        )
+        await DjangoPersistence().save_harness_probe(
+            harness.id,
+            owner,
+            HarnessCapabilities(
+                kind=HarnessKind.CODEX,
+                version="0.144.4",
+                models=(HarnessModelInfo(id="gpt-5.6-sol", label="GPT-5.6-Sol"),),
+            ),
+            probed_at=_now(),
+        )
+        return harness.id
+
+    harness_id = asyncio.run(setup())
+    response = Client().get(
+        f"/api/v1/harnesses/{harness_id}/models",
+        HTTP_AUTHORIZATION=auth_header,
+    )
+
+    assert response.status_code == 200
+    assert response.json() == [{"id": "gpt-5.6-sol", "label": "GPT-5.6-Sol"}]
 
 
 @pytest.mark.django_db(transaction=True)

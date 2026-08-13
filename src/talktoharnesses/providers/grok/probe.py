@@ -7,7 +7,12 @@ import sys
 
 from talktoharnesses.domain.enums import ErrorCode
 from talktoharnesses.domain.errors import DomainError
-from talktoharnesses.domain.models import HarnessCapabilities, HarnessConfiguration
+from talktoharnesses.domain.models import (
+    HarnessCapabilities,
+    HarnessConfiguration,
+    HarnessModelInfo,
+)
+from talktoharnesses.providers._model_discovery import run_model_command
 from talktoharnesses.providers.grok.compatibility import (
     GrokReleaseRecord,
     match_release,
@@ -45,4 +50,42 @@ async def probe_grok(config: HarnessConfiguration) -> tuple[HarnessCapabilities,
         )
     version_stdout = stdout_b.decode("utf-8", errors="replace")
     release = match_release(version_stdout, platform=sys.platform)
-    return release.to_harness_capabilities(), release
+    models = _parse_models(
+        await run_model_command(
+            executable,
+            "models",
+            provider="Grok",
+            working_directory=config.working_directory,
+        )
+    )
+    capabilities = release.to_harness_capabilities().model_copy(update={"models": models})
+    return capabilities, release
+
+
+def _parse_models(output: str) -> tuple[HarnessModelInfo, ...]:
+    _, separator, rows = output.partition("Available models:")
+    if not separator:
+        raise DomainError(
+            ErrorCode.PROVIDER_INCOMPATIBLE,
+            "malformed Grok model list",
+        )
+    models: list[HarnessModelInfo] = []
+    for raw_line in rows.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if not line.startswith("* "):
+            break
+        model_id = line.removeprefix("* ").removesuffix(" (default)").strip()
+        if not model_id or any(char.isspace() for char in model_id):
+            raise DomainError(
+                ErrorCode.PROVIDER_INCOMPATIBLE,
+                "malformed Grok model list",
+            )
+        models.append(HarnessModelInfo(id=model_id))
+    if not models:
+        raise DomainError(
+            ErrorCode.PROVIDER_INCOMPATIBLE,
+            "Grok advertised no models",
+        )
+    return tuple(models)

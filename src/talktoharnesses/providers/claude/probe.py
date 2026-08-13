@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import sys
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from talktoharnesses.domain.enums import ErrorCode
 from talktoharnesses.domain.errors import DomainError
-from talktoharnesses.domain.models import HarnessCapabilities, HarnessConfiguration
+from talktoharnesses.domain.models import (
+    HarnessCapabilities,
+    HarnessConfiguration,
+    HarnessModelInfo,
+)
 from talktoharnesses.providers.claude.compatibility import (
     ClaudeReleaseRecord,
     match_release,
@@ -52,8 +56,10 @@ async def probe_claude(
             "claude_agent_sdk.__version__ missing",
         )
     cli_source: Literal["bundled", "explicit"] = "bundled"
+    cli_path: str | None = None
     if config.executable_path:
         executable = resolve_executable(config.executable_path)
+        cli_path = str(executable)
         try:
             proc = await asyncio.create_subprocess_exec(
                 str(executable),
@@ -94,4 +100,57 @@ async def probe_claude(
         cli_source=cli_source,
         platform=sys.platform,
     )
-    return release.to_harness_capabilities(), release
+    models = await _discover_models(sdk, config.working_directory, cli_path)
+    capabilities = release.to_harness_capabilities().model_copy(update={"models": models})
+    return capabilities, release
+
+
+async def _discover_models(
+    sdk: Any, working_directory: str, cli_path: str | None
+) -> tuple[HarnessModelInfo, ...]:
+    try:
+        options = sdk.ClaudeAgentOptions(
+            cwd=working_directory,
+            cli_path=cli_path,
+            setting_sources=[],
+        )
+        async with sdk.ClaudeSDKClient(options) as client:
+            server_info = await client.get_server_info()
+    except Exception as exc:  # noqa: BLE001
+        raise DomainError(
+            ErrorCode.PROVIDER_INCOMPATIBLE,
+            "Claude model discovery failed",
+        ) from exc
+    if not isinstance(server_info, dict):
+        raise DomainError(
+            ErrorCode.PROVIDER_INCOMPATIBLE,
+            "Claude advertised no models",
+        )
+    raw_models = cast(dict[object, object], server_info).get("models")
+    if not isinstance(raw_models, list) or not raw_models:
+        raise DomainError(
+            ErrorCode.PROVIDER_INCOMPATIBLE,
+            "Claude advertised no models",
+        )
+    models: list[HarnessModelInfo] = []
+    for raw_model in cast(list[object], raw_models):
+        if not isinstance(raw_model, dict):
+            raise DomainError(
+                ErrorCode.PROVIDER_INCOMPATIBLE,
+                "malformed Claude model list",
+            )
+        model = cast(dict[object, object], raw_model)
+        model_id = model.get("value")
+        label = model.get("displayName")
+        if not isinstance(model_id, str) or not model_id:
+            raise DomainError(
+                ErrorCode.PROVIDER_INCOMPATIBLE,
+                "malformed Claude model list",
+            )
+        models.append(
+            HarnessModelInfo(
+                id=model_id,
+                label=label if isinstance(label, str) and label else None,
+            )
+        )
+    return tuple(models)

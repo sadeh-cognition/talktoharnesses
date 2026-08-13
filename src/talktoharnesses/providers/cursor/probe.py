@@ -7,7 +7,12 @@ import sys
 
 from talktoharnesses.domain.enums import ErrorCode
 from talktoharnesses.domain.errors import DomainError
-from talktoharnesses.domain.models import HarnessCapabilities, HarnessConfiguration
+from talktoharnesses.domain.models import (
+    HarnessCapabilities,
+    HarnessConfiguration,
+    HarnessModelInfo,
+)
+from talktoharnesses.providers._model_discovery import run_model_command
 from talktoharnesses.providers.cursor.compatibility import (
     CursorReleaseRecord,
     match_release,
@@ -47,4 +52,41 @@ async def probe_cursor(
         )
     version_stdout = stdout_b.decode("utf-8", errors="replace")
     release = match_release(version_stdout, platform=sys.platform)
-    return release.to_harness_capabilities(), release
+    output = await run_model_command(
+        executable,
+        "--list-models",
+        provider="Cursor",
+        working_directory=config.working_directory,
+    )
+    models = _parse_models(output)
+    capabilities = release.to_harness_capabilities().model_copy(update={"models": models})
+    return capabilities, release
+
+
+def _parse_models(output: str) -> tuple[HarnessModelInfo, ...]:
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    if not lines or lines[0] != "Available models":
+        raise DomainError(
+            ErrorCode.PROVIDER_INCOMPATIBLE,
+            "malformed Cursor model list",
+        )
+    models: list[HarnessModelInfo] = []
+    for line in lines[1:]:
+        model_id, separator, label = line.partition(" - ")
+        if not separator or not model_id or not label:
+            raise DomainError(
+                ErrorCode.PROVIDER_INCOMPATIBLE,
+                "malformed Cursor model list",
+            )
+        models.append(
+            HarnessModelInfo(
+                id=model_id,
+                label=label.removesuffix(" (default)"),
+            )
+        )
+    if not models:
+        raise DomainError(
+            ErrorCode.PROVIDER_INCOMPATIBLE,
+            "Cursor advertised no models",
+        )
+    return tuple(models)

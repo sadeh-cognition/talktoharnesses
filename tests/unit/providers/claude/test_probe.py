@@ -20,6 +20,36 @@ class _VersionProcess:
         return b"2.1.88 (Claude Code)\n", b""
 
 
+def _sdk(version: str = "0.1.53") -> SimpleNamespace:
+    class _Options:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+    class _Client:
+        def __init__(self, _options: object) -> None:
+            pass
+
+        async def __aenter__(self) -> _Client:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def get_server_info(self) -> dict[str, object]:
+            return {
+                "models": [
+                    {"value": "default", "displayName": "Default (recommended)"},
+                    {"value": "sonnet", "displayName": "Sonnet"},
+                ]
+            }
+
+    return SimpleNamespace(
+        __version__=version,
+        ClaudeAgentOptions=_Options,
+        ClaudeSDKClient=_Client,
+    )
+
+
 @pytest.mark.asyncio
 async def test_explicit_executable_requires_explicit_compatibility_row(
     monkeypatch: pytest.MonkeyPatch,
@@ -70,14 +100,22 @@ async def test_bundled_cli_probe_success_and_import_edges(
     monkeypatch.setattr(
         probe_mod,
         "_import_claude_sdk",
-        lambda: SimpleNamespace(__version__="0.1.53"),
+        _sdk,
     )
     monkeypatch.setattr(probe_mod, "_bundled_cli_version", lambda: "2.1.88")
     caps, release = await probe_claude(
-        HarnessConfiguration(kind=HarnessKind.CLAUDE, working_directory="/tmp")
+        HarnessConfiguration(
+            kind=HarnessKind.CLAUDE,
+            model="sonnet",
+            working_directory="/tmp",
+        )
     )
     assert release.cli_source == "bundled"
     assert caps.kind is HarnessKind.CLAUDE
+    assert [(model.id, model.label) for model in caps.models] == [
+        ("default", "Default (recommended)"),
+        ("sonnet", "Sonnet"),
+    ]
 
     def _import_fail() -> object:
         raise DomainError(

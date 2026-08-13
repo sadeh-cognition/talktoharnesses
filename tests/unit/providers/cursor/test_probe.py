@@ -21,6 +21,13 @@ class _Proc:
         return self._stdout, b"err"
 
 
+@pytest.mark.parametrize("output", ("", "Available models", "Available models\nbad-row"))
+def test_cursor_model_list_rejects_malformed_output(output: str) -> None:
+    with pytest.raises(DomainError) as exc:
+        probe_mod._parse_models(output)  # pyright: ignore[reportPrivateUsage]
+    assert exc.value.code is ErrorCode.PROVIDER_INCOMPATIBLE
+
+
 @pytest.mark.asyncio
 async def test_probe_cursor_success_and_error_paths(monkeypatch: pytest.MonkeyPatch) -> None:
     executable = Path("/tmp/cursor-agent")
@@ -33,7 +40,11 @@ async def test_probe_cursor_success_and_error_paths(monkeypatch: pytest.MonkeyPa
     async def ok_exec(*_a: object, **_k: object) -> _Proc:
         return _Proc(b"2026.08.04-aaa8809")
 
+    async def models(*_a: object, **_k: object) -> str:
+        return "Available models\n\nauto - Auto (default)\ncomposer-2.5 - Composer 2.5\n"
+
     monkeypatch.setattr(probe_mod.asyncio, "create_subprocess_exec", ok_exec)
+    monkeypatch.setattr(probe_mod, "run_model_command", models)
     caps, release = await probe_mod.probe_cursor(
         HarnessConfiguration(
             kind=HarnessKind.CURSOR,
@@ -43,6 +54,10 @@ async def test_probe_cursor_success_and_error_paths(monkeypatch: pytest.MonkeyPa
     )
     assert release.cli_version == "2026.08.04-aaa8809"
     assert caps.kind is HarnessKind.CURSOR
+    assert [(model.id, model.label) for model in caps.models] == [
+        ("auto", "Auto"),
+        ("composer-2.5", "Composer 2.5"),
+    ]
 
     with pytest.raises(DomainError) as no_path:
         await probe_mod.probe_cursor(

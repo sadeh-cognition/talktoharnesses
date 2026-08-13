@@ -7,7 +7,12 @@ import sys
 
 from talktoharnesses.domain.enums import ErrorCode
 from talktoharnesses.domain.errors import DomainError
-from talktoharnesses.domain.models import HarnessCapabilities, HarnessConfiguration
+from talktoharnesses.domain.models import (
+    HarnessCapabilities,
+    HarnessConfiguration,
+    HarnessModelInfo,
+)
+from talktoharnesses.providers._model_discovery import run_model_command
 from talktoharnesses.providers.prime_agent.compatibility import (
     PrimeAgentReleaseRecord,
     match_release,
@@ -46,4 +51,38 @@ async def probe_prime_agent(
         )
     version_output = stdout if stdout.strip() else stderr
     release = match_release(version_output.decode("utf-8", errors="replace"), platform=sys.platform)
-    return release.to_harness_capabilities(), release
+    output = await run_model_command(
+        executable,
+        "model",
+        "list",
+        provider="Prime Agent",
+        working_directory=config.working_directory,
+    )
+    models = _parse_models(output)
+    capabilities = release.to_harness_capabilities().model_copy(update={"models": models})
+    return capabilities, release
+
+
+def _parse_models(output: str) -> tuple[HarnessModelInfo, ...]:
+    lines = [line for line in output.splitlines() if line.strip()]
+    if not lines or lines[0].split()[:2] != ["provider", "model"]:
+        raise DomainError(
+            ErrorCode.PROVIDER_INCOMPATIBLE,
+            "malformed Prime Agent model list",
+        )
+    models: list[HarnessModelInfo] = []
+    for line in lines[1:]:
+        columns = line.split()
+        if len(columns) != 6:
+            raise DomainError(
+                ErrorCode.PROVIDER_INCOMPATIBLE,
+                "malformed Prime Agent model list",
+            )
+        provider, model_id = columns[:2]
+        models.append(HarnessModelInfo(id=f"{provider}/{model_id}", label=model_id))
+    if not models:
+        raise DomainError(
+            ErrorCode.PROVIDER_INCOMPATIBLE,
+            "Prime Agent advertised no models",
+        )
+    return tuple(models)

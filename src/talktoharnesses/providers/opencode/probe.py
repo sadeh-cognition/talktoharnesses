@@ -7,7 +7,12 @@ import sys
 
 from talktoharnesses.domain.enums import ErrorCode
 from talktoharnesses.domain.errors import DomainError
-from talktoharnesses.domain.models import HarnessCapabilities, HarnessConfiguration
+from talktoharnesses.domain.models import (
+    HarnessCapabilities,
+    HarnessConfiguration,
+    HarnessModelInfo,
+)
+from talktoharnesses.providers._model_discovery import run_model_command
 from talktoharnesses.providers.opencode.compatibility import (
     OpenCodeReleaseRecord,
     match_release,
@@ -46,4 +51,32 @@ async def probe_opencode(
         )
     version_stdout = stdout_b.decode("utf-8", errors="replace")
     release = match_release(version_stdout, platform=sys.platform)
-    return release.to_harness_capabilities(), release
+    output = await run_model_command(
+        executable,
+        "models",
+        provider="OpenCode",
+        working_directory=config.working_directory,
+    )
+    models = _parse_models(output)
+    capabilities = release.to_harness_capabilities().model_copy(update={"models": models})
+    return capabilities, release
+
+
+def _parse_models(output: str) -> tuple[HarnessModelInfo, ...]:
+    models: list[HarnessModelInfo] = []
+    for raw_line in output.splitlines():
+        model_id = raw_line.strip()
+        if not model_id:
+            continue
+        if any(char.isspace() for char in model_id) or "/" not in model_id:
+            raise DomainError(
+                ErrorCode.PROVIDER_INCOMPATIBLE,
+                "malformed OpenCode model list",
+            )
+        models.append(HarnessModelInfo(id=model_id))
+    if not models:
+        raise DomainError(
+            ErrorCode.PROVIDER_INCOMPATIBLE,
+            "OpenCode advertised no models",
+        )
+    return tuple(models)
