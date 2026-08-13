@@ -53,15 +53,9 @@ class HarnessConfiguration(BaseModel):
     executable_path: str | None = None
     model: str | None = None
     mode: str | None = None
-    force: bool = False
+    yolo: bool = False
     working_directory: str
     workspace_roots: tuple[str, ...] = ()
-
-    @model_validator(mode="after")
-    def _validate_force(self) -> HarnessConfiguration:
-        if self.force and (self.kind is not HarnessKind.CURSOR or self.mode != "agent"):
-            raise ValueError("force requires a Cursor harness in agent mode")
-        return self
 
 
 class HarnessCapabilities(BaseModel):

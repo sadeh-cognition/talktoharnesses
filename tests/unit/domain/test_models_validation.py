@@ -30,6 +30,19 @@ def test_extra_fields_forbidden() -> None:
         )
 
 
+def test_yolo_defaults_false_and_accepts_true() -> None:
+    default = HarnessConfiguration(kind=HarnessKind.GROK, working_directory="/tmp")
+    assert default.yolo is False
+    enabled = HarnessConfiguration(
+        kind=HarnessKind.CLAUDE,
+        working_directory="/tmp",
+        yolo=True,
+    )
+    assert enabled.yolo is True
+    dumped = default.model_dump(mode="json")
+    assert dumped["yolo"] is False
+
+
 def test_naive_datetime_rejected() -> None:
     with pytest.raises(ValidationError):
         Conversation(

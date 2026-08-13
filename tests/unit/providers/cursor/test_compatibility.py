@@ -17,7 +17,7 @@ from talktoharnesses.providers.cursor.compatibility import (
 
 def test_load_and_match_release() -> None:
     doc = load_cursor_compatibility()
-    assert doc.adapter_version == "2026.8.2"
+    assert doc.adapter_version == "2026.8.3"
     release = match_release("2026.08.04-aaa8809", platform="linux")
     assert release.id == "cursor-2026.08.04-aaa8809"
     caps = release.to_harness_capabilities()
@@ -47,3 +47,4 @@ def test_markdown_includes_cursor() -> None:
 
 def test_build_argv_accepts_no_model_mode_flags() -> None:
     assert build_cursor_argv() == ("acp",)
+    assert build_cursor_argv(yolo=True) == ("acp", "--yolo")

@@ -126,7 +126,7 @@
   - Separate provider-extension schemas.
 
 - Do not implement the entire ACP specification or pass unknown events through. Unknown methods, fields, requests, or notifications produce `unsupported_native_event`.
-- Launch Grok using its local ACP stdio mode without `--always-approve`, because package-level approvals must remain observable. Grok officially documents long-lived ACP over strict stdio JSON-RPC, including sessions, streaming, reasoning, tools, plans, and permission prompts. [Grok ACP documentation](https://github.com/xai-org/grok-build/blob/main/crates/codegen/xai-grok-pager/docs/user-guide/15-agent-mode.md)
+- Launch Grok using its local ACP stdio mode without `--always-approve` unless `HarnessConfiguration.yolo` is true, so package-level approvals remain observable by default. Grok officially documents long-lived ACP over strict stdio JSON-RPC, including sessions, streaming, reasoning, tools, plans, and permission prompts. [Grok ACP documentation](https://github.com/xai-org/grok-build/blob/main/crates/codegen/xai-grok-pager/docs/user-guide/15-agent-mode.md)
 - Implement probe, strict version matching, session create/load, prompt, steer, cancel, permissions, structured questions, plans, tools, commands, files, reasoning, usage, title, and nested activity normalization.
 - Record full redacted normalized tool input/output during retention. Derive a separate UTF-8-safe 2 KiB output tail for `CanonicalToolResult` handoffs.
 - Connect adapter events to the durable command processor:

@@ -57,7 +57,7 @@ class ClaudeAdapter:
         self._event_q: asyncio.Queue[HarnessEvent | HarnessInteractionRequest | None] = (
             asyncio.Queue()
         )
-        self._pending_interactions: dict[UUID, asyncio.Future[ApprovalDecision | None]] = {}
+        self._pending_interactions: dict[UUID, asyncio.Future[InteractionAnswer]] = {}
         self._closed = False
         self._native_session_id: str | None = None
 
@@ -160,7 +160,12 @@ class ClaudeAdapter:
             enforce_published_operation(self._release, mode="interrupt")
         for interaction_id, future in list(self._pending_interactions.items()):
             if not future.done():
-                future.set_result(ApprovalDecision.CANCEL)
+                future.set_result(
+                    InteractionAnswer(
+                        interaction_id=interaction_id,
+                        decision=ApprovalDecision.CANCEL,
+                    )
+                )
             del self._pending_interactions[interaction_id]
         if self._client is not None:
             with contextlib.suppress(Exception):
@@ -181,7 +186,7 @@ class ClaudeAdapter:
             )
         del self._pending_interactions[answer.interaction_id]
         if not pending.done():
-            pending.set_result(answer.decision)
+            pending.set_result(answer)
 
     def events(
         self,
@@ -225,9 +230,14 @@ class ClaudeAdapter:
                     if asyncio.iscoroutine(result):
                         await result
             self._client = None
-        for future in self._pending_interactions.values():
+        for interaction_id, future in self._pending_interactions.items():
             if not future.done():
-                future.set_result(ApprovalDecision.CANCEL)
+                future.set_result(
+                    InteractionAnswer(
+                        interaction_id=interaction_id,
+                        decision=ApprovalDecision.CANCEL,
+                    )
+                )
         self._pending_interactions.clear()
         with contextlib.suppress(asyncio.QueueFull):
             self._event_q.put_nowait(None)
@@ -283,18 +293,34 @@ class ClaudeAdapter:
             from claude_agent_sdk import ClaudeAgentOptions, HookMatcher
         except ImportError:
             # Fake factory path: return a simple namespace.
-            return {
+            options: dict[str, Any] = {
                 "cwd": cwd,
                 "model": config.model,
                 "resume": resume,
                 "session_id": session_id,
-                "permission_mode": "default",
-                "can_use_tool": self._can_use_tool,
+                "permission_mode": "bypassPermissions" if config.yolo else "default",
                 "cli_path": config.executable_path,
             }
+            options["can_use_tool"] = (
+                self._can_use_tool_yolo if config.yolo else self._can_use_tool
+            )
+            return options
         cli_path = None
         if config.executable_path:
             cli_path = str(resolve_executable(config.executable_path))
+
+        if config.yolo:
+            return ClaudeAgentOptions(
+                cwd=cwd,
+                model=config.model,
+                resume=resume,
+                session_id=session_id,
+                permission_mode="bypassPermissions",
+                can_use_tool=self._can_use_tool_yolo,
+                cli_path=cli_path,
+                # Avoid project/local auto-allow settings; user auth still applies via SDK login.
+                setting_sources=[],
+            )
 
         async def _force_broker_ask(
             input_data: dict[str, Any],
@@ -381,7 +407,7 @@ class ClaudeAdapter:
     ) -> Any:
         interaction_id = uuid4()
         loop = asyncio.get_running_loop()
-        future: asyncio.Future[ApprovalDecision | None] = loop.create_future()
+        future: asyncio.Future[InteractionAnswer] = loop.create_future()
         self._pending_interactions[interaction_id] = future
         tool_use_id = getattr(context, "tool_use_id", None)
         events = self._normalizer.on_permission_request(
@@ -390,6 +416,57 @@ class ClaudeAdapter:
             interaction_id=interaction_id,
             tool_use_id=tool_use_id if isinstance(tool_use_id, str) else None,
         )
+        await self._publish_interaction(events, tool_name=tool_name)
+        answer = await future
+        return self._to_permission_result(answer.decision)
+
+    async def _can_use_tool_yolo(
+        self,
+        tool_name: str,
+        tool_input: dict[str, Any],
+        context: Any,
+    ) -> Any:
+        if tool_name != "AskUserQuestion":
+            return self._to_permission_result(
+                ApprovalDecision.ALLOW_ONCE,
+                updated_input=tool_input,
+            )
+        interaction_id = uuid4()
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[InteractionAnswer] = loop.create_future()
+        self._pending_interactions[interaction_id] = future
+        del context
+        questions_obj = tool_input.get("questions")
+        questions: list[dict[str, Any]] = []
+        if isinstance(questions_obj, list):
+            for item in cast(list[object], questions_obj):
+                if isinstance(item, dict):
+                    questions.append(
+                        {
+                            str(key): value
+                            for key, value in cast(dict[object, object], item).items()
+                        }
+                    )
+        events = self._normalizer.on_question_request(
+            questions=questions,
+            interaction_id=interaction_id,
+        )
+        await self._publish_interaction(events, tool_name=tool_name)
+        answer = await future
+        if answer.decision is ApprovalDecision.CANCEL:
+            return self._to_permission_result(ApprovalDecision.CANCEL)
+        updated_input = {**tool_input, "answers": answer.answers or {}}
+        return self._to_permission_result(
+            ApprovalDecision.ALLOW_ONCE,
+            updated_input=updated_input,
+        )
+
+    async def _publish_interaction(
+        self,
+        events: list[HarnessEvent],
+        *,
+        tool_name: str,
+    ) -> None:
         for event in events:
             if isinstance(event, InteractionRequestedPayload):
                 await self._event_q.put(
@@ -400,22 +477,28 @@ class ClaudeAdapter:
                 )
             else:
                 await self._event_q.put(event)
-        decision = await future
-        return self._to_permission_result(decision)
 
-    def _to_permission_result(self, decision: ApprovalDecision | None) -> Any:
+    def _to_permission_result(
+        self,
+        decision: ApprovalDecision | None,
+        *,
+        updated_input: dict[str, Any] | None = None,
+    ) -> Any:
         try:
             from claude_agent_sdk import PermissionResultAllow, PermissionResultDeny
         except ImportError:
             if decision in {ApprovalDecision.ALLOW_ONCE, ApprovalDecision.ALLOW_SESSION}:
-                return {"behavior": "allow"}
+                result: dict[str, Any] = {"behavior": "allow"}
+                if updated_input is not None:
+                    result["updatedInput"] = updated_input
+                return result
             return {
                 "behavior": "deny",
                 "message": "denied",
                 "interrupt": decision is ApprovalDecision.CANCEL,
             }
         if decision in {ApprovalDecision.ALLOW_ONCE, ApprovalDecision.ALLOW_SESSION}:
-            return PermissionResultAllow()
+            return PermissionResultAllow(updated_input=updated_input)
         return PermissionResultDeny(
             message="denied by talktoharnesses",
             interrupt=decision is ApprovalDecision.CANCEL,

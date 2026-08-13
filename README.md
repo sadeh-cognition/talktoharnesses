@@ -149,12 +149,12 @@ baseline. Model selectors do not change the separately configured Cursor
 workflow `mode` (`agent`, `plan`, or `ask`). Invalid selectors fail before the
 prompt is sent.
 
-Set `force: true` only on a Cursor harness whose mode is `agent`. Permission
-requests are then answered inside the Cursor adapter, preferring a session-wide
-allow option and falling back to allow-once. No interaction request is
-published for these automatically approved operations. Force behavior is part
-of the fixed harness configuration and applies to both new and resumed
-sessions.
+Set `yolo: true` on a harness to suppress approval prompts through
+provider-native mechanisms. No approval interaction or audit is published,
+and package allow/deny rules do not participate. Structured questions remain
+interactive. Yolo does not change model, workflow mode, workspace roots,
+sandbox selection, or provider hard denials. It is fixed at harness creation
+and applies to both new and resumed sessions.
 
 ## Development
 

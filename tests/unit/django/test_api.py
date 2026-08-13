@@ -104,6 +104,9 @@ def test_openapi_describes_cursor_model_selector_on_existing_fields() -> None:
         assert "composer-2.5[fast=false]" in field["description"]
     assert "session baseline" in configuration_model["description"]
     assert "one-turn" in turn_model["description"]
+    yolo_field = cast(dict[str, Any], schemas["HarnessConfigurationBody"])["properties"]["yolo"]
+    assert yolo_field["default"] is False
+    assert "provider-native mechanisms" in yolo_field["description"]
 
 
 @pytest.fixture
@@ -222,6 +225,35 @@ def test_create_harness_and_conversation(service: TalkToHarnessesService, auth_h
     listed = client.get("/api/v1/conversations", HTTP_AUTHORIZATION=auth_header)
     assert listed.status_code == 200
     assert len(listed.json()["items"]) == 1
+    assert fetched.json()["configuration"]["yolo"] is False
+
+
+@pytest.mark.django_db(transaction=True)
+def test_create_harness_yolo_round_trip(service: TalkToHarnessesService, auth_header: str) -> None:
+    del service
+    client = Client()
+    create = _post_json(
+        client,
+        "/api/v1/harnesses",
+        {
+            "name": "yolo-grok",
+            "configuration": {
+                "kind": "grok",
+                "working_directory": "/tmp/ws",
+                "yolo": True,
+            },
+        },
+        HTTP_AUTHORIZATION=auth_header,
+    )
+    assert create.status_code == 201, create.content
+    body = create.json()
+    assert body["configuration"]["yolo"] is True
+    fetched = client.get(
+        f"/api/v1/harnesses/{body['id']}",
+        HTTP_AUTHORIZATION=auth_header,
+    )
+    assert fetched.status_code == 200
+    assert fetched.json()["configuration"]["yolo"] is True
 
 
 @pytest.mark.django_db(transaction=True)

@@ -177,6 +177,54 @@ async def test_resume_switches_to_persisted_session(monkeypatch: pytest.MonkeyPa
 
 
 @pytest.mark.asyncio
+async def test_yolo_is_accepted_on_create_and_resume_without_argv_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "talktoharnesses.providers.prime_agent.adapter.probe_prime_agent",
+        _probe,
+    )
+    yolo = HarnessConfiguration(
+        kind=HarnessKind.PRIME_AGENT,
+        executable_path="/bin/true",
+        working_directory="/tmp",
+        model="anthropic/claude-sonnet-4-5",
+        mode="high",
+        yolo=True,
+    )
+    process = _FakePrimeProcess()
+    adapter = PrimeAgentAdapter()
+    adapter.bind_process(process)  # type: ignore[arg-type]
+    await adapter.probe(yolo)
+    assert adapter.build_argv(yolo) == adapter.build_argv(_config())
+    session = await adapter.start(
+        StartSessionRequest(
+            conversation_id=uuid4(),
+            binding_id=uuid4(),
+            configuration=yolo,
+            launch=_launch(),
+        )
+    )
+    await adapter.close(session)
+
+    resume_process = _FakePrimeProcess()
+    resume_adapter = PrimeAgentAdapter()
+    resume_adapter.bind_process(resume_process)  # type: ignore[arg-type]
+    await resume_adapter.probe(yolo)
+    resumed = await resume_adapter.resume(
+        ResumeSessionRequest(
+            conversation_id=uuid4(),
+            binding_id=uuid4(),
+            configuration=yolo,
+            native_session_id="/tmp/existing-prime-session.jsonl",
+            launch=_launch(),
+        )
+    )
+    assert resume_process.commands[0]["type"] == "switch_session"
+    await resume_adapter.close(resumed)
+
+
+@pytest.mark.asyncio
 async def test_turn_model_override_is_restored(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "talktoharnesses.providers.prime_agent.adapter.probe_prime_agent",

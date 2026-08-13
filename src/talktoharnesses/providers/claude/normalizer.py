@@ -29,7 +29,11 @@ from talktoharnesses.domain.events import (
     TurnFailedPayload,
     UsageUpdatedPayload,
 )
-from talktoharnesses.domain.models import ApprovalRequestPayload, CanonicalToolResult
+from talktoharnesses.domain.models import (
+    ApprovalRequestPayload,
+    CanonicalToolResult,
+    StructuredQuestionPayload,
+)
 from talktoharnesses.providers.claude.schemas import (
     ClaudeAssistantMessage,
     ClaudeMessage,
@@ -129,6 +133,23 @@ class ClaudeNormalizer:
                         ApprovalDecision.CANCEL,
                     ),
                 ),
+            )
+        ]
+
+    def on_question_request(
+        self,
+        *,
+        questions: list[dict[str, Any]],
+        interaction_id: UUID,
+    ) -> list[HarnessEvent]:
+        if self._active_turn_id is None:
+            raise DomainError(ErrorCode.INVALID_STATE, "question without active turn")
+        return [
+            InteractionRequestedPayload(
+                turn_id=self._active_turn_id,
+                interaction_id=interaction_id,
+                kind=InteractionKind.STRUCTURED_QUESTION,
+                request=StructuredQuestionPayload(questions=tuple(questions)),
             )
         ]
 

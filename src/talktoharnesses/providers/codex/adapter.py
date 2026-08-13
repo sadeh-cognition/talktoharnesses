@@ -81,17 +81,32 @@ def _sandbox_wire_value(sandbox: Any) -> Any:
     return SandboxMode(value)
 
 
-def _build_broker_async_codex(
-    approval_handler: Callable[[str, dict[str, Any] | None], dict[str, Any]],
-) -> Any:
-    """Build AsyncCodex with public CodexClient(approval_handler=...) and user reviewer."""
-    from openai_codex import AsyncCodex, AsyncThread
-    from openai_codex.async_client import AsyncCodexClient
-    from openai_codex.client import CodexClient
+def _codex_approval_params(*, yolo: bool) -> dict[str, Any]:
+    """Map yolo to Codex approval_policy. Sandbox is selected separately."""
     from openai_codex.generated.v2_all import (
         ApprovalsReviewer,
         AskForApproval,
         AskForApprovalValue,
+    )
+
+    if yolo:
+        return {"approval_policy": AskForApproval(root=AskForApprovalValue.never)}
+    return {
+        "approval_policy": AskForApproval(root=AskForApprovalValue.on_request),
+        "approvals_reviewer": ApprovalsReviewer.user,
+    }
+
+
+def _build_broker_async_codex(
+    approval_handler: Callable[[str, dict[str, Any] | None], dict[str, Any]] | None,
+    *,
+    yolo: bool = False,
+) -> Any:
+    """Build AsyncCodex with public CodexClient and brokered or yolo approvals."""
+    from openai_codex import AsyncCodex, AsyncThread
+    from openai_codex.async_client import AsyncCodexClient
+    from openai_codex.client import CodexClient
+    from openai_codex.generated.v2_all import (
         ThreadResumeParams,
         ThreadStartParams,
     )
@@ -99,7 +114,10 @@ def _build_broker_async_codex(
     class BrokerAsyncCodexClient(AsyncCodexClient):
         def __init__(self, config: Any = None) -> None:
             # Public CodexClient accepts approval_handler; AsyncCodexClient does not forward it.
-            self._sync = CodexClient(config=config, approval_handler=approval_handler)
+            if yolo:
+                self._sync = CodexClient(config=config)
+            else:
+                self._sync = CodexClient(config=config, approval_handler=approval_handler)
 
     class BrokerAsyncCodex(AsyncCodex):
         def __init__(self, config: Any = None) -> None:
@@ -112,8 +130,7 @@ def _build_broker_async_codex(
             await self._ensure_initialized()
             sandbox = kwargs.get("sandbox")
             params = ThreadStartParams(
-                approval_policy=AskForApproval(root=AskForApprovalValue.on_request),
-                approvals_reviewer=ApprovalsReviewer.user,
+                **_codex_approval_params(yolo=yolo),
                 cwd=kwargs.get("cwd"),
                 model=kwargs.get("model"),
                 sandbox=_sandbox_wire_value(sandbox) if sandbox is not None else None,
@@ -126,8 +143,7 @@ def _build_broker_async_codex(
             sandbox = kwargs.get("sandbox")
             params = ThreadResumeParams(
                 thread_id=thread_id,
-                approval_policy=AskForApproval(root=AskForApprovalValue.on_request),
-                approvals_reviewer=ApprovalsReviewer.user,
+                **_codex_approval_params(yolo=yolo),
                 cwd=kwargs.get("cwd"),
                 model=kwargs.get("model"),
                 sandbox=_sandbox_wire_value(sandbox) if sandbox is not None else None,
@@ -188,7 +204,7 @@ class CodexAdapter:
         if self._release is None:
             raise DomainError(ErrorCode.INVALID_STATE, "codex adapter must be probed before start")
         enforce_published_operation(self._release, mode="create")
-        await self._ensure_client()
+        await self._ensure_client(yolo=request.configuration.yolo)
         assert self._client is not None
         cwd = request.launch.working_directory or request.configuration.working_directory
         approval_mode, sandbox = _codex_settings(request.configuration.mode)
@@ -218,7 +234,7 @@ class CodexAdapter:
         if self._release is None:
             raise DomainError(ErrorCode.INVALID_STATE, "codex adapter must be probed before resume")
         enforce_published_operation(self._release, mode="resume")
-        await self._ensure_client()
+        await self._ensure_client(yolo=request.configuration.yolo)
         assert self._client is not None
         cwd = request.launch.working_directory or request.configuration.working_directory
         approval_mode, sandbox = _codex_settings(request.configuration.mode)
@@ -364,7 +380,7 @@ class CodexAdapter:
         with contextlib.suppress(asyncio.QueueFull):
             self._event_q.put_nowait(None)
 
-    async def _ensure_client(self) -> None:
+    async def _ensure_client(self, *, yolo: bool = False) -> None:
         if self._client is not None:
             return
         self._loop = asyncio.get_running_loop()
@@ -372,7 +388,10 @@ class CodexAdapter:
             client = self._client_factory()
         else:
             try:
-                client = _build_broker_async_codex(self._approval_handler)
+                client = _build_broker_async_codex(
+                    None if yolo else self._approval_handler,
+                    yolo=yolo,
+                )
             except ImportError as exc:
                 raise DomainError(
                     ErrorCode.PROVIDER_INCOMPATIBLE,

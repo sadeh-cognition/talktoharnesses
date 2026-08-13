@@ -90,6 +90,7 @@ class OpenCodeAdapter:
         self._pending_interactions: dict[UUID, tuple[str, str]] = {}
         self._closed = False
         self._connected_event = asyncio.Event()
+        self._yolo = False
 
     def bind_process(self, process: ProcessHandle) -> None:
         self._process = process
@@ -137,6 +138,7 @@ class OpenCodeAdapter:
         await self._wait_healthy()
         await self._open_events()
         assert self._client is not None
+        self._yolo = request.configuration.yolo
         response = await self._client.post(
             "/session",
             json={"directory": request.launch.working_directory},
@@ -161,6 +163,7 @@ class OpenCodeAdapter:
         await self._wait_healthy()
         await self._open_events()
         assert self._client is not None
+        self._yolo = request.configuration.yolo
         self._normalizer.set_session(request.native_session_id, resync=True)
         response = await self._client.get(f"/session/{request.native_session_id}")
         if response.status_code == 404:
@@ -461,6 +464,9 @@ class OpenCodeAdapter:
                     ErrorCode.PROTOCOL_ERROR,
                     f"{event_type} missing session id",
                 )
+            if event_type == "permission.asked" and self._yolo:
+                await self._handle_permission(props_map)
+                return
             if not self._normalizer.accepts_session(session_id):
                 return
             if event_type == "question.asked":
@@ -485,6 +491,14 @@ class OpenCodeAdapter:
         permission_id = str(props.get("permissionID") or props.get("id") or "")
         if not permission_id:
             raise DomainError(ErrorCode.PROTOCOL_ERROR, "permission event missing id")
+        if self._yolo:
+            assert self._client is not None
+            response = await self._client.post(
+                f"/permission/{permission_id}/reply",
+                json={"reply": "once"},
+            )
+            self._raise_http(response, "POST /permission/{requestID}/reply")
+            return
         interaction_id = uuid4()
         self._pending_interactions[interaction_id] = ("permission", permission_id)
         tool = props.get("tool")

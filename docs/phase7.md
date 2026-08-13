@@ -158,7 +158,8 @@ first real uses of SDK-managed subprocesses, so add the lifecycle seam only when
 
 - Resolve the configured Cursor executable through the existing supervisor and run the exact
   version command. Match full version/build output and platform against `cursor.json`.
-- Launch `agent acp` directly with no shell. Do not use `--print`, stream JSON, force approval,
+- Launch `agent acp` directly with no shell. Pass `--yolo` only when
+  `HarnessConfiguration.yolo` is true. Do not use `--print`, stream JSON,
   login/logout, update, arbitrary flags, or environment mutation as fallbacks.
 - Initialize ACP v1, validate the complete tested agent identity and capabilities, and advertise
   only the intersection implemented by the adapter and reported by the pinned CLI.

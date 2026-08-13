@@ -102,9 +102,8 @@ start/resume/submit/interrupt, permission requests, prompt watcher, events
 generator, close. Cursor-only bulk is ~280 lines of model/mode config —
 extract that to `cursor/model_config.py` either way.
 
-Extract `AcpHarnessAdapter` with hooks for protocol, identity validation, and
-Cursor’s `_force` auto-approve. Do not fold Prime Agent into ACP — it is JSONL,
-not JSON-RPC 2.0.
+Extract `AcpHarnessAdapter` with hooks for protocol and identity validation.
+Do not fold Prime Agent into ACP — it is JSONL, not JSON-RPC 2.0.
 
 ### Four CLI probes are the same function
 

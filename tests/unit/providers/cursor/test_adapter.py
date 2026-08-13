@@ -47,7 +47,7 @@ def _config(
     *,
     model: str | None = "composer-2.5[fast=false]",
     mode: str | None = "ask",
-    force: bool = False,
+    yolo: bool = False,
 ) -> HarnessConfiguration:
     return HarnessConfiguration(
         kind=HarnessKind.CURSOR,
@@ -55,7 +55,7 @@ def _config(
         working_directory="/tmp",
         model=model,
         mode=mode,
-        force=force,
+        yolo=yolo,
     )
 
 
@@ -201,6 +201,14 @@ def test_parse_duplicate_parameter_ids() -> None:
 
 def test_build_cursor_argv_always_acp() -> None:
     assert build_cursor_argv() == ("acp",)
+    assert build_cursor_argv(yolo=False) == ("acp",)
+    assert build_cursor_argv(yolo=True) == ("acp", "--yolo")
+
+
+def test_adapter_build_argv_maps_yolo() -> None:
+    adapter = CursorAdapter()
+    assert adapter.build_argv(_config()) == ("acp",)
+    assert adapter.build_argv(_config(yolo=True)) == ("acp", "--yolo")
 
 
 # ---------------------------------------------------------------------------
@@ -673,82 +681,31 @@ async def test_permission_request_and_answer_interaction() -> None:
 
 
 @pytest.mark.asyncio
-async def test_force_permission_request_prefers_session_and_emits_no_interaction() -> None:
-    adapter = CursorAdapter()
-    adapter._force = True  # pyright: ignore[reportPrivateUsage]
-    responded: list[tuple[object, object]] = []
-
-    async def respond(rpc_id: object, result: object) -> None:
-        responded.append((rpc_id, result))
-
-    adapter._connection = SimpleNamespace(respond=respond)  # type: ignore[assignment]
-    await adapter._on_permission_request(  # pyright: ignore[reportPrivateUsage]
-        SimpleNamespace(
-            id="rpc-force",
-            params={
-                "options": [
-                    {"optionId": "once", "kind": "allow_once"},
-                    {"optionId": "always", "kind": "allow_always"},
-                ]
-            },
-        )
-    )
-
-    assert responded == [("rpc-force", {"outcome": {"outcome": "selected", "optionId": "always"}})]
-    assert adapter._event_q.empty()  # pyright: ignore[reportPrivateUsage]
-    assert adapter._pending_interactions == {}  # pyright: ignore[reportPrivateUsage]
-
-
-@pytest.mark.asyncio
-async def test_force_is_applied_to_new_and_resumed_sessions() -> None:
+async def test_yolo_is_applied_to_new_and_resumed_session_argv() -> None:
     start_adapter, _ = await _probed_adapter()
+    assert start_adapter.build_argv(_config(mode="agent", yolo=True)) == ("acp", "--yolo")
     started = await start_adapter.start(
         StartSessionRequest(
             conversation_id=uuid4(),
             binding_id=uuid4(),
-            configuration=_config(mode="agent", force=True),
+            configuration=_config(mode="agent", yolo=True),
             launch=_launch(),
         )
     )
-    assert start_adapter._force is True  # pyright: ignore[reportPrivateUsage]
     await start_adapter.close(started)
 
     resume_adapter, _ = await _probed_adapter()
+    assert resume_adapter.build_argv(_config(mode="agent", yolo=True)) == ("acp", "--yolo")
     resumed = await resume_adapter.resume(
         ResumeSessionRequest(
             conversation_id=uuid4(),
             binding_id=uuid4(),
-            configuration=_config(mode="agent", force=True),
-            native_session_id="force-resume",
+            configuration=_config(mode="agent", yolo=True),
+            native_session_id="yolo-resume",
             launch=_launch(),
         )
     )
-    assert resume_adapter._force is True  # pyright: ignore[reportPrivateUsage]
     await resume_adapter.close(resumed)
-
-
-def test_force_configuration_requires_cursor_agent_mode() -> None:
-    force = HarnessConfiguration(
-        kind=HarnessKind.CURSOR,
-        working_directory="/tmp",
-        mode="agent",
-        force=True,
-    )
-    assert force.force is True
-    with pytest.raises(ValueError):
-        HarnessConfiguration(
-            kind=HarnessKind.CURSOR,
-            working_directory="/tmp",
-            mode="ask",
-            force=True,
-        )
-    with pytest.raises(ValueError):
-        HarnessConfiguration(
-            kind=HarnessKind.GROK,
-            working_directory="/tmp",
-            mode="agent",
-            force=True,
-        )
 
 
 @pytest.mark.asyncio

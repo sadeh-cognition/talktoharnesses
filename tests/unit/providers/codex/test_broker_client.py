@@ -128,6 +128,52 @@ async def test_thread_start_override_forces_user_reviewer(
     assert params.cwd == "/tmp"
 
 
+@pytest.mark.asyncio
+async def test_thread_start_and_resume_yolo_uses_never_without_reviewer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = adapter_mod._build_broker_async_codex(None, yolo=True)  # pyright: ignore[reportPrivateUsage]
+    started: dict[str, object] = {}
+    resumed: dict[str, object] = {}
+
+    async def fake_ensure() -> None:
+        return None
+
+    async def fake_thread_start(params: object) -> SimpleNamespace:
+        started["params"] = params
+        return SimpleNamespace(thread=SimpleNamespace(id="thr-yolo"))
+
+    async def fake_thread_resume(thread_id: str, params: object) -> None:
+        del thread_id
+        resumed["params"] = params
+
+    monkeypatch.setattr(client, "_ensure_initialized", fake_ensure)
+    monkeypatch.setattr(client._client, "thread_start", fake_thread_start)  # pyright: ignore[reportPrivateUsage]
+    monkeypatch.setattr(client._client, "thread_resume", fake_thread_resume)  # pyright: ignore[reportPrivateUsage]
+
+    thread = await client.thread_start(
+        cwd="/tmp",
+        model="m",
+        sandbox=SimpleNamespace(value="workspace-write"),
+    )
+    assert thread.id == "thr-yolo"
+    start_params = cast(SimpleNamespace, started["params"])
+    assert start_params.approval_policy.root.value == "never"
+    assert getattr(start_params, "approvals_reviewer", None) is None
+    assert start_params.sandbox.value == "workspace-write"
+
+    await client.thread_resume(
+        "thr-yolo",
+        cwd="/tmp",
+        model="m",
+        sandbox=SimpleNamespace(value="read-only"),
+    )
+    resume_params = cast(SimpleNamespace, resumed["params"])
+    assert resume_params.approval_policy.root.value == "never"
+    assert getattr(resume_params, "approvals_reviewer", None) is None
+    assert resume_params.sandbox.value == "read-only"
+
+
 def test_codex_settings_import_error(monkeypatch: pytest.MonkeyPatch) -> None:
     import sys
 

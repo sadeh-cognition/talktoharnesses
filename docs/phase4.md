@@ -10,7 +10,8 @@
 - Add only the ACP v1 and Grok extension messages exercised by the pinned compatibility fixtures.
   The ACP package is shared implementation for Phase 7A Cursor, not a general ACP SDK.
 - Run Grok as `grok agent --no-leader stdio`, with the configured model flag before `stdio` when
-  present. Never pass `--always-approve`; permission requests must reach the package.
+  present. Pass `--always-approve` only when `HarnessConfiguration.yolo` is true;
+  otherwise permission requests must reach the package.
 
 ## Verified Protocol Baseline
 

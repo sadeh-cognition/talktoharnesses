@@ -39,7 +39,18 @@ class HarnessConfigurationBody(BaseModel):
         ),
     )
     mode: str | None = None
-    force: bool = False
+    yolo: bool = Field(
+        default=False,
+        description=(
+            "When true, harness approval prompts are suppressed through "
+            "provider-native mechanisms. No approval interaction or audit is "
+            "published, and package allow/deny rules do not participate. "
+            "Structured questions remain interactive. Yolo does not change model, "
+            "workflow mode, workspace roots, sandbox selection, or provider hard "
+            "denials. It is fixed at harness creation and applies to new and "
+            "resumed sessions."
+        ),
+    )
     working_directory: str
     workspace_roots: tuple[str, ...] = ()
 
@@ -49,7 +60,7 @@ class HarnessConfigurationBody(BaseModel):
             executable_path=self.executable_path,
             model=self.model,
             mode=self.mode,
-            force=self.force,
+            yolo=self.yolo,
             working_directory=self.working_directory,
             workspace_roots=self.workspace_roots,
         )

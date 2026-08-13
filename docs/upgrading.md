@@ -3,6 +3,12 @@
 Conservative stop/migrate/start procedure for the first stable release. Mixed-version
 rolling upgrades are not supported. Backward migration compatibility is not promised.
 
+## Stored configuration
+
+Harness configuration is validated strictly. Stored configurations that include
+unknown fields fail validation and must be deleted or recreated before
+upgrading. There is no compatibility migration.
+
 ## Procedure
 
 1. Read the target [`SUPPORTED_HARNESSES.md`](../SUPPORTED_HARNESSES.md) and release notes.

@@ -1293,6 +1293,24 @@ async def test_interaction_event_lookup_harness_probe_and_search_phrase() -> Non
     assert got.harness_id == probe.harness_id
     listed = await persistence.list_harnesses("owner-evt", limit=10)
     assert any(item.id == harness.id for item in listed.items)
+    assert harness.configuration.yolo is False
+
+    yolo_harness = await persistence.create_harness(
+        HarnessInstance(
+            owner_id="owner-evt",
+            name="yolo-me",
+            kind=HarnessKind.OPENCODE,
+            configuration=HarnessConfiguration(
+                kind=HarnessKind.OPENCODE,
+                working_directory="/tmp",
+                yolo=True,
+            ),
+            created_at=now,
+        )
+    )
+    assert yolo_harness.configuration.yolo is True
+    fetched_yolo = await persistence.get_harness(yolo_harness.id, "owner-evt")
+    assert fetched_yolo.configuration.yolo is True
     assert await persistence.has_fresh_harness_probe(now=now, max_age_seconds=3600) is True
     assert (
         await persistence.has_fresh_harness_probe(now=now + timedelta(hours=2), max_age_seconds=1)

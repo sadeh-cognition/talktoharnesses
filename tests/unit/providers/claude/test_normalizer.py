@@ -153,3 +153,16 @@ def test_permission_request_mapping() -> None:
     assert ApprovalDecision.ALLOW_ONCE in events[0].request.available_decisions  # type: ignore[attr-defined]
     assert n.fail_active_turn(error_code="x", message="y")
     assert n.fail_active_turn(error_code="x", message="y") == []
+
+
+def test_structured_question_mapping() -> None:
+    from talktoharnesses.domain.enums import InteractionKind
+
+    n = ClaudeNormalizer()
+    with pytest.raises(DomainError):
+        n.on_question_request(questions=[], interaction_id=uuid4())
+    n.begin_turn(uuid4())
+    questions = [{"question": "Pick", "options": [{"label": "A"}]}]
+    event = n.on_question_request(questions=questions, interaction_id=uuid4())[0]
+    assert event.kind is InteractionKind.STRUCTURED_QUESTION  # type: ignore[attr-defined]
+    assert event.request.questions == tuple(questions)  # type: ignore[attr-defined]

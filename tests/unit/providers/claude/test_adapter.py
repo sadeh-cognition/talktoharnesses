@@ -13,7 +13,12 @@ import pytest
 from talktoharnesses.domain.enums import HarnessKind
 from talktoharnesses.domain.events import ToolCompletedPayload, TurnFailedPayload
 from talktoharnesses.domain.models import HarnessCapabilities, HarnessConfiguration, LaunchSnapshot
-from talktoharnesses.providers.adapter import StartSessionRequest, SteerRequest, TurnRequest
+from talktoharnesses.providers.adapter import (
+    ResumeSessionRequest,
+    StartSessionRequest,
+    SteerRequest,
+    TurnRequest,
+)
 from talktoharnesses.providers.claude.adapter import ClaudeAdapter
 from talktoharnesses.providers.claude.normalizer import ClaudeNormalizer
 
@@ -282,6 +287,7 @@ async def test_can_use_tool_and_answer_interaction() -> None:
 @pytest.mark.asyncio
 async def test_close_cancels_pending_and_disconnect_branches() -> None:
     from talktoharnesses.domain.enums import ApprovalDecision
+    from talktoharnesses.domain.models import InteractionAnswer
     from talktoharnesses.providers.adapter import HarnessSession
 
     adapter = ClaudeAdapter()
@@ -293,8 +299,9 @@ async def test_close_cancels_pending_and_disconnect_branches() -> None:
     )
     adapter._session = session  # pyright: ignore[reportPrivateUsage]
     adapter._closed = False  # pyright: ignore[reportPrivateUsage]
-    future: asyncio.Future[ApprovalDecision | None] = asyncio.get_running_loop().create_future()
-    adapter._pending_interactions[uuid4()] = future  # pyright: ignore[reportPrivateUsage]
+    interaction_id = uuid4()
+    future: asyncio.Future[InteractionAnswer] = asyncio.get_running_loop().create_future()
+    adapter._pending_interactions[interaction_id] = future  # pyright: ignore[reportPrivateUsage]
 
     async def disconnect() -> None:
         return None
@@ -302,7 +309,8 @@ async def test_close_cancels_pending_and_disconnect_branches() -> None:
     adapter._client = SimpleNamespace(disconnect=disconnect)  # type: ignore[assignment]
     await adapter.close(session)
     assert future.done()
-    assert future.result() is ApprovalDecision.CANCEL
+    assert future.result().decision is ApprovalDecision.CANCEL
+    assert future.result().interaction_id == interaction_id
     await adapter.close(session)
 
     # __aexit__ close path
@@ -402,3 +410,161 @@ def test_coerce_message_branches() -> None:
     with pytest.raises(DomainError) as exc:
         adapter._coerce_message(Unknown())  # pyright: ignore[reportPrivateUsage]
     assert exc.value.code is ErrorCode.UNSUPPORTED_NATIVE_EVENT
+
+
+async def _claude_release_probe(config: HarnessConfiguration):
+    del config
+    from talktoharnesses.providers.claude.compatibility import match_release
+
+    release = match_release(
+        sdk_version="0.1.53",
+        cli_version="2.1.88",
+        cli_source="bundled",
+        platform="linux",
+    )
+    return release.to_harness_capabilities(), release
+
+
+@pytest.mark.asyncio
+async def test_yolo_keeps_structured_question_callback_on_create_and_resume(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "talktoharnesses.providers.claude.adapter.probe_claude",
+        _claude_release_probe,
+    )
+    clients: list[FakeClaudeClient] = []
+
+    def factory(options: object) -> FakeClaudeClient:
+        client = FakeClaudeClient(options=options)
+        clients.append(client)
+        return client
+
+    yolo = HarnessConfiguration(kind=HarnessKind.CLAUDE, working_directory="/tmp", yolo=True)
+    adapter = ClaudeAdapter(client_factory=factory)
+    await adapter.probe(yolo)
+    session = await adapter.start(
+        StartSessionRequest(
+            conversation_id=uuid4(),
+            binding_id=uuid4(),
+            configuration=yolo,
+            launch=_launch(),
+        )
+    )
+    assert _option_get(clients[0].options, "permission_mode") == "bypassPermissions"
+    assert _option_get(clients[0].options, "can_use_tool") is not None
+    assert _option_get(clients[0].options, "hooks") is None
+    await adapter.close(session)
+
+    resume_adapter = ClaudeAdapter(client_factory=factory)
+    await resume_adapter.probe(yolo)
+    resumed = await resume_adapter.resume(
+        ResumeSessionRequest(
+            conversation_id=uuid4(),
+            binding_id=uuid4(),
+            configuration=yolo,
+            native_session_id="claude-resume",
+            launch=_launch(),
+        )
+    )
+    assert _option_get(clients[1].options, "permission_mode") == "bypassPermissions"
+    assert _option_get(clients[1].options, "can_use_tool") is not None
+    await resume_adapter.close(resumed)
+
+
+@pytest.mark.asyncio
+async def test_yolo_routes_ask_user_question_and_auto_allows_other_tools() -> None:
+    from talktoharnesses.domain.enums import InteractionKind
+    from talktoharnesses.domain.models import InteractionAnswer
+    from talktoharnesses.providers.adapter import HarnessInteractionRequest, HarnessSession
+
+    adapter = ClaudeAdapter()
+    session = HarnessSession(
+        conversation_id=uuid4(),
+        binding_id=uuid4(),
+        kind=HarnessKind.CLAUDE,
+        native_session_id="claude-1",
+    )
+    adapter._session = session  # pyright: ignore[reportPrivateUsage]
+    adapter._normalizer.set_session("claude-1")  # pyright: ignore[reportPrivateUsage]
+    adapter._normalizer.begin_turn(uuid4())  # pyright: ignore[reportPrivateUsage]
+
+    allowed = await adapter._can_use_tool_yolo(  # pyright: ignore[reportPrivateUsage]
+        "Bash",
+        {"command": "ls"},
+        SimpleNamespace(tool_use_id="tool-1"),
+    )
+    allowed_input = (
+        allowed.get("updatedInput")
+        if isinstance(allowed, dict)
+        else getattr(allowed, "updated_input", None)
+    )
+    assert allowed_input == {"command": "ls"}
+
+    tool_input = {
+        "questions": [
+            {
+                "question": "Pick a color",
+                "header": "Color",
+                "options": [{"label": "Blue", "description": "Use blue"}],
+                "multiSelect": False,
+            }
+        ]
+    }
+    task = asyncio.create_task(
+        adapter._can_use_tool_yolo(  # pyright: ignore[reportPrivateUsage]
+            "AskUserQuestion",
+            tool_input,
+            SimpleNamespace(tool_use_id="tool-2"),
+        )
+    )
+    event = await asyncio.wait_for(adapter._event_q.get(), timeout=1.0)  # pyright: ignore[reportPrivateUsage]
+    assert isinstance(event, HarnessInteractionRequest)
+    assert event.payload.kind is InteractionKind.STRUCTURED_QUESTION
+    await adapter.answer_interaction(
+        session,
+        InteractionAnswer(
+            interaction_id=event.payload.interaction_id,
+            answers={"Pick a color": "Blue"},
+        ),
+    )
+    result = await asyncio.wait_for(task, timeout=1.0)
+    updated_input = (
+        result.get("updatedInput")
+        if isinstance(result, dict)
+        else getattr(result, "updated_input", None)
+    )
+    assert updated_input == {
+        **tool_input,
+        "answers": {"Pick a color": "Blue"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_default_keeps_broker_permission_callback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "talktoharnesses.providers.claude.adapter.probe_claude",
+        _claude_release_probe,
+    )
+    clients: list[FakeClaudeClient] = []
+
+    def factory(options: object) -> FakeClaudeClient:
+        client = FakeClaudeClient(options=options)
+        clients.append(client)
+        return client
+
+    adapter = ClaudeAdapter(client_factory=factory)
+    await adapter.probe(_config())
+    session = await adapter.start(
+        StartSessionRequest(
+            conversation_id=uuid4(),
+            binding_id=uuid4(),
+            configuration=_config(),
+            launch=_launch(),
+        )
+    )
+    assert _option_get(clients[0].options, "permission_mode") == "default"
+    assert _option_get(clients[0].options, "can_use_tool") is not None
+    await adapter.close(session)

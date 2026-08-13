@@ -507,6 +507,17 @@ async def test_harness_methods(handler: RecordingHandler) -> None:
                 "name": "local",
                 "configuration": config.model_dump(mode="json", exclude_none=True),
             }
+            assert body["configuration"]["yolo"] is False
+
+            yolo_config = HarnessConfiguration(
+                kind=HarnessKind.GROK,
+                working_directory="/tmp/ws",
+                yolo=True,
+            )
+            handler.respond(201, _harness())
+            await client.create_harness(name="yolo", configuration=yolo_config)
+            yolo_body = json.loads(handler.requests[-1].content)
+            assert yolo_body["configuration"]["yolo"] is True
             assert handler.requests[-1].method == "POST"
 
             handler.respond(200, _harness())

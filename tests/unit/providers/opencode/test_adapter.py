@@ -15,6 +15,7 @@ from talktoharnesses.domain.enums import HarnessKind
 from talktoharnesses.domain.models import HarnessCapabilities, HarnessConfiguration, LaunchSnapshot
 from talktoharnesses.providers.adapter import (
     HarnessInteractionRequest,
+    ResumeSessionRequest,
     StartSessionRequest,
     TurnRequest,
 )
@@ -52,17 +53,20 @@ class FakeHttpClient:
         self.closed = False
         self._session_id = "sess-1"
 
+    def _session_body(self) -> dict[str, Any]:
+        return {"id": self._session_id, "directory": "/tmp"}
+
     async def get(self, path: str) -> FakeResponse:
         if path == "/global/health":
             return FakeResponse(200, {"healthy": True, "version": "1.2.27"})
         if path.startswith("/session/"):
-            return FakeResponse(200, {"id": self._session_id, "directory": "/tmp"})
+            return FakeResponse(200, self._session_body())
         return FakeResponse(404, {})
 
     async def post(self, path: str, json: dict[str, Any] | None = None) -> FakeResponse:
         self.posts.append((path, json))
         if path == "/session":
-            return FakeResponse(200, {"id": self._session_id, "directory": "/tmp"})
+            return FakeResponse(200, self._session_body())
         if path.endswith("/prompt_async"):
             return FakeResponse(204)
         if path.endswith("/abort"):
@@ -553,4 +557,136 @@ async def test_question_asked_and_submit_model_ref(monkeypatch: pytest.MonkeyPat
     with pytest.raises(DomainError) as missing_id:
         await adapter._handle_question({})  # pyright: ignore[reportPrivateUsage]
     assert missing_id.value.code is ErrorCode.PROTOCOL_ERROR
+    await adapter.close(session)
+
+
+async def _probe_opencode(config: HarnessConfiguration):
+    del config
+    from talktoharnesses.providers.opencode.compatibility import match_release
+
+    release = match_release("1.2.27", platform="linux")
+    return release.to_harness_capabilities(), release
+
+
+@pytest.mark.asyncio
+async def test_yolo_preserves_plan_mode_permissions_on_create_and_resume(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "talktoharnesses.providers.opencode.adapter.probe_opencode",
+        _probe_opencode,
+    )
+    client = FakeHttpClient("http://127.0.0.1")
+    adapter = OpenCodeAdapter(http_client_factory=lambda base_url: client)
+    adapter.prepare_port(19508)
+    yolo = HarnessConfiguration(
+        kind=HarnessKind.OPENCODE,
+        executable_path="/bin/true",
+        working_directory="/tmp",
+        mode="plan",
+        yolo=True,
+    )
+    await adapter.probe(yolo)
+    session = await adapter.start(
+        StartSessionRequest(
+            conversation_id=uuid4(),
+            binding_id=uuid4(),
+            configuration=yolo,
+            launch=_launch(),
+        )
+    )
+    create = next(body for path, body in client.posts if path == "/session")
+    assert create == {"directory": "/tmp"}
+    await adapter.submit(session, TurnRequest(turn_id=uuid4(), prompt="plan this"))
+    prompt = next(body for path, body in client.posts if path.endswith("/prompt_async"))
+    assert prompt is not None
+    assert prompt["agent"] == "plan"
+    await adapter.close(session)
+
+    resume_client = FakeHttpClient("http://127.0.0.1")
+    resume_adapter = OpenCodeAdapter(http_client_factory=lambda base_url: resume_client)
+    resume_adapter.prepare_port(19509)
+    await resume_adapter.probe(yolo)
+    resumed = await resume_adapter.resume(
+        ResumeSessionRequest(
+            conversation_id=uuid4(),
+            binding_id=uuid4(),
+            configuration=yolo,
+            native_session_id="sess-1",
+            launch=_launch(),
+        )
+    )
+    await resume_adapter.close(resumed)
+
+
+@pytest.mark.asyncio
+async def test_yolo_keeps_questions_interactive_and_answers_child_session_approvals(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from talktoharnesses.domain.models import InteractionAnswer
+
+    monkeypatch.setattr(
+        "talktoharnesses.providers.opencode.adapter.probe_opencode",
+        _probe_opencode,
+    )
+    client = FakeHttpClient("http://127.0.0.1")
+    adapter = OpenCodeAdapter(http_client_factory=lambda base_url: client)
+    adapter.prepare_port(19511)
+    yolo = HarnessConfiguration(
+        kind=HarnessKind.OPENCODE,
+        executable_path="/bin/true",
+        working_directory="/tmp",
+        yolo=True,
+    )
+    await adapter.probe(yolo)
+    session = await adapter.start(
+        StartSessionRequest(
+            conversation_id=uuid4(),
+            binding_id=uuid4(),
+            configuration=yolo,
+            launch=_launch(),
+        )
+    )
+    await adapter.submit(session, TurnRequest(turn_id=uuid4(), prompt="hi"))
+    await adapter._dispatch_sse(  # pyright: ignore[reportPrivateUsage]
+        None,
+        json.dumps(
+            {
+                "type": "permission.asked",
+                "properties": {
+                    "sessionID": "child-session",
+                    "permissionID": "perm-yolo",
+                    "tool": "shell",
+                },
+            }
+        ),
+    )
+    assert adapter._event_q.empty()  # pyright: ignore[reportPrivateUsage]
+    assert (
+        "/permission/perm-yolo/reply",
+        {"reply": "once"},
+    ) in client.posts
+    await adapter._dispatch_sse(  # pyright: ignore[reportPrivateUsage]
+        None,
+        json.dumps(
+            {
+                "type": "question.asked",
+                "properties": {
+                    "sessionID": "sess-1",
+                    "id": "q-yolo",
+                    "questions": [{"header": "Pick", "options": [{"label": "A", "value": "a"}]}],
+                },
+            }
+        ),
+    )
+    item = adapter._event_q.get_nowait()  # pyright: ignore[reportPrivateUsage]
+    assert isinstance(item, HarnessInteractionRequest)
+    await adapter.answer_interaction(
+        session,
+        InteractionAnswer(
+            interaction_id=item.payload.interaction_id,
+            answers={"answers": [["a"]]},
+        ),
+    )
+    assert any(path.endswith("/question/q-yolo/reply") for path, _ in client.posts)
     await adapter.close(session)

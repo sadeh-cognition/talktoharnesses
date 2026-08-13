@@ -89,7 +89,7 @@ class GrokAdapter:
         return self._normalizer.export_seen()
 
     def build_argv(self, config: HarnessConfiguration) -> tuple[str, ...]:
-        return build_grok_argv(model=config.model)
+        return build_grok_argv(model=config.model, yolo=config.yolo)
 
     async def probe(self, config: HarnessConfiguration) -> HarnessCapabilities:
         caps, release = await probe_grok(config)
