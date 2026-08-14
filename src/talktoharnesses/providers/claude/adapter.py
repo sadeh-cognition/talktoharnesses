@@ -37,6 +37,11 @@ from talktoharnesses.runtime.paths import resolve_executable
 logger = logging.getLogger(__name__)
 
 ClientFactory = Callable[[Any], Any]
+_ClaudeEffort = Literal["low", "medium", "high", "max"]
+
+
+def _claude_effort(value: str | None) -> _ClaudeEffort | None:
+    return cast(_ClaudeEffort | None, value)
 
 
 class ClaudeAdapter:
@@ -101,6 +106,7 @@ class ClaudeAdapter:
             native_session_id=session_id,
             model=request.configuration.model,
             mode=request.configuration.mode,
+            effort=request.configuration.effort,
         )
         self._session = session
         return session
@@ -129,6 +135,7 @@ class ClaudeAdapter:
             native_session_id=session_id,
             model=request.configuration.model,
             mode=request.configuration.mode,
+            effort=request.configuration.effort,
         )
         self._session = session
         return session
@@ -296,6 +303,7 @@ class ClaudeAdapter:
             options: dict[str, Any] = {
                 "cwd": cwd,
                 "model": config.model,
+                "effort": config.effort,
                 "resume": resume,
                 "session_id": session_id,
                 "permission_mode": "bypassPermissions" if config.yolo else "default",
@@ -313,6 +321,7 @@ class ClaudeAdapter:
             return ClaudeAgentOptions(
                 cwd=cwd,
                 model=config.model,
+                effort=_claude_effort(config.effort),
                 resume=resume,
                 session_id=session_id,
                 permission_mode="bypassPermissions",
@@ -339,6 +348,7 @@ class ClaudeAdapter:
         return ClaudeAgentOptions(
             cwd=cwd,
             model=config.model,
+            effort=_claude_effort(config.effort),
             resume=resume,
             session_id=session_id,
             permission_mode="default",

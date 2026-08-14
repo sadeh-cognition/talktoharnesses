@@ -1,5 +1,5 @@
 {
-  "adapter_version": "2026.8.3",
+  "adapter_version": "2026.8.4",
   "releases": [
     {
       "id": "grok-1.0.0-3cd0d0cbce",
@@ -34,6 +34,11 @@
         "_x.ai/models/update",
         "_x.ai/mcp_initialized"
       ],
+      "effort_levels": [
+        "low",
+        "medium",
+        "high"
+      ],
       "notes": "Live create/resume/interaction proven on linux. Interrupt and multi-interaction are published for the same linux gate."
     },
     {
@@ -67,6 +72,11 @@
         "_x.ai/models/update",
         "_x.ai/mcp_initialized"
       ],
+      "effort_levels": [
+        "low",
+        "medium",
+        "high"
+      ],
       "notes": "Live create/resume/interaction proven on linux. Interrupt and multi-interaction are published for the same linux gate."
     },
     {
@@ -99,6 +109,11 @@
         "_x.ai/announcements/update",
         "_x.ai/models/update",
         "_x.ai/mcp_initialized"
+      ],
+      "effort_levels": [
+        "low",
+        "medium",
+        "high"
       ],
       "notes": "Live create/resume/interaction proven on linux. Interrupt and multi-interaction are published for the same linux gate."
     }

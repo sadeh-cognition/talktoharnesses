@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from talktoharnesses.domain.enums import ErrorCode, HarnessKind
 from talktoharnesses.domain.errors import DomainError
-from talktoharnesses.domain.models import HarnessCapabilities
+from talktoharnesses.domain.models import HarnessCapabilities, HarnessEffortInfo
 from talktoharnesses.providers.compatibility import (
     CAPABILITY_TABLE_DIVIDER,
     CAPABILITY_TABLE_HEADER,
@@ -45,6 +45,7 @@ class GrokReleaseRecord(BaseModel):
     capabilities: ReleaseCapabilities = Field(default_factory=ReleaseCapabilities)
     required_agent_methods: list[str] = Field(default_factory=list)
     allowlisted_extensions: list[str] = Field(default_factory=list)
+    effort_levels: list[str] = Field(default_factory=list)
     notes: str | None = None
 
     def to_harness_capabilities(self) -> HarnessCapabilities:
@@ -56,6 +57,10 @@ class GrokReleaseRecord(BaseModel):
             supports_interrupt=self.capabilities.supports_interrupt,
             supports_multi_interaction=self.capabilities.supports_multi_interaction,
             supports_nested_activity=self.capabilities.supports_nested_activity,
+            efforts=tuple(
+                HarnessEffortInfo(id=level, label=level.title())
+                for level in self.effort_levels
+            ),
         )
 
 

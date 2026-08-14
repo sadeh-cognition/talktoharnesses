@@ -47,6 +47,7 @@ def _config(
     *,
     model: str | None = "composer-2.5[fast=false]",
     mode: str | None = "ask",
+    effort: str | None = None,
     yolo: bool = False,
 ) -> HarnessConfiguration:
     return HarnessConfiguration(
@@ -55,6 +56,7 @@ def _config(
         working_directory="/tmp",
         model=model,
         mode=mode,
+        effort=effort,
         yolo=yolo,
     )
 
@@ -259,6 +261,43 @@ async def test_start_applies_model_parameters_then_mode() -> None:
         (("fast", "true"),),
     )
     await adapter.close(session)
+
+
+@pytest.mark.asyncio
+async def test_start_applies_effort_to_thought_level_option() -> None:
+    adapter, proc = await _probed_adapter()
+    session = await adapter.start(
+        StartSessionRequest(
+            conversation_id=uuid4(),
+            binding_id=uuid4(),
+            configuration=_config(model="gpt-5.6-sol", effort="high"),
+            launch=_launch(),
+        )
+    )
+    assert _setter_pairs(proc) == [
+        ("model", "gpt-5.6-sol"),
+        ("reasoning", "high"),
+        ("mode", "ask"),
+    ]
+    assert session.effort == "high"
+    await adapter.close(session)
+
+
+@pytest.mark.asyncio
+async def test_effort_rejects_duplicate_thought_level_model_parameter() -> None:
+    adapter, _proc = await _probed_adapter()
+    with pytest.raises(DomainError, match="conflicts"):
+        await adapter.start(
+            StartSessionRequest(
+                conversation_id=uuid4(),
+                binding_id=uuid4(),
+                configuration=_config(
+                    model="gpt-5.6-sol[reasoning=low]",
+                    effort="high",
+                ),
+                launch=_launch(),
+            )
+        )
 
 
 @pytest.mark.asyncio

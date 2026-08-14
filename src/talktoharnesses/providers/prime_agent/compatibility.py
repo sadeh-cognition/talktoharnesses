@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from talktoharnesses.domain.enums import ErrorCode, HarnessKind
 from talktoharnesses.domain.errors import DomainError
-from talktoharnesses.domain.models import HarnessCapabilities, HarnessModeInfo
+from talktoharnesses.domain.models import HarnessCapabilities, HarnessEffortInfo
 from talktoharnesses.providers.compatibility import (
     CAPABILITY_TABLE_DIVIDER,
     CAPABILITY_TABLE_HEADER,
@@ -46,8 +46,8 @@ class PrimeAgentReleaseRecord(BaseModel):
             supports_interrupt=self.capabilities.supports_interrupt,
             supports_multi_interaction=self.capabilities.supports_multi_interaction,
             supports_nested_activity=self.capabilities.supports_nested_activity,
-            modes=tuple(
-                HarnessModeInfo(id=level, label=level.title()) for level in THINKING_LEVELS
+            efforts=tuple(
+                HarnessEffortInfo(id=level, label=level.title()) for level in THINKING_LEVELS
             ),
         )
 

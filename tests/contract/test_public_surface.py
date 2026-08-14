@@ -111,6 +111,7 @@ APPROVED: dict[str, frozenset[str]] = {
             "FileOperation",
             "HarnessCapabilities",
             "HarnessConfiguration",
+            "HarnessEffortInfo",
             "HarnessEvent",
             "HarnessInstance",
             "HarnessInstanceRuleScope",

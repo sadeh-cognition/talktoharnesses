@@ -68,7 +68,13 @@ class PrimeAgentAdapter:
         self._normalizer.set_redaction_patterns(patterns)
 
     def build_argv(self, config: HarnessConfiguration) -> tuple[str, ...]:
-        return build_prime_agent_argv(model=config.model, thinking=config.mode)
+        if config.mode is not None:
+            raise DomainError(
+                ErrorCode.PROVIDER_INCOMPATIBLE,
+                "Prime Agent mode no longer represents thinking; recreate the harness with effort",
+                details={"mode": config.mode},
+            )
+        return build_prime_agent_argv(model=config.model, effort=config.effort)
 
     async def probe(self, config: HarnessConfiguration) -> HarnessCapabilities:
         capabilities, release = await probe_prime_agent(config)
@@ -94,6 +100,7 @@ class PrimeAgentAdapter:
             native_session_id=native_session_id,
             model=request.configuration.model,
             mode=request.configuration.mode,
+            effort=request.configuration.effort,
             metadata={"session_id": str(state.get("sessionId") or "")},
         )
         self._session = session
@@ -118,6 +125,7 @@ class PrimeAgentAdapter:
             native_session_id=native_session_id,
             model=request.configuration.model,
             mode=request.configuration.mode,
+            effort=request.configuration.effort,
             metadata={"session_id": str(state.get("sessionId") or "")},
         )
         self._session = session

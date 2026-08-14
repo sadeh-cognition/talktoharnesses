@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 
-def build_grok_argv(*, model: str | None = None, yolo: bool = False) -> tuple[str, ...]:
+def build_grok_argv(
+    *, model: str | None = None, effort: str | None = None, yolo: bool = False
+) -> tuple[str, ...]:
     """Build argv after the resolved executable.
 
     Default layout: ``--permission-mode default agent --no-leader [--model <id>] stdio``.
@@ -18,5 +20,7 @@ def build_grok_argv(*, model: str | None = None, yolo: bool = False) -> tuple[st
     )
     if model:
         args.extend(["--model", model])
+    if effort:
+        args.extend(["--reasoning-effort", effort])
     args.append("stdio")
     return tuple(args)

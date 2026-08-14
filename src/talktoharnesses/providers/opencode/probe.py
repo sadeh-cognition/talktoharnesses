@@ -3,16 +3,20 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
+from typing import cast
 
 from talktoharnesses.domain.enums import ErrorCode
 from talktoharnesses.domain.errors import DomainError
 from talktoharnesses.domain.models import (
     HarnessCapabilities,
     HarnessConfiguration,
+    HarnessEffortInfo,
     HarnessModelInfo,
 )
 from talktoharnesses.providers._model_discovery import run_model_command
+from talktoharnesses.providers.effort import validate_effort
 from talktoharnesses.providers.opencode.compatibility import (
     OpenCodeReleaseRecord,
     match_release,
@@ -54,26 +58,77 @@ async def probe_opencode(
     output = await run_model_command(
         executable,
         "models",
+        "--verbose",
         provider="OpenCode",
         working_directory=config.working_directory,
     )
     models = _parse_models(output)
     capabilities = release.to_harness_capabilities().model_copy(update={"models": models})
+    validate_effort(config, capabilities)
     return capabilities, release
 
 
 def _parse_models(output: str) -> tuple[HarnessModelInfo, ...]:
+    decoder = json.JSONDecoder()
     models: list[HarnessModelInfo] = []
-    for raw_line in output.splitlines():
-        model_id = raw_line.strip()
-        if not model_id:
-            continue
+    index = 0
+    while index < len(output):
+        while index < len(output) and output[index].isspace():
+            index += 1
+        if index >= len(output):
+            break
+        line_end = output.find("\n", index)
+        if line_end < 0:
+            raise DomainError(
+                ErrorCode.PROVIDER_INCOMPATIBLE,
+                "malformed OpenCode verbose model list",
+            )
+        model_id = output[index:line_end].strip()
         if any(char.isspace() for char in model_id) or "/" not in model_id:
             raise DomainError(
                 ErrorCode.PROVIDER_INCOMPATIBLE,
-                "malformed OpenCode model list",
+                "malformed OpenCode verbose model list",
             )
-        models.append(HarnessModelInfo(id=model_id))
+        index = line_end + 1
+        while index < len(output) and output[index].isspace():
+            index += 1
+        try:
+            metadata, index = decoder.raw_decode(output, index)
+        except (json.JSONDecodeError, TypeError) as exc:
+            raise DomainError(
+                ErrorCode.PROVIDER_INCOMPATIBLE,
+                "malformed OpenCode verbose model metadata",
+            ) from exc
+        if not isinstance(metadata, dict):
+            raise DomainError(
+                ErrorCode.PROVIDER_INCOMPATIBLE,
+                "malformed OpenCode verbose model metadata",
+            )
+        values = cast(dict[object, object], metadata)
+        variants = values.get("variants")
+        if variants is None:
+            variants = {}
+        if not isinstance(variants, dict):
+            raise DomainError(
+                ErrorCode.PROVIDER_INCOMPATIBLE,
+                "malformed OpenCode model variants",
+            )
+        efforts: list[HarnessEffortInfo] = []
+        for value in cast(dict[object, object], variants):
+            if not isinstance(value, str) or not value:
+                raise DomainError(
+                    ErrorCode.PROVIDER_INCOMPATIBLE,
+                    "malformed OpenCode model variant",
+                )
+            efforts.append(HarnessEffortInfo(id=value, label=value.title()))
+        label = values.get("name")
+        models.append(
+            HarnessModelInfo(
+                id=model_id,
+                label=label if isinstance(label, str) and label else None,
+                efforts=tuple(efforts),
+            )
+        )
     if not models:
         raise DomainError(
             ErrorCode.PROVIDER_INCOMPATIBLE,

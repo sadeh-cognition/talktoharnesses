@@ -32,11 +32,20 @@ from talktoharnesses.domain.enums import (
 # ---------------------------------------------------------------------------
 
 
+class HarnessEffortInfo(BaseModel):
+    model_config = FROZEN
+
+    id: str
+    label: str | None = None
+
+
 class HarnessModelInfo(BaseModel):
     model_config = FROZEN
 
     id: str
     label: str | None = None
+    # None inherits provider-wide efforts; an empty tuple means unsupported.
+    efforts: tuple[HarnessEffortInfo, ...] | None = None
 
 
 class HarnessModeInfo(BaseModel):
@@ -53,6 +62,7 @@ class HarnessConfiguration(BaseModel):
     executable_path: str | None = None
     model: str | None = None
     mode: str | None = None
+    effort: str | None = None
     yolo: bool = False
     working_directory: str
     workspace_roots: tuple[str, ...] = ()
@@ -70,6 +80,7 @@ class HarnessCapabilities(BaseModel):
     supports_nested_activity: bool = False
     models: tuple[HarnessModelInfo, ...] = ()
     modes: tuple[HarnessModeInfo, ...] = ()
+    efforts: tuple[HarnessEffortInfo, ...] = ()
 
 
 class HarnessInstance(BaseModel):
@@ -92,6 +103,7 @@ class LaunchSnapshot(BaseModel):
     workspace_roots: tuple[str, ...] = ()
     model: str | None = None
     mode: str | None = None
+    effort: str | None = None
     adapter_version: str
     capabilities: HarnessCapabilities
 
@@ -843,6 +855,7 @@ class ConversationDetail(BaseModel):
     harness_kind: HarnessKind | None = None
     model: str | None = None
     mode: str | None = None
+    effort: str | None = None
     turns: tuple[TurnProjection, ...] = ()
     messages: tuple[MessageProjection, ...] = ()
     tools: tuple[ToolProjection, ...] = ()

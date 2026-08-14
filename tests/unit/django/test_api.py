@@ -291,7 +291,9 @@ def test_harness_models_returns_persisted_probe_models(
     )
 
     assert response.status_code == 200
-    assert response.json() == [{"id": "gpt-5.6-sol", "label": "GPT-5.6-Sol"}]
+    assert response.json() == [
+        {"id": "gpt-5.6-sol", "label": "GPT-5.6-Sol", "efforts": None}
+    ]
 
 
 @pytest.mark.django_db(transaction=True)

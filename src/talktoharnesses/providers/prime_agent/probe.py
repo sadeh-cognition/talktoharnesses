@@ -13,6 +13,7 @@ from talktoharnesses.domain.models import (
     HarnessModelInfo,
 )
 from talktoharnesses.providers._model_discovery import run_model_command
+from talktoharnesses.providers.effort import validate_effort
 from talktoharnesses.providers.prime_agent.compatibility import (
     PrimeAgentReleaseRecord,
     match_release,
@@ -23,6 +24,12 @@ from talktoharnesses.runtime.paths import resolve_executable
 async def probe_prime_agent(
     config: HarnessConfiguration,
 ) -> tuple[HarnessCapabilities, PrimeAgentReleaseRecord]:
+    if config.mode is not None:
+        raise DomainError(
+            ErrorCode.PROVIDER_INCOMPATIBLE,
+            "Prime Agent mode no longer represents thinking; recreate the harness with effort",
+            details={"mode": config.mode},
+        )
     if not config.executable_path:
         raise DomainError(ErrorCode.INVALID_EXECUTABLE, "configuration has no executable_path")
     executable = resolve_executable(config.executable_path)
@@ -60,6 +67,7 @@ async def probe_prime_agent(
     )
     models = _parse_models(output)
     capabilities = release.to_harness_capabilities().model_copy(update={"models": models})
+    validate_effort(config, capabilities)
     return capabilities, release
 
 

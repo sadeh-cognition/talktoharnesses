@@ -153,6 +153,7 @@ class OpenCodeAdapter:
             native_session_id=session_body.id,
             model=request.configuration.model,
             mode=request.configuration.mode,
+            effort=request.configuration.effort,
         )
         self._session = session
         return session
@@ -187,6 +188,7 @@ class OpenCodeAdapter:
             native_session_id=session_body.id,
             model=request.configuration.model,
             mode=request.configuration.mode,
+            effort=request.configuration.effort,
         )
         self._session = session
         return session
@@ -207,6 +209,8 @@ class OpenCodeAdapter:
             payload["model"] = _opencode_model_ref(model)
         if session.mode:
             payload["agent"] = session.mode
+        if session.effort:
+            payload["variant"] = session.effort
         response = await self._client.post(
             f"/session/{session.native_session_id}/prompt_async",
             json=payload,

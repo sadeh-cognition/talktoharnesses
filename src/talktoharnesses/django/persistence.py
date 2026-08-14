@@ -3397,6 +3397,7 @@ class DjangoPersistence:
             harness_kind=state.binding.kind if state.binding else None,
             model=state.binding.configuration.model if state.binding else None,
             mode=state.binding.configuration.mode if state.binding else None,
+            effort=state.binding.configuration.effort if state.binding else None,
             turns=turn_projections,
             messages=messages,
             tools=tools,

@@ -34,13 +34,38 @@ def _sdk_with_response(data: list[object]) -> SimpleNamespace:
     return SimpleNamespace(__version__="0.144.4", AsyncCodex=_Client, CodexConfig=_Config)
 
 
+def _model(
+    model: str,
+    *,
+    display_name: str | None = None,
+    efforts: tuple[str, ...] = (),
+    is_default: bool = False,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        model=model,
+        display_name=display_name,
+        supported_reasoning_efforts=[
+            SimpleNamespace(reasoning_effort=SimpleNamespace(value=effort))
+            for effort in efforts
+        ],
+        is_default=is_default,
+    )
+
+
 @pytest.mark.asyncio
 async def test_probe_matches_pinned_release(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         probe_mod,
         "_import_openai_codex",
         lambda: _sdk_with_response(
-            [SimpleNamespace(model="gpt-5.6-sol", display_name="GPT-5.6-Sol")]
+            [
+                _model(
+                    "gpt-5.6-sol",
+                    display_name="GPT-5.6-Sol",
+                    efforts=("low", "medium", "high"),
+                    is_default=True,
+                )
+            ]
         ),
     )
     monkeypatch.setattr(probe_mod, "_runtime_version", lambda: "0.144.4")
@@ -50,6 +75,12 @@ async def test_probe_matches_pinned_release(monkeypatch: pytest.MonkeyPatch) -> 
     assert release.id == "codex-openai-codex-0.144.4"
     assert caps.supports_resume is True
     assert [(model.id, model.label) for model in caps.models] == [("gpt-5.6-sol", "GPT-5.6-Sol")]
+    assert [effort.id for effort in caps.efforts] == ["low", "medium", "high"]
+    assert [effort.id for effort in caps.models[0].efforts or ()] == [
+        "low",
+        "medium",
+        "high",
+    ]
 
 
 @pytest.mark.asyncio

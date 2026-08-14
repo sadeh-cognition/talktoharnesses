@@ -44,6 +44,7 @@ class ProcessSupervisor:
         model: str | None,
         mode: str | None,
         adapter_version: str,
+        effort: str | None = None,
     ) -> LaunchSnapshot:
         """Resolve paths (no creation) and build an immutable launch snapshot."""
         executable, workdir, roots = resolve_launch_paths(
@@ -58,6 +59,7 @@ class ProcessSupervisor:
             workspace_roots=tuple(str(r) for r in roots),
             model=model,
             mode=mode,
+            effort=effort,
             adapter_version=adapter_version,
             capabilities=capabilities,
         )

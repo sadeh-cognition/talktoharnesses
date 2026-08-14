@@ -1260,6 +1260,7 @@ def start_session(
                 harness_kind=binding.kind,
                 model=launch.model,
                 mode=launch.mode,
+                effort=launch.effort,
             )
         ],
     )

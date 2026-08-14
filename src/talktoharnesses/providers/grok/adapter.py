@@ -89,7 +89,7 @@ class GrokAdapter:
         return self._normalizer.export_seen()
 
     def build_argv(self, config: HarnessConfiguration) -> tuple[str, ...]:
-        return build_grok_argv(model=config.model, yolo=config.yolo)
+        return build_grok_argv(model=config.model, effort=config.effort, yolo=config.yolo)
 
     async def probe(self, config: HarnessConfiguration) -> HarnessCapabilities:
         caps, release = await probe_grok(config)
@@ -122,6 +122,7 @@ class GrokAdapter:
             native_session_id=session_id,
             model=request.configuration.model,
             mode=request.configuration.mode,
+            effort=request.configuration.effort,
         )
         self._session = session
         return session
@@ -153,6 +154,7 @@ class GrokAdapter:
             native_session_id=session_id,
             model=request.configuration.model,
             mode=request.configuration.mode,
+            effort=request.configuration.effort,
         )
         self._session = session
         return session

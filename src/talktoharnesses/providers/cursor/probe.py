@@ -3,21 +3,41 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import sys
+from pathlib import Path
+from typing import cast
+from uuid import uuid4
 
 from talktoharnesses.domain.enums import ErrorCode
 from talktoharnesses.domain.errors import DomainError
 from talktoharnesses.domain.models import (
     HarnessCapabilities,
     HarnessConfiguration,
+    HarnessEffortInfo,
     HarnessModelInfo,
 )
 from talktoharnesses.providers._model_discovery import run_model_command
+from talktoharnesses.providers.acp.connection import AcpConnection
+from talktoharnesses.providers.acp.protocol import cursor_acp_protocol
+from talktoharnesses.providers.acp.schemas.cursor_ext import (
+    CursorSelectConfigOption,
+    parse_cursor_config_options,
+)
+from talktoharnesses.providers.cursor.argv import build_cursor_argv
 from talktoharnesses.providers.cursor.compatibility import (
     CursorReleaseRecord,
     match_release,
 )
+from talktoharnesses.providers.cursor.control import (
+    find_cursor_config_option,
+    initialize_cursor,
+    set_cursor_config_option,
+)
+from talktoharnesses.providers.effort import validate_effort
 from talktoharnesses.runtime.paths import resolve_executable
+from talktoharnesses.runtime.spec import ProcessSpec
+from talktoharnesses.runtime.supervisor import ProcessSupervisor
 
 
 async def probe_cursor(
@@ -59,8 +79,116 @@ async def probe_cursor(
         working_directory=config.working_directory,
     )
     models = _parse_models(output)
-    capabilities = release.to_harness_capabilities().model_copy(update={"models": models})
+    capabilities = release.to_harness_capabilities()
+    default_efforts, models = await _discover_model_efforts(
+        executable,
+        config,
+        release,
+        capabilities,
+        models,
+    )
+    capabilities = capabilities.model_copy(
+        update={"models": models, "efforts": default_efforts}
+    )
+    validate_effort(config, capabilities)
     return capabilities, release
+
+
+async def _discover_model_efforts(
+    executable: Path,
+    config: HarnessConfiguration,
+    release: CursorReleaseRecord,
+    capabilities: HarnessCapabilities,
+    models: tuple[HarnessModelInfo, ...],
+) -> tuple[tuple[HarnessEffortInfo, ...], tuple[HarnessModelInfo, ...]]:
+    supervisor = ProcessSupervisor()
+    launch = supervisor.build_launch_snapshot(
+        executable_path=str(executable),
+        working_directory=config.working_directory,
+        workspace_roots=config.workspace_roots,
+        capabilities=capabilities,
+        model=None,
+        mode=None,
+        adapter_version="cursor-effort-probe",
+    )
+    handle = await supervisor.spawn(
+        ProcessSpec(
+            conversation_id=uuid4(),
+            binding_id=uuid4(),
+            process_id=uuid4(),
+            launch=launch,
+            argv=build_cursor_argv(),
+        )
+    )
+    connection = AcpConnection(handle, protocol=cursor_acp_protocol())
+    try:
+        await connection.start()
+        await initialize_cursor(connection, release)
+        future, _ = await connection.request(
+            "session/new",
+            {"cwd": launch.working_directory, "mcpServers": []},
+        )
+        result = await future
+        if not isinstance(result, dict):
+            raise DomainError(
+                ErrorCode.PROTOCOL_ERROR,
+                "Cursor effort probe session result must be an object",
+            )
+        session_id_obj = cast(dict[object, object], result).get("sessionId")
+        if not isinstance(session_id_obj, str) or not session_id_obj:
+            raise DomainError(
+                ErrorCode.PROTOCOL_ERROR,
+                "Cursor effort probe session result missing sessionId",
+            )
+        session_id = session_id_obj
+        options = parse_cursor_config_options(cast(object, result))
+        default_efforts = _efforts_from_options(options)
+        discovered: list[HarnessModelInfo] = []
+        for model in models:
+            model_value = "default" if model.id == "auto" else model.id
+            model_option = find_cursor_config_option(options, "model")
+            if model_option is None:
+                raise DomainError(
+                    ErrorCode.PROVIDER_INCOMPATIBLE,
+                    "Cursor effort probe did not advertise a model option",
+                )
+            if model_option.currentValue != model_value:
+                options = await set_cursor_config_option(
+                    connection,
+                    session_id=session_id,
+                    config_id="model",
+                    value=model_value,
+                    options=options,
+                )
+            discovered.append(
+                model.model_copy(update={"efforts": _efforts_from_options(options)})
+            )
+        return default_efforts, tuple(discovered)
+    finally:
+        with contextlib.suppress(Exception):
+            await connection.close()
+        with contextlib.suppress(Exception):
+            await handle.close()
+
+
+def _efforts_from_options(
+    options: tuple[CursorSelectConfigOption, ...],
+) -> tuple[HarnessEffortInfo, ...]:
+    thought_options = tuple(
+        option for option in options if option.category == "thought_level"
+    )
+    if not thought_options:
+        return ()
+    if len(thought_options) != 1:
+        raise DomainError(
+            ErrorCode.PROVIDER_INCOMPATIBLE,
+            "Cursor model advertised multiple thought-level options",
+            details={"advertised_count": len(thought_options)},
+        )
+    return tuple(
+        HarnessEffortInfo(id=item.value, label=item.name)
+        for item in thought_options[0].options
+    )
 
 
 def _parse_models(output: str) -> tuple[HarnessModelInfo, ...]:

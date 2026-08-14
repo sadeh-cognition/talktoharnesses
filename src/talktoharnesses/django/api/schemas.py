@@ -39,6 +39,14 @@ class HarnessConfigurationBody(BaseModel):
         ),
     )
     mode: str | None = None
+    effort: str | None = Field(
+        default=None,
+        description=(
+            "Provider-native reasoning, thinking, or listening effort used as "
+            "the fixed conversation baseline. Values must be advertised by the "
+            "selected provider and model."
+        ),
+    )
     yolo: bool = Field(
         default=False,
         description=(
@@ -60,6 +68,7 @@ class HarnessConfigurationBody(BaseModel):
             executable_path=self.executable_path,
             model=self.model,
             mode=self.mode,
+            effort=self.effort,
             yolo=self.yolo,
             working_directory=self.working_directory,
             workspace_roots=self.workspace_roots,

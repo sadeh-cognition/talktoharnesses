@@ -64,7 +64,7 @@ PROVIDERS = (
 def test_packaged_documents_load_with_published_matrices(label: str, loader: Any) -> None:
     del label
     doc = loader()
-    assert doc.adapter_version == "2026.8.3"
+    assert doc.adapter_version == "2026.8.4"
     assert doc.create_matrix
     assert doc.resume_matrix
     assert doc.interrupt_matrix

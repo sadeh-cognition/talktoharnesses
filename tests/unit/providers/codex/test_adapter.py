@@ -38,6 +38,7 @@ class FakeTurnHandle:
     events: list[dict[str, object]] = field(default_factory=list[dict[str, object]])
     steered: list[str] = field(default_factory=list[str])
     interrupted: bool = False
+    options: dict[str, object] = field(default_factory=dict[str, object])
 
     def stream(self) -> AsyncIterator[dict[str, object]]:
         async def _gen() -> AsyncIterator[dict[str, object]]:
@@ -65,9 +66,12 @@ class FakeThread:
     id: str
     handles: list[FakeTurnHandle] = field(default_factory=list[FakeTurnHandle])
 
-    async def turn(self, prompt: str) -> FakeTurnHandle:
+    async def turn(self, prompt: str, **options: object) -> FakeTurnHandle:
         handle = FakeTurnHandle(
-            id=f"turn-{len(self.handles) + 1}", thread_id=self.id, prompt=prompt
+            id=f"turn-{len(self.handles) + 1}",
+            thread_id=self.id,
+            prompt=prompt,
+            options=options,
         )
         self.handles.append(handle)
         return handle
@@ -106,7 +110,11 @@ class FakeCodex:
 
 
 def _config() -> HarnessConfiguration:
-    return HarnessConfiguration(kind=HarnessKind.CODEX, working_directory="/tmp")
+    return HarnessConfiguration(
+        kind=HarnessKind.CODEX,
+        working_directory="/tmp",
+        effort="high",
+    )
 
 
 def _launch() -> LaunchSnapshot:
@@ -152,6 +160,9 @@ async def test_start_submit_terminal_without_final_and_steer(
     assert FakeCodex.instances[0].start_kwargs["sandbox"] is Sandbox.workspace_write
     turn_id = uuid4()
     await adapter.submit(session, TurnRequest(turn_id=turn_id, prompt="hi"))
+    assert session.effort == "high"
+    effort = FakeCodex.instances[0].threads[0].handles[0].options["effort"]
+    assert effort.value == "high"  # type: ignore[attr-defined]
     assert await adapter.steer(session, SteerRequest(turn_id=turn_id, prompt="more"))
     # Drain until terminal.
     events: list[HarnessEvent | HarnessInteractionRequest] = []

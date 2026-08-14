@@ -41,7 +41,10 @@ async def test_probe_opencode_success_and_error_paths(monkeypatch: pytest.Monkey
         return _Proc(b"1.2.27")
 
     async def models(*_a: object, **_k: object) -> str:
-        return "opencode/big-pickle\nlmstudio/openai/gpt-oss-20b\n"
+        return (
+            'opencode/big-pickle\n{"name":"Big Pickle","variants":{"low":{},"high":{}}}\n'
+            'lmstudio/openai/gpt-oss-20b\n{"name":"GPT OSS 20B"}\n'
+        )
 
     monkeypatch.setattr(probe_mod.asyncio, "create_subprocess_exec", ok_exec)
     monkeypatch.setattr(probe_mod, "run_model_command", models)
@@ -59,6 +62,8 @@ async def test_probe_opencode_success_and_error_paths(monkeypatch: pytest.Monkey
         "opencode/big-pickle",
         "lmstudio/openai/gpt-oss-20b",
     ]
+    assert [effort.id for effort in caps.models[0].efforts or ()] == ["low", "high"]
+    assert caps.models[1].efforts == ()
 
     with pytest.raises(DomainError) as no_path:
         await probe_mod.probe_opencode(

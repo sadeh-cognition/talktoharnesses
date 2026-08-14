@@ -66,6 +66,7 @@ class HarnessSession(BaseModel):
     native_session_id: str | None = None
     model: str | None = None
     mode: str | None = None
+    effort: str | None = None
     metadata: dict[str, str] = Field(default_factory=dict)
 
 

@@ -11,13 +11,20 @@ from talktoharnesses.domain.errors import DomainError
 from talktoharnesses.domain.models import (
     HarnessCapabilities,
     HarnessConfiguration,
+    HarnessEffortInfo,
     HarnessModelInfo,
 )
 from talktoharnesses.providers.claude.compatibility import (
     ClaudeReleaseRecord,
     match_release,
 )
+from talktoharnesses.providers.effort import validate_effort
 from talktoharnesses.runtime.paths import resolve_executable
+
+_EFFORTS = tuple(
+    HarnessEffortInfo(id=value, label=value.title())
+    for value in ("low", "medium", "high", "max")
+)
 
 
 def _import_claude_sdk() -> Any:
@@ -101,7 +108,10 @@ async def probe_claude(
         platform=sys.platform,
     )
     models = await _discover_models(sdk, config.working_directory, cli_path)
-    capabilities = release.to_harness_capabilities().model_copy(update={"models": models})
+    capabilities = release.to_harness_capabilities().model_copy(
+        update={"models": models, "efforts": _EFFORTS}
+    )
+    validate_effort(config, capabilities)
     return capabilities, release
 
 

@@ -92,6 +92,8 @@ def _config() -> HarnessConfiguration:
         kind=HarnessKind.OPENCODE,
         executable_path="/bin/true",
         working_directory="/tmp",
+        model="opencode/big-pickle",
+        effort="high",
     )
 
 
@@ -135,6 +137,9 @@ async def test_start_and_submit(monkeypatch: pytest.MonkeyPatch) -> None:
     assert session.native_session_id == "sess-1"
     await adapter.submit(session, TurnRequest(turn_id=uuid4(), prompt="hi"))
     assert any(path.endswith("/prompt_async") for path, _ in clients[0].posts)
+    prompt = next(body for path, body in clients[0].posts if path.endswith("/prompt_async"))
+    assert prompt is not None
+    assert prompt["variant"] == "high"
     await adapter.close(session)
     assert clients[0].closed is True
 

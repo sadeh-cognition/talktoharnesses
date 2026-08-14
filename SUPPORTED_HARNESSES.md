@@ -6,7 +6,7 @@ Do not edit provider tables by hand; regenerate via
 
 ## Grok
 
-- Adapter version: `2026.8.3`
+- Adapter version: `2026.8.4`
 
 ### Known releases (implementation targets)
 
@@ -58,7 +58,7 @@ _No published nested-activity combinations yet. Nested-activity rows are added o
 
 ## Cursor
 
-- Adapter version: `2026.8.3`
+- Adapter version: `2026.8.4`
 
 ### Known releases (implementation targets)
 
@@ -100,7 +100,7 @@ _No published nested-activity combinations yet. Nested-activity rows are added o
 
 ## Codex
 
-- Adapter version: `2026.8.3`
+- Adapter version: `2026.8.4`
 
 ### Known releases (implementation targets)
 
@@ -146,7 +146,7 @@ _No published nested-activity combinations yet. Nested-activity rows are added o
 
 ## Claude Code
 
-- Adapter version: `2026.8.3`
+- Adapter version: `2026.8.4`
 
 ### Known releases (implementation targets)
 
@@ -192,7 +192,7 @@ _No published nested-activity combinations yet. Nested-activity rows are added o
 
 ## OpenCode
 
-- Adapter version: `2026.8.3`
+- Adapter version: `2026.8.4`
 
 ### Known releases (implementation targets)
 
@@ -238,7 +238,7 @@ _No published nested-activity combinations yet. Nested-activity rows are added o
 
 ## Prime Agent
 
-- Adapter version: `2026.8.3`
+- Adapter version: `2026.8.4`
 
 ### Known releases (implementation targets)
 

@@ -11,6 +11,7 @@ from uuid import uuid4
 import pytest
 
 from talktoharnesses.domain.enums import HarnessKind
+from talktoharnesses.domain.errors import DomainError
 from talktoharnesses.domain.models import HarnessCapabilities, HarnessConfiguration, LaunchSnapshot
 from talktoharnesses.providers.adapter import (
     ResumeSessionRequest,
@@ -82,7 +83,7 @@ def _config() -> HarnessConfiguration:
         executable_path="/bin/true",
         working_directory="/tmp",
         model="anthropic/claude-sonnet-4-5",
-        mode="high",
+        effort="high",
     )
 
 
@@ -100,6 +101,13 @@ def _launch() -> LaunchSnapshot:
         adapter_version="2026.8.1",
         capabilities=capabilities,
     )
+
+
+def test_build_argv_uses_effort_and_rejects_legacy_mode() -> None:
+    adapter = PrimeAgentAdapter()
+    assert adapter.build_argv(_config())[-2:] == ("--thinking", "high")
+    with pytest.raises(DomainError, match="mode no longer represents thinking"):
+        adapter.build_argv(_config().model_copy(update={"mode": "high", "effort": None}))
 
 
 async def _probe(config: HarnessConfiguration):
@@ -189,7 +197,7 @@ async def test_yolo_is_accepted_on_create_and_resume_without_argv_change(
         executable_path="/bin/true",
         working_directory="/tmp",
         model="anthropic/claude-sonnet-4-5",
-        mode="high",
+        effort="high",
         yolo=True,
     )
     process = _FakePrimeProcess()

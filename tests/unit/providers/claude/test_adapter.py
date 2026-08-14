@@ -87,7 +87,11 @@ class FakeClaudeClient:
 
 
 def _config() -> HarnessConfiguration:
-    return HarnessConfiguration(kind=HarnessKind.CLAUDE, working_directory="/tmp")
+    return HarnessConfiguration(
+        kind=HarnessKind.CLAUDE,
+        working_directory="/tmp",
+        effort="medium",
+    )
 
 
 def _launch() -> LaunchSnapshot:
@@ -131,7 +135,9 @@ async def test_start_submit_no_steer(monkeypatch: pytest.MonkeyPatch) -> None:
         )
     )
     assert session.native_session_id
+    assert session.effort == "medium"
     assert _option_get(clients[0].options, "session_id") == session.native_session_id
+    assert _option_get(clients[0].options, "effort") == "medium"
     turn_id = uuid4()
     await adapter.submit(session, TurnRequest(turn_id=turn_id, prompt="hi"))
     assert await adapter.steer(session, SteerRequest(turn_id=turn_id, prompt="more")) is False

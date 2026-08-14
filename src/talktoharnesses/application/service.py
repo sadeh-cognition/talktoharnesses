@@ -94,6 +94,7 @@ from talktoharnesses.domain.transitions import (
     unpin_conversation,
     unsnooze_conversation,
 )
+from talktoharnesses.providers.effort import validate_effort
 from talktoharnesses.providers.registry import AdapterRegistry
 from talktoharnesses.runtime.manager import RuntimeManager
 
@@ -988,6 +989,7 @@ class TalkToHarnessesService:
                 "target harness does not support the requested mode",
                 details={"mode": configuration.mode},
             )
+        validate_effort(configuration, capabilities)
 
     # ------------------------------------------------------------------
     # Interactions

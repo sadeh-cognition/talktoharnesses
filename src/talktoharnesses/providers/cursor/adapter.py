@@ -10,7 +10,6 @@ from dataclasses import dataclass
 from typing import Any, Literal, cast
 from uuid import UUID, uuid4
 
-from talktoharnesses import __version__
 from talktoharnesses.domain.enums import ErrorCode, HarnessKind
 from talktoharnesses.domain.errors import DomainError
 from talktoharnesses.domain.events import HarnessEvent, InteractionRequestedPayload
@@ -21,10 +20,7 @@ from talktoharnesses.domain.models import (
 )
 from talktoharnesses.providers.acp.connection import AcpConnection
 from talktoharnesses.providers.acp.jsonrpc import JsonRpcRemoteError, ProtocolCloseError
-from talktoharnesses.providers.acp.protocol import (
-    CURSOR_ALLOWED_OUTBOUND_METHODS,
-    cursor_acp_protocol,
-)
+from talktoharnesses.providers.acp.protocol import cursor_acp_protocol
 from talktoharnesses.providers.acp.schemas.cursor_ext import (
     CURSOR_CONTROL_NOTIFICATIONS,
     CursorSelectConfigOption,
@@ -43,13 +39,16 @@ from talktoharnesses.providers.cursor.compatibility import (
     CursorReleaseRecord,
     enforce_published_operation,
 )
+from talktoharnesses.providers.cursor.control import (
+    find_cursor_config_option,
+    initialize_cursor,
+    set_cursor_config_option,
+)
 from talktoharnesses.providers.cursor.normalizer import CursorNormalizer
 from talktoharnesses.providers.cursor.probe import probe_cursor
 from talktoharnesses.runtime.handle import ProcessHandle
 
 logger = logging.getLogger(__name__)
-
-CLIENT_INFO = {"name": "talktoharnesses", "version": __version__}
 
 _MODEL_PARAMETER_CATEGORIES: frozenset[str] = frozenset({"model_config", "thought_level"})
 
@@ -140,6 +139,7 @@ class CursorAdapter:
             session_result=result,
             configured_model=request.configuration.model,
             configured_mode=request.configuration.mode,
+            configured_effort=request.configuration.effort,
         )
         self._normalizer.set_session(session_id, resync=False)
         session = HarnessSession(
@@ -149,6 +149,7 @@ class CursorAdapter:
             native_session_id=session_id,
             model=request.configuration.model,
             mode=request.configuration.mode,
+            effort=request.configuration.effort,
         )
         self._session = session
         return session
@@ -177,6 +178,7 @@ class CursorAdapter:
             session_result=result,
             configured_model=request.configuration.model,
             configured_mode=request.configuration.mode,
+            configured_effort=request.configuration.effort,
         )
         self._normalizer.set_session(session_id, resync=False)
         session = HarnessSession(
@@ -186,6 +188,7 @@ class CursorAdapter:
             native_session_id=session_id,
             model=request.configuration.model,
             mode=request.configuration.mode,
+            effort=request.configuration.effort,
         )
         self._session = session
         return session
@@ -325,74 +328,8 @@ class CursorAdapter:
 
     async def _initialize(self) -> None:
         assert self._connection is not None
-        future, _ = await self._connection.request(
-            "initialize",
-            {
-                "protocolVersion": 1,
-                "clientInfo": CLIENT_INFO,
-                # Only the parameterized model picker; no fs/terminal reverse handlers.
-                "clientCapabilities": {
-                    "_meta": {
-                        "parameterizedModelPicker": True,
-                    }
-                },
-            },
-        )
-        result = await future
-        if not isinstance(result, dict):
-            raise DomainError(ErrorCode.PROTOCOL_ERROR, "initialize result must be an object")
-        result_map = _map_dict(cast(object, result))
-        protocol = result_map.get("protocolVersion")
-        if protocol != 1:
-            raise DomainError(
-                ErrorCode.PROVIDER_INCOMPATIBLE,
-                "ACP protocol version mismatch",
-                details={"protocolVersion": protocol},
-            )
-        if self._release is not None and protocol != self._release.acp_protocol_version:
-            raise DomainError(
-                ErrorCode.PROVIDER_INCOMPATIBLE,
-                "ACP protocol version does not match compatibility record",
-                details={
-                    "protocolVersion": protocol,
-                    "expected": self._release.acp_protocol_version,
-                },
-            )
-        if self._release is not None:
-            self._validate_initialize_identity(result_map)
-
-    def _validate_initialize_identity(self, result: dict[str, Any]) -> None:
         assert self._release is not None
-        agent_info = _map_dict(result.get("agentInfo"))
-        # Cursor may omit agentInfo; probe already matched the pinned CLI release.
-        if agent_info and (
-            agent_info.get("name") != self._release.agent_name
-            or agent_info.get("version") != self._release.cli_version
-        ):
-            raise DomainError(
-                ErrorCode.PROVIDER_INCOMPATIBLE,
-                "initialize agent identity does not match compatibility record",
-                details={"agentInfo": agent_info, "release_id": self._release.id},
-            )
-        capabilities = _map_dict(result.get("agentCapabilities"))
-        if (
-            self._release.capabilities.supports_resume
-            and capabilities.get("loadSession") is not True
-        ):
-            raise DomainError(
-                ErrorCode.PROVIDER_INCOMPATIBLE,
-                "initialize result does not advertise session loading",
-                details={"release_id": self._release.id},
-            )
-        missing_methods = (
-            set(self._release.required_agent_methods) - CURSOR_ALLOWED_OUTBOUND_METHODS
-        )
-        if missing_methods:
-            raise DomainError(
-                ErrorCode.PROVIDER_INCOMPATIBLE,
-                "adapter does not implement required agent methods",
-                details={"missing_methods": sorted(missing_methods)},
-            )
+        await initialize_cursor(self._connection, self._release)
 
     async def _apply_session_configuration(
         self,
@@ -401,10 +338,11 @@ class CursorAdapter:
         session_result: object,
         configured_model: str | None,
         configured_mode: str | None,
+        configured_effort: str | None,
     ) -> None:
         options = parse_cursor_config_options(session_result)
-        model_opt = _find_config_option(options, "model")
-        mode_opt = _find_config_option(options, "mode")
+        model_opt = find_cursor_config_option(options, "model")
+        mode_opt = find_cursor_config_option(options, "mode")
         if model_opt is None or mode_opt is None:
             raise DomainError(
                 ErrorCode.PROVIDER_INCOMPATIBLE,
@@ -415,13 +353,40 @@ class CursorAdapter:
                 },
             )
 
-        if configured_model is not None:
-            selection = _parse_model_selector(configured_model)
+        selection = _parse_model_selector(configured_model) if configured_model else None
+        if selection is not None:
             options = await self._apply_model_selection(
                 session_id=session_id,
                 selection=selection,
                 options=options,
                 complete=False,
+            )
+
+        if configured_effort is not None:
+            thought_options = tuple(
+                option for option in options if option.category == "thought_level"
+            )
+            if len(thought_options) != 1:
+                raise DomainError(
+                    ErrorCode.PROVIDER_INCOMPATIBLE,
+                    "Cursor model does not advertise exactly one thought-level option",
+                    details={"advertised_count": len(thought_options)},
+                )
+            thought_option = thought_options[0]
+            if selection is not None and any(
+                parameter_id == thought_option.id
+                for parameter_id, _value in selection.parameters
+            ):
+                raise DomainError(
+                    ErrorCode.PROVIDER_INCOMPATIBLE,
+                    "Cursor effort conflicts with a thought-level model parameter",
+                    details={"config_id": thought_option.id},
+                )
+            options = await self._set_config_option(
+                session_id=session_id,
+                config_id=thought_option.id,
+                value=configured_effort,
+                options=options,
             )
 
         if configured_mode is not None:
@@ -494,7 +459,7 @@ class CursorAdapter:
             if current == selection:
                 return options
 
-        model_opt = _find_config_option(options, "model")
+        model_opt = find_cursor_config_option(options, "model")
         if model_opt is None:
             raise DomainError(
                 ErrorCode.PROVIDER_INCOMPATIBLE,
@@ -512,7 +477,7 @@ class CursorAdapter:
             return options
 
         for param_id, value in selection.parameters:
-            option = _find_config_option(options, param_id)
+            option = find_cursor_config_option(options, param_id)
             if option is None:
                 raise DomainError(
                     ErrorCode.PROVIDER_INCOMPATIBLE,
@@ -546,67 +511,14 @@ class CursorAdapter:
         value: str,
         options: tuple[CursorSelectConfigOption, ...],
     ) -> tuple[CursorSelectConfigOption, ...]:
-        option = _find_config_option(options, config_id)
-        if option is None:
-            raise DomainError(
-                ErrorCode.PROVIDER_INCOMPATIBLE,
-                "Cursor configuration option is not advertised",
-                details={"config_id": config_id},
-            )
-        advertised = tuple(item.value for item in option.options)
-        if value not in advertised:
-            raise DomainError(
-                ErrorCode.PROVIDER_INCOMPATIBLE,
-                "Cursor configuration value is not advertised",
-                details={
-                    "config_id": config_id,
-                    "value": value,
-                    "advertised_values": list(advertised),
-                },
-            )
-        if option.currentValue == value:
-            return options
-
         assert self._connection is not None
-        try:
-            future, _ = await self._connection.request(
-                "session/set_config_option",
-                {
-                    "sessionId": session_id,
-                    "configId": config_id,
-                    "value": value,
-                },
-            )
-            result = await future
-        except JsonRpcRemoteError as exc:
-            raise DomainError(
-                ErrorCode.PROVIDER_INCOMPATIBLE,
-                "Cursor rejected configuration option",
-                details={"config_id": config_id, "remote_code": exc.code},
-            ) from exc
-
-        try:
-            new_options = parse_cursor_config_options(result)
-        except DomainError:
-            raise
-        except Exception as exc:
-            raise DomainError(
-                ErrorCode.PROTOCOL_ERROR,
-                "malformed Cursor set_config_option response",
-                details={"config_id": config_id},
-            ) from exc
-
-        updated = _find_config_option(new_options, config_id)
-        if updated is None or updated.currentValue != value:
-            raise DomainError(
-                ErrorCode.PROTOCOL_ERROR,
-                "Cursor set_config_option response did not reflect requested value",
-                details={
-                    "config_id": config_id,
-                    "requested": value,
-                    "currentValue": None if updated is None else updated.currentValue,
-                },
-            )
+        new_options = await set_cursor_config_option(
+            self._connection,
+            session_id=session_id,
+            config_id=config_id,
+            value=value,
+            options=options,
+        )
         self._record_config_options(new_options)
         return new_options
 
@@ -787,20 +699,10 @@ def _parse_model_selector(value: str) -> _CursorModelSelection:
     return _CursorModelSelection(model_id=model_id, parameters=tuple(parameters))
 
 
-def _find_config_option(
-    options: tuple[CursorSelectConfigOption, ...],
-    config_id: str,
-) -> CursorSelectConfigOption | None:
-    for option in options:
-        if option.id == config_id:
-            return option
-    return None
-
-
 def _capture_model_selection(
     options: tuple[CursorSelectConfigOption, ...],
 ) -> _CursorModelSelection:
-    model_opt = _find_config_option(options, "model")
+    model_opt = find_cursor_config_option(options, "model")
     if model_opt is None:
         raise DomainError(
             ErrorCode.PROVIDER_INCOMPATIBLE,

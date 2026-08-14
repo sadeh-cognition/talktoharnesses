@@ -19,12 +19,13 @@ from talktoharnesses.providers.grok.compatibility import (
 
 def test_load_and_match_release() -> None:
     doc = load_grok_compatibility()
-    assert doc.adapter_version == "2026.8.3"
+    assert doc.adapter_version == "2026.8.4"
     release = match_release("grok 1.0.0 (3cd0d0cbce) [stable]", platform="linux")
     assert release.id == "grok-1.0.0-3cd0d0cbce"
     caps = release.to_harness_capabilities()
     assert caps.supports_resume is True
     assert caps.supports_steer is False
+    assert [effort.id for effort in caps.efforts] == ["low", "medium", "high"]
 
 
 def test_match_1_0_3_release() -> None:
@@ -37,6 +38,11 @@ def test_match_1_0_4_release() -> None:
     release = match_release("grok 1.0.4 (d846eb93d9) [stable]", platform="linux")
 
     assert release.id == "grok-1.0.4-d846eb93d9"
+    assert [effort.id for effort in release.to_harness_capabilities().efforts] == [
+        "low",
+        "medium",
+        "high",
+    ]
 
 
 def test_unknown_version_fails() -> None:
@@ -98,6 +104,7 @@ def test_build_argv() -> None:
         "grok-build",
         "stdio",
     )
+    assert "--reasoning-effort" in build_grok_argv(effort="high")
     assert "--always-approve" not in build_grok_argv(model="x")
     assert build_grok_argv(yolo=True) == (
         "--always-approve",
@@ -122,6 +129,7 @@ def test_adapter_build_argv_maps_yolo_on_create_and_resume() -> None:
         kind=HarnessKind.GROK,
         working_directory="/tmp",
         model="grok-build",
+        effort="high",
     )
     yolo = HarnessConfiguration(
         kind=HarnessKind.GROK,
@@ -129,5 +137,7 @@ def test_adapter_build_argv_maps_yolo_on_create_and_resume() -> None:
         model="grok-build",
         yolo=True,
     )
-    assert adapter.build_argv(default) == build_grok_argv(model="grok-build")
+    assert adapter.build_argv(default) == build_grok_argv(
+        model="grok-build", effort="high"
+    )
     assert adapter.build_argv(yolo) == build_grok_argv(model="grok-build", yolo=True)

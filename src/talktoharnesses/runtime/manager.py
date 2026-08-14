@@ -938,6 +938,7 @@ class RuntimeManager:
             kind=configuration.kind,
             model=configuration.model,
             mode=configuration.mode,
+            effort=configuration.effort,
         )
         with contextlib.suppress(Exception):
             await asyncio.wait_for(
@@ -1077,6 +1078,7 @@ class RuntimeManager:
                 model=configuration.model,
                 mode=configuration.mode,
                 adapter_version=adapter_version,
+                effort=configuration.effort,
             )
         assert plan.executable_path is not None
         return self._supervisor.build_launch_snapshot(
@@ -1087,6 +1089,7 @@ class RuntimeManager:
             model=configuration.model,
             mode=configuration.mode,
             adapter_version=adapter_version,
+            effort=configuration.effort,
         )
 
     async def _spawn_process(
@@ -1417,6 +1420,7 @@ class RuntimeManager:
         model: str | None,
         mode: str | None,
         adapter_version: str,
+        effort: str | None = None,
     ) -> LaunchSnapshot:
         """Resolve cwd/roots for SDK-managed runtimes; executable is optional."""
         workdir = resolve_directory(
@@ -1437,6 +1441,7 @@ class RuntimeManager:
             workspace_roots=tuple(str(r) for r in roots),
             model=model,
             mode=mode,
+            effort=effort,
             adapter_version=adapter_version,
             capabilities=capabilities,
         )

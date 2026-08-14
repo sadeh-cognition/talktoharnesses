@@ -13,6 +13,7 @@ from talktoharnesses.domain.models import (
     HarnessModelInfo,
 )
 from talktoharnesses.providers._model_discovery import run_model_command
+from talktoharnesses.providers.effort import validate_effort
 from talktoharnesses.providers.grok.compatibility import (
     GrokReleaseRecord,
     match_release,
@@ -59,6 +60,7 @@ async def probe_grok(config: HarnessConfiguration) -> tuple[HarnessCapabilities,
         )
     )
     capabilities = release.to_harness_capabilities().model_copy(update={"models": models})
+    validate_effort(config, capabilities)
     return capabilities, release
 
 

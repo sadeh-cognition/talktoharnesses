@@ -226,6 +226,7 @@ class CodexAdapter:
             native_session_id=thread_id,
             model=request.configuration.model,
             mode=request.configuration.mode,
+            effort=request.configuration.effort,
         )
         self._session = session
         return session
@@ -262,6 +263,7 @@ class CodexAdapter:
             native_session_id=thread_id,
             model=request.configuration.model,
             mode=request.configuration.mode,
+            effort=request.configuration.effort,
         )
         self._session = session
         return session
@@ -273,7 +275,12 @@ class CodexAdapter:
         if self._stream_task is not None and not self._stream_task.done():
             raise DomainError(ErrorCode.INVALID_STATE, "codex turn already active")
         self._normalizer.begin_turn(request.turn_id)
-        handle = await self._thread.turn(request.prompt)
+        turn_options: dict[str, Any] = {}
+        if session.effort:
+            from openai_codex.types import ReasoningEffort
+
+            turn_options["effort"] = ReasoningEffort(session.effort)
+        handle = await self._thread.turn(request.prompt, **turn_options)
         self._turn_handle = handle
         self._stream_task = asyncio.create_task(
             self._consume_stream(handle),

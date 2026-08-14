@@ -38,6 +38,7 @@ class SessionStartedPayload(BaseModel):
     harness_kind: HarnessKind
     model: str | None = None
     mode: str | None = None
+    effort: str | None = None
 
 
 class SessionResumedPayload(BaseModel):
