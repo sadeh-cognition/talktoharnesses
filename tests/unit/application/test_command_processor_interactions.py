@@ -39,6 +39,7 @@ from talktoharnesses.domain.events import (
     InteractionRequestedPayload,
     TurnCompletedPayload,
     TurnInterruptedPayload,
+    TurnOutcomeUnknownPayload,
 )
 from talktoharnesses.domain.models import (
     AnswerInteractionPayload,
@@ -127,6 +128,7 @@ class _Runtime:
         self.adapter = adapter
         self.persistence = persistence
         self.managed: Any = None
+        self.queued_status_at_close: CommandStatus | None = None
 
     def get_runtime(self, conversation_id: UUID) -> Any:
         return self.managed
@@ -151,6 +153,9 @@ class _Runtime:
         return await self.start(**kwargs)
 
     async def close(self, conversation_id: UUID, *, reason: str) -> None:
+        state = await self.persistence.get_worker_snapshot(conversation_id)
+        if state.queued_turn is not None and state.queued_turn.command_id is not None:
+            self.queued_status_at_close = state.commands[state.queued_turn.command_id].status
         self.managed = None
 
     async def close_replaced_runtime(self, managed: Any, *, reason: str) -> None:
@@ -239,6 +244,66 @@ async def test_event_pump_routes_interaction_request_through_broker(envelope: bo
     answer_cmds = [c for c in p.commands.values() if c.kind is CommandKind.ANSWER_INTERACTION]
     assert len(answer_cmds) == 1
     await processor.stop()
+
+
+@pytest.mark.asyncio
+async def test_ended_event_stream_marks_active_turn_outcome_unknown() -> None:
+    p = MemoryPersistence()
+    publisher = _Publisher()
+    adapter = _InteractionAdapter()
+    runtime = _Runtime(adapter, p)
+    processor = CommandProcessor(
+        p,
+        publisher,
+        cast(RuntimeManager, runtime),
+        clock=_now,
+    )
+    cid, _ = await _seed_running(p)
+    state = await p.get_worker_snapshot(cid)
+    queued = submit_turn(state, prompt="next", idempotency_key="t2", now=_now())
+    assert queued.command is not None
+    await p.commit_facade_mutation(
+        cid,
+        "owner",
+        state.conversation.version,
+        queued.state,
+        queued.events,
+        commands=(queued.command,),
+    )
+    claimed = (await p.claim_commands("worker", 1, lease_duration=30))[0]
+    claimed_command = claimed.command
+    await p.commit_turn_batch(
+        cid,
+        queued.state.conversation.version,
+        queued.state.model_copy(
+            update={
+                "commands": {
+                    **queued.state.commands,
+                    claimed_command.id: claimed_command,
+                }
+            }
+        ),
+        (),
+        (claimed_command,),
+    )
+    await runtime.start(conversation_id=cid, owner_id="owner")
+    processor._running = True  # pyright: ignore[reportPrivateUsage]
+    adapter._queue.put_nowait(None)  # pyright: ignore[reportPrivateUsage]
+
+    await processor._event_pump(cid)  # pyright: ignore[reportPrivateUsage]
+
+    state = await p.get_worker_snapshot(cid)
+    command = next(iter(state.commands.values()))
+    assert state.active_turn is None
+    assert command.status is CommandStatus.OUTCOME_UNKNOWN
+    assert p.commands[command.id].status is CommandStatus.OUTCOME_UNKNOWN
+    assert publisher.events[-1].type == "turn_outcome_unknown"
+    payload = publisher.events[-1].payload
+    assert isinstance(payload, TurnOutcomeUnknownPayload)
+    assert payload.delivery_phase == "event_stream"
+    assert runtime.queued_status_at_close is CommandStatus.CLAIMED
+    assert state.commands[claimed_command.id].status is CommandStatus.ACCEPTED
+    assert runtime.managed is None
 
 
 @pytest.mark.asyncio

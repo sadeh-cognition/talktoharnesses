@@ -901,8 +901,53 @@ class CommandProcessor:
                 except Exception:
                     logger.exception("failed to replace stale runtime for %s", conversation_id)
             elif stream_ended and self._running and not self._draining:
-                with contextlib.suppress(Exception):
-                    await self._runtime.close(conversation_id, reason="event_stream_closed")
+                try:
+                    async with self._lock_for(conversation_id):
+                        await self._runtime.close(
+                            conversation_id,
+                            reason="event_stream_closed",
+                        )
+                        await self._mark_active_turn_outcome_unknown(
+                            conversation_id,
+                            delivery_phase="event_stream",
+                            message="provider event stream ended before the turn completed",
+                        )
+                except Exception:
+                    logger.exception(
+                        "failed to terminalize ended event stream for %s",
+                        conversation_id,
+                    )
+
+    async def _mark_active_turn_outcome_unknown(
+        self,
+        conversation_id: UUID,
+        *,
+        delivery_phase: str,
+        message: str,
+    ) -> None:
+        state = await self._persistence.get_worker_snapshot(conversation_id)
+        if state.active_turn is None:
+            return
+        result = apply_outcome_unknown(
+            state,
+            now=self._clock(),
+            delivery_phase=delivery_phase,
+            message=message,
+        )
+        committed = await self._persistence.commit_turn_batch(
+            conversation_id,
+            state.conversation.version,
+            result.state,
+            result.events,
+            tuple(
+                command
+                for command in result.state.commands.values()
+                if command.status is CommandStatus.OUTCOME_UNKNOWN
+            ),
+            **self._fence_kwargs(conversation_id),
+        )
+        await self._safe_publish(committed, state=result.state)
+        await self._wake_queued_submit(conversation_id)
 
     async def _on_harness_event(
         self,
@@ -986,27 +1031,11 @@ class CommandProcessor:
                 )
             except DomainError as exc:
                 logger.warning("dispatch failed code=%s", exc.code.value)
-                db_state = await self._persistence.get_worker_snapshot(conversation_id)
-                if db_state.active_turn is not None:
-                    ou = apply_outcome_unknown(
-                        db_state,
-                        now=now,
-                        delivery_phase="event_dispatch",
-                        message=public_message(exc.code),
-                    )
-                    committed = await self._persistence.commit_turn_batch(
-                        conversation_id,
-                        db_state.conversation.version,
-                        ou.state,
-                        ou.events,
-                        tuple(
-                            c
-                            for c in ou.state.commands.values()
-                            if c.status.value == "outcome_unknown"
-                        ),
-                        **self._fence_kwargs(conversation_id),
-                    )
-                    await self._safe_publish(committed, state=ou.state)
+                await self._mark_active_turn_outcome_unknown(
+                    conversation_id,
+                    delivery_phase="event_dispatch",
+                    message=public_message(exc.code),
+                )
                 await self._runtime.close(conversation_id, reason="protocol_error")
                 return True
 
