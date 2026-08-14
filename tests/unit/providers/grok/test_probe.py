@@ -31,6 +31,14 @@ def test_grok_model_list_rejects_malformed_output(output: str) -> None:
     assert exc.value.code is ErrorCode.PROVIDER_INCOMPATIBLE
 
 
+def test_grok_model_list_accepts_1_0_3_output() -> None:
+    models = probe_mod._parse_models(  # pyright: ignore[reportPrivateUsage]
+        "Default model: grok-4.6\n\nAvailable models:\n  * grok-4.6 (default)\n  - grok-4.5\n"
+    )
+
+    assert [model.id for model in models] == ["grok-4.6", "grok-4.5"]
+
+
 @pytest.mark.asyncio
 async def test_probe_grok_success_and_error_paths(monkeypatch: pytest.MonkeyPatch) -> None:
     executable = Path("/tmp/grok")

@@ -49,6 +49,7 @@ ALLOWED_SESSION_UPDATE_KINDS: frozenset[str] = frozenset(
         "usage_update",
         "session_info_update",
         "available_commands_update",
+        "current_mode_update",
     }
 )
 
@@ -142,13 +143,19 @@ class _AvailableCommandsUpdate(_Strict):
     meta: Any | None = Field(default=None, alias="_meta")
 
 
+class _CurrentModeUpdate(_Strict):
+    sessionUpdate: Literal["current_mode_update"]
+    currentModeId: str
+
+
 SessionUpdate = Annotated[
     _TextUpdate
     | _ToolCallUpdate
     | _PlanUpdate
     | _UsageUpdate
     | _SessionInfoUpdate
-    | _AvailableCommandsUpdate,
+    | _AvailableCommandsUpdate
+    | _CurrentModeUpdate,
     Field(discriminator="sessionUpdate"),
 ]
 
@@ -205,6 +212,7 @@ class PermissionCommandInput(_Strict):
     variant: str | None = None
     description: str | None = None
     is_background: bool | None = None
+    timeout: int | None = None
     meta: Any | None = Field(default=None, alias="_meta")
 
 

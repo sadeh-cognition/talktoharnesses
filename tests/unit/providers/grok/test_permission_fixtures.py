@@ -124,7 +124,7 @@ def test_unknown_fields_on_permission_rejected_by_schema() -> None:
     assert is_allowlisted_permission_request(
         {
             "sessionId": "s",
-            "toolCall": {"rawInput": {"command": ["echo"]}},
+            "toolCall": {"rawInput": {"command": ["echo"], "timeout": 60_000}},
             "options": [],
         }
     )

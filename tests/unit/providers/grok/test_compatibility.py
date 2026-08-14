@@ -27,10 +27,31 @@ def test_load_and_match_release() -> None:
     assert caps.supports_steer is False
 
 
+def test_match_1_0_3_release() -> None:
+    release = match_release("grok 1.0.3 (1a29d5bc12) [stable]", platform="linux")
+
+    assert release.id == "grok-1.0.3-1a29d5bc12"
+
+
+def test_match_1_0_4_release() -> None:
+    release = match_release("grok 1.0.4 (d846eb93d9) [stable]", platform="linux")
+
+    assert release.id == "grok-1.0.4-d846eb93d9"
+
+
 def test_unknown_version_fails() -> None:
     with pytest.raises(DomainError) as exc:
         match_release("grok 9.9.9 (deadbeef) [stable]")
     assert exc.value.code is ErrorCode.PROVIDER_INCOMPATIBLE
+
+
+def test_unknown_version_suggestions_match_platform() -> None:
+    with pytest.raises(DomainError) as exc:
+        match_release("grok 9.9.9 (deadbeef) [stable]", platform="darwin")
+
+    assert exc.value.details["supported_versions"] == [
+        "1.0.0 (3cd0d0cbce) [stable]",
+    ]
 
 
 def test_malformed_version_fails() -> None:

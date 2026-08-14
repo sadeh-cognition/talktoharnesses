@@ -74,9 +74,9 @@ def _parse_models(output: str) -> tuple[HarnessModelInfo, ...]:
         line = raw_line.strip()
         if not line:
             continue
-        if not line.startswith("* "):
+        if not line.startswith(("* ", "- ")):
             break
-        model_id = line.removeprefix("* ").removesuffix(" (default)").strip()
+        model_id = line[2:].removesuffix(" (default)").strip()
         if not model_id or any(char.isspace() for char in model_id):
             raise DomainError(
                 ErrorCode.PROVIDER_INCOMPATIBLE,

@@ -169,7 +169,12 @@ class AcpSessionNormalizer:
             self._record_resync(update)
             return []
 
-        if kind in {"session_info_update", "available_commands_update", "user_message_chunk"}:
+        if kind in {
+            "session_info_update",
+            "available_commands_update",
+            "current_mode_update",
+            "user_message_chunk",
+        }:
             return []
 
         if self._active_turn_id is None:

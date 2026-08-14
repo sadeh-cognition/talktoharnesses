@@ -146,6 +146,13 @@ def match_release(
         ErrorCode.PROVIDER_INCOMPATIBLE,
         "unknown grok release",
         details={
+            "provider": "Grok",
+            "installed_version": f"{version} ({build}) [{channel}]",
+            "supported_versions": [
+                f"{release.cli_version} ({release.cli_build}) [{release.cli_channel}]"
+                for release in doc.releases
+                if not release.platforms or plat in release.platforms
+            ],
             "cli_version": version,
             "cli_build": build,
             "cli_channel": channel,

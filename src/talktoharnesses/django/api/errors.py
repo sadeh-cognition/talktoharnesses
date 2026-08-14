@@ -58,10 +58,11 @@ def _json_error(code: str, message: str, status: int) -> HttpResponse:
 
 def domain_error_response(exc: DomainError) -> HttpResponse:
     """Map a DomainError to a stable HTTP body without echoing raw messages."""
+    message = public_message(exc.code, details=exc.details)
     if isinstance(exc, AuthenticationFailed):
         return _json_error(AUTH_FAILURE_CODE, AUTH_FAILURE_MESSAGE, 401)
     if exc.code is ErrorCode.NOT_FOUND:
-        return _json_error(exc.code.value, public_message(exc.code), 404)
+        return _json_error(exc.code.value, message, 404)
     # get_snapshot still uses INVALID_STATE for missing/owner mismatch.
     # Inspect the internal message only for status routing — never echo it.
     if exc.code is ErrorCode.INVALID_STATE and "not found" in exc.message.lower():
@@ -69,12 +70,12 @@ def domain_error_response(exc: DomainError) -> HttpResponse:
     if exc.code is ErrorCode.INVALID_STATE and "owner mismatch" in exc.message.lower():
         return _json_error(ErrorCode.NOT_FOUND.value, public_message(ErrorCode.NOT_FOUND), 404)
     if exc.code in _BAD_REQUEST_CODES:
-        return _json_error(exc.code.value, public_message(exc.code), 400)
+        return _json_error(exc.code.value, message, 400)
     if exc.code in _CONFLICT_CODES:
-        return _json_error(exc.code.value, public_message(exc.code), 409)
+        return _json_error(exc.code.value, message, 409)
     if exc.code in _UNPROCESSABLE_CODES or exc.code is ErrorCode.INVALID_CURSOR:
-        return _json_error(exc.code.value, public_message(exc.code), 422)
-    return _json_error(exc.code.value, public_message(exc.code), 409)
+        return _json_error(exc.code.value, message, 422)
+    return _json_error(exc.code.value, message, 409)
 
 
 def register_exception_handlers(api: NinjaAPI) -> None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from typing import Any, Final
 
@@ -40,11 +41,40 @@ _PUBLIC_MESSAGES: Final[dict[ErrorCode, str]] = {
 }
 
 _DEFAULT_PUBLIC_MESSAGE: Final = "conflict"
+_SAFE_VERSION_VALUE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 .()_\[\]\-]{0,127}$")
 
 
-def public_message(code: ErrorCode) -> str:
+def public_message(
+    code: ErrorCode, *, details: Mapping[str, Any] | None = None
+) -> str:
     """Return a short generic message for a stable error code."""
+    if code is ErrorCode.PROVIDER_INCOMPATIBLE:
+        version_message = _version_mismatch_message(details)
+        if version_message is not None:
+            return version_message
     return _PUBLIC_MESSAGES.get(code, _DEFAULT_PUBLIC_MESSAGE)
+
+
+def _version_mismatch_message(details: Mapping[str, Any] | None) -> str | None:
+    if details is None:
+        return None
+    provider = details.get("provider")
+    installed = details.get("installed_version")
+    supported = details.get("supported_versions")
+    if (
+        not isinstance(provider, str)
+        or not isinstance(installed, str)
+        or not isinstance(supported, list)
+        or not all(isinstance(version, str) for version in supported)
+        or not _SAFE_VERSION_VALUE.fullmatch(provider)
+        or not _SAFE_VERSION_VALUE.fullmatch(installed)
+        or not all(_SAFE_VERSION_VALUE.fullmatch(version) for version in supported)
+    ):
+        return None
+    return (
+        f"{provider} version {installed} is incompatible; supported versions: "
+        f"{', '.join(supported)}"
+    )
 
 
 class DomainError(Exception):

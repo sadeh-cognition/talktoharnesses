@@ -31,6 +31,46 @@ def test_provider_incompatible_uses_generic_message() -> None:
     assert "/home/user" not in body["message"]
 
 
+def test_provider_version_mismatch_includes_safe_versions() -> None:
+    response = domain_error_response(
+        DomainError(
+            ErrorCode.PROVIDER_INCOMPATIBLE,
+            "unknown grok release",
+            details={
+                "provider": "Grok",
+                "installed_version": "1.0.3 (1a29d5bc12) [stable]",
+                "supported_versions": ["1.0.0 (3cd0d0cbce) [stable]"],
+            },
+        )
+    )
+
+    assert json.loads(response.content) == {
+        "code": ErrorCode.PROVIDER_INCOMPATIBLE.value,
+        "message": (
+            "Grok version 1.0.3 (1a29d5bc12) [stable] is incompatible; "
+            "supported versions: 1.0.0 (3cd0d0cbce) [stable]"
+        ),
+    }
+
+
+def test_provider_version_mismatch_does_not_echo_untrusted_values() -> None:
+    response = domain_error_response(
+        DomainError(
+            ErrorCode.PROVIDER_INCOMPATIBLE,
+            "unknown release",
+            details={
+                "provider": "Grok",
+                "installed_version": "1.0.3; SECRET_TOKEN=sk-live",
+                "supported_versions": ["1.0.0"],
+            },
+        )
+    )
+
+    body = json.loads(response.content)
+    assert body["message"] == public_message(ErrorCode.PROVIDER_INCOMPATIBLE)
+    assert "SECRET" not in body["message"]
+
+
 def test_not_found_and_auth_remain_stable() -> None:
     missing = domain_error_response(DomainError(ErrorCode.NOT_FOUND, "conversation xyz missing"))
     assert missing.status_code == 404

@@ -19,6 +19,7 @@ from talktoharnesses.domain.events import (
     TurnOutcomeUnknownPayload,
 )
 from talktoharnesses.domain.models import ApprovalRequestPayload
+from talktoharnesses.providers.acp.schemas.base import is_allowlisted_session_update
 from talktoharnesses.providers.adapter import HarnessInteractionRequest
 from talktoharnesses.providers.grok.adapter import GrokAdapter
 from talktoharnesses.providers.grok.compatibility import load_grok_compatibility
@@ -81,6 +82,21 @@ def test_resync_mode_emits_no_events() -> None:
         }
     )
     assert events == []
+
+
+def test_current_mode_update_is_allowlisted_and_informational() -> None:
+    params = {
+        "sessionId": "s",
+        "update": {
+            "sessionUpdate": "current_mode_update",
+            "currentModeId": "plan",
+        },
+    }
+    assert is_allowlisted_session_update(params)
+
+    normalizer = GrokNormalizer()
+    normalizer.set_session("s")
+    assert normalizer.on_session_update(params) == []
 
 
 def test_tool_arguments_are_redacted_before_emission() -> None:
