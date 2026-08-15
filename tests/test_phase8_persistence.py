@@ -2,15 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from datetime import timedelta
-from importlib import import_module
-from typing import cast
 from uuid import uuid4
 
 import pytest
-from asgiref.sync import sync_to_async
-from django.apps import apps
 from tests.phase8_fixtures import NOW, PROMPT, binding, commit_turn, idle_state
 
 from talktoharnesses.application.handoff import HandoffMessage, HandoffTool
@@ -42,12 +37,6 @@ from talktoharnesses.domain.models import (
     Command,
     PendingInteraction,
     SwitchHarnessPayload,
-)
-
-# Migration modules are not importable by name (they start with a digit).
-backfill = cast(
-    Callable[[object, object], None],
-    import_module("talktoharnesses.django.migrations.0005_phase8_backfill").backfill,
 )
 
 
@@ -321,67 +310,6 @@ async def test_prune_cancels_expired_waiting_turn() -> None:
     assert loaded.active_turn is None
     assert loaded.interactions == {}
     assert loaded.conversation.title_derived is None
-
-
-@pytest.mark.django_db(transaction=True)
-@pytest.mark.asyncio
-async def test_backfill_recovers_links_written_by_the_runtime() -> None:
-    """The 0005 data migration derives what normal commits already write."""
-    persistence = DjangoPersistence()
-    state = idle_state()
-    await persistence.save_snapshot(state)
-    await commit_turn(
-        persistence, state, prompt=PROMPT, key="turn-1", now=NOW, assistant_text="answer"
-    )
-    expected_bindings = [
-        row
-        async for row in ConversationBindingRecord.objects.values_list(
-            "binding_id", "native_session_id", "is_active"
-        )
-    ]
-    expected_messages = [
-        row
-        async for row in MessageRecord.objects.order_by("order_index").values_list(
-            "message_id", "order_index"
-        )
-    ]
-    expected_events = [
-        row
-        async for row in ConversationEventRecord.objects.order_by("sequence").values_list(
-            "sequence", "turn_id"
-        )
-    ]
-    expected_commands = [
-        row async for row in CommandRecord.objects.values_list("command_id", "target_turn_id")
-    ]
-
-    await ConversationBindingRecord.objects.all().adelete()
-    await MessageRecord.objects.all().aupdate(order_index=0)
-    await ConversationEventRecord.objects.all().aupdate(turn_id=None)
-    await CommandRecord.objects.all().aupdate(target_turn_id=None)
-    await sync_to_async(backfill, thread_sensitive=True)(apps, None)
-
-    assert [
-        row
-        async for row in ConversationBindingRecord.objects.values_list(
-            "binding_id", "native_session_id", "is_active"
-        )
-    ] == expected_bindings
-    assert [
-        row
-        async for row in MessageRecord.objects.order_by("order_index").values_list(
-            "message_id", "order_index"
-        )
-    ] == expected_messages
-    assert [
-        row
-        async for row in ConversationEventRecord.objects.order_by("sequence").values_list(
-            "sequence", "turn_id"
-        )
-    ] == expected_events
-    assert [
-        row async for row in CommandRecord.objects.values_list("command_id", "target_turn_id")
-    ] == expected_commands
 
 
 @pytest.mark.django_db(transaction=True)

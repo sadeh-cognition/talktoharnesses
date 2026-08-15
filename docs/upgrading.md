@@ -3,6 +3,9 @@
 Conservative stop/migrate/start procedure for the first stable release. Mixed-version
 rolling upgrades are not supported. Backward migration compatibility is not promised.
 
+This release resets the package migration history. It supports only new databases;
+do not run it against a database created with an earlier migration chain.
+
 ## Stored configuration
 
 Harness configuration is validated strictly. Stored configurations that include
@@ -14,12 +17,13 @@ upgrading. There is no compatibility migration.
 1. Read the target [`SUPPORTED_HARNESSES.md`](../SUPPORTED_HARNESSES.md) and release notes.
    Verify provider versions and platform rows before changing the package.
 2. Back up the relational database and retain the currently installed artifact and
-   host configuration.
+   host configuration. Create a new empty database for this release; restore only
+   configuration that has been independently validated for the new installation.
 3. Stop all old service processes cleanly and verify they are no longer ready
    (`/api/v1/ready` fails closed or the process is gone).
 4. Install the exact new wheel with the same required extras from a
    lock/constraints-controlled host environment.
-5. Run migrations once before starting new workers:
+5. Run migrations against the new database once before starting new workers:
 
    ```bash
    python manage.py migrate

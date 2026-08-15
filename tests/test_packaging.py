@@ -19,15 +19,7 @@ COMPAT_FILES = (
     "opencode.json",
     "prime_agent.json",
 )
-MIGRATIONS = (
-    "0001_initial.py",
-    "0002_activityrecord_apitoken_harnessrecord_and_more.py",
-    "0003_phase6_approvals.py",
-    "0004_phase8_foundations.py",
-    "0005_phase8_backfill.py",
-    "0006_phase8_fts.py",
-    "0007_phase9_recovery.py",
-)
+MIGRATIONS = ("0001_initial.py",)
 REQUIRED_EXTRAS = (
     "django",
     "postgres",

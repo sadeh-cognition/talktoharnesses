@@ -5,7 +5,6 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from django.db import connection
 from tests.phase8_fixtures import NOW, commit_turn, idle_state
 
 from talktoharnesses.django.models import SearchDocument
@@ -167,57 +166,3 @@ async def test_fts_preserves_diacritics_as_literal_terms() -> None:
     assert [hit.conversation.id for hit in accented.items] == [state.conversation.id]
     unaccented = await persistence.search_conversations("owner", "cafe")
     assert unaccented.items == ()
-
-
-@pytest.mark.django_db(transaction=True)
-def test_fts_migration_reverse_preserves_search_document() -> None:
-    from django.core.management import call_command
-    from django.db import connection as db
-
-    persistence_setup = DjangoPersistence()
-    # Ensure a real aggregate exists so the FK content row is valid.
-    from asgiref.sync import async_to_sync
-
-    state = idle_state(title="retain me please")
-    async_to_sync(persistence_setup.save_snapshot)(state)
-    assert SearchDocument.objects.filter(conversation_id=state.conversation.id).exists()
-
-    call_command("migrate", "talktoharnesses", "0007_phase9_recovery", verbosity=0)
-    assert SearchDocument.objects.filter(conversation_id=state.conversation.id).exists()
-    if db.vendor == "sqlite":
-        with db.cursor() as cursor:
-            cursor.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' "
-                "AND name='talktoharnesses_search_document_fts'"
-            )
-            assert cursor.fetchone() is not None
-            cursor.execute(
-                "SELECT conversation_id FROM talktoharnesses_search_document_fts "
-                "WHERE talktoharnesses_search_document_fts MATCH %s",
-                ["retain"],
-            )
-            assert cursor.fetchone() is not None
-    elif db.vendor == "postgresql":
-        with db.cursor() as cursor:
-            cursor.execute(
-                "SELECT 1 FROM information_schema.columns "
-                "WHERE table_name=%s AND column_name='search_vector'",
-                ["talktoharnesses_search_document"],
-            )
-            assert cursor.fetchone() is not None
-    call_command("migrate", "talktoharnesses", "0005_phase8_backfill", verbosity=0)
-    if db.vendor == "sqlite":
-        with db.cursor() as cursor:
-            cursor.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' "
-                "AND name='talktoharnesses_search_document_fts'"
-            )
-            assert cursor.fetchone() is None
-    call_command("migrate", "talktoharnesses", "0008_phase11_search_retention", verbosity=0)
-    if connection.vendor == "sqlite":
-        with connection.cursor() as cursor:
-            cursor.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' "
-                "AND name='talktoharnesses_search_document_fts'"
-            )
-            assert cursor.fetchone() is not None
