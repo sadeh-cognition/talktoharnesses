@@ -62,7 +62,7 @@ def test_validate_jwt_settings_rejects_bad_keys(settings: Any) -> None:
     assert ok.token_ttl == timedelta(hours=1)
 
 
-@pytest.mark.django_db(transaction=True)
+@pytest.mark.django_db
 def test_issue_token_claims_and_digest_only(user: Any) -> None:
     proj = issue_token_sync(user)
     assert proj.token
@@ -91,7 +91,7 @@ def test_issue_token_claims_and_digest_only(user: Any) -> None:
     assert owner_id_for_user(user) == str(user.pk)
 
 
-@pytest.mark.django_db(transaction=True)
+@pytest.mark.django_db
 def test_second_issue_invalidates_first(user: Any) -> None:
     first = issue_token_sync(user)
     second = issue_token_sync(user)
@@ -102,7 +102,7 @@ def test_second_issue_invalidates_first(user: Any) -> None:
     assert auth_user.pk == user.pk
 
 
-@pytest.mark.django_db(transaction=True)
+@pytest.mark.django_db
 def test_authenticate_rejects_bad_tokens(user: Any) -> None:
     good = issue_token_sync(user)
     cases = [
@@ -120,7 +120,7 @@ def test_authenticate_rejects_bad_tokens(user: Any) -> None:
         assert exc.value.message == AUTH_FAILURE_MESSAGE
 
 
-@pytest.mark.django_db(transaction=True)
+@pytest.mark.django_db
 def test_wrong_algorithm_and_claims(user: Any, settings: Any) -> None:
     key = settings.TALKTOHARNESSES_JWT_SIGNING_KEY
     now = datetime.now(UTC)
@@ -173,7 +173,7 @@ def test_wrong_algorithm_and_claims(user: Any, settings: Any) -> None:
         authenticate_bearer_sync(f"Bearer {expired}")
 
 
-@pytest.mark.django_db(transaction=True)
+@pytest.mark.django_db
 def test_inactive_and_missing_user(user: Any, inactive_user: Any) -> None:
     with pytest.raises(AuthenticationFailed):
         issue_token_sync(inactive_user)
@@ -203,7 +203,7 @@ def test_inactive_and_missing_user(user: Any, inactive_user: Any) -> None:
         authenticate_bearer_sync(f"Bearer {forged}")
 
 
-@pytest.mark.django_db(transaction=True)
+@pytest.mark.django_db
 def test_rotate_and_revoke(user: Any) -> None:
     issued = issue_token_sync(user)
     header = f"Bearer {issued.token}"
@@ -222,7 +222,7 @@ def test_rotate_and_revoke(user: Any) -> None:
         revoke_token_sync(new_header)
 
 
-@pytest.mark.django_db(transaction=True)
+@pytest.mark.django_db
 def test_rotation_race_exactly_one_winner(user: Any) -> None:
     """Simulate concurrent rotation: only the first matching digest update wins."""
     issued = issue_token_sync(user)

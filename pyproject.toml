@@ -50,6 +50,7 @@ dev = [
     "pytest",
     "pytest-asyncio",
     "pytest-django",
+    "pytest-xdist",
     "hypothesis",
     "pytest-cov",
     "django-stubs",

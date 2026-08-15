@@ -74,6 +74,14 @@ class _NativeDedupeAdapter(Protocol):
     def export_seen(self) -> tuple[frozenset[str], frozenset[str]]: ...
 
 
+_PendingHarnessInput = tuple[
+    HarnessEvent,
+    datetime,
+    tuple[str, ...],
+    tuple[str, ...],
+]
+
+
 class CommandProcessor:
     """Claim loop + per-conversation delivery and event pump.
 
@@ -828,26 +836,71 @@ class CommandProcessor:
         if managed is None:
             return
 
+        pending_inputs: dict[UUID, _PendingHarnessInput] = {}
+        stale_runtime = False
+
         async def flush(
             base_version: int,
             state: ConversationState,
             events: Sequence[ConversationEvent],
             commands: Sequence[Command],
         ) -> Sequence[ConversationEvent]:
-            try:
-                committed = await self._persistence.commit_turn_batch(
-                    conversation_id,
-                    base_version,
-                    state,
-                    events,
-                    commands,
-                    **self._fence_kwargs(conversation_id),
-                )
-            except DomainError as exc:
-                if exc.code is ErrorCode.STALE_OWNER:
-                    await self._on_stale_owner(conversation_id)
-                    raise
-                raise
+            nonlocal stale_runtime
+            pending_events = tuple(events)
+            source_inputs: list[_PendingHarnessInput] | None = None
+
+            def forget_pending_inputs() -> None:
+                for pending_event in pending_events:
+                    pending_inputs.pop(pending_event.event_id, None)
+
+            while True:
+                try:
+                    committed = await self._persistence.commit_turn_batch(
+                        conversation_id,
+                        base_version,
+                        state,
+                        events,
+                        commands,
+                        **self._fence_kwargs(conversation_id),
+                    )
+                    break
+                except DomainError as exc:
+                    if exc.code is ErrorCode.STALE_OWNER:
+                        await self._on_stale_owner(conversation_id)
+                        raise
+                    if exc.code is not ErrorCode.OPTIMISTIC_CONFLICT:
+                        raise
+                    if source_inputs is None:
+                        source_inputs = []
+                        previous: _PendingHarnessInput | None = None
+                        for pending_event in pending_events:
+                            source = pending_inputs[pending_event.event_id]
+                            if source is not previous:
+                                source_inputs.append(source)
+                                previous = source
+                    state = await self._persistence.get_worker_snapshot(conversation_id)
+                    if not self._runtime_matches_binding(managed, state):
+                        stale_runtime = True
+                        forget_pending_inputs()
+                        await self._close_stale_runtime(conversation_id, managed)
+                        return ()
+                    base_version = state.conversation.version
+                    rebased_events: list[ConversationEvent] = []
+                    rebased_commands: list[Command] = []
+                    for source_event, now, native_ids, stream_offsets in source_inputs:
+                        result = dispatch_harness_event(
+                            state,
+                            source_event,
+                            now=now,
+                            native_ids=native_ids,
+                            stream_offsets=stream_offsets,
+                        )
+                        state = result.state
+                        rebased_events.extend(result.events)
+                        rebased_commands.extend(result.commands)
+                    events = rebased_events
+                    commands = rebased_commands
+            forget_pending_inputs()
             await checkpoint(self._fault_callback, FaultPoint.AFTER_EVENT_COMMIT)
             await self._safe_publish(committed, state=state)
             return committed
@@ -860,7 +913,6 @@ class CommandProcessor:
             managed.adapter.import_seen(snapshot.seen_native_ids, snapshot.seen_stream_offsets)
 
         stream_ended = False
-        stale_runtime = False
         try:
             async for event in managed.adapter.events(managed.session):
                 if not await self._on_harness_event(
@@ -868,6 +920,7 @@ class CommandProcessor:
                     event,
                     batcher,
                     managed_runtime=managed,
+                    pending_inputs=pending_inputs,
                 ):
                     stale_runtime = True
                     break
@@ -956,6 +1009,7 @@ class CommandProcessor:
         batcher: DeltaBatcher,
         *,
         managed_runtime: ManagedRuntime | None = None,
+        pending_inputs: dict[UUID, _PendingHarnessInput] | None = None,
     ) -> bool:
         async with self._lock_for(conversation_id):
             # Chain from pending batcher state when present so version stays coherent.
@@ -970,19 +1024,8 @@ class CommandProcessor:
 
             # A stale runtime must never recreate history for a replaced binding.
             managed = managed_runtime or self._runtime.get_runtime(conversation_id)
-            binding = authoritative.binding
-            if managed is not None and (
-                binding is None
-                or binding.requires_session_recreation
-                or managed.session.binding_id != binding.id
-                or managed.session.native_session_id != binding.native_session_id
-            ):
-                logger.warning(
-                    "discarding event from stale binding conversation=%s binding=%s",
-                    conversation_id,
-                    managed.session.binding_id,
-                )
-                await self._runtime.close_replaced_runtime(managed, reason="stale_binding")
+            if managed is not None and not self._runtime_matches_binding(managed, authoritative):
+                await self._close_stale_runtime(conversation_id, managed)
                 return False
 
             # Interaction requests force-flush through the broker (not the 50ms window).
@@ -1039,6 +1082,10 @@ class CommandProcessor:
                 await self._runtime.close(conversation_id, reason="protocol_error")
                 return True
 
+            if pending_inputs is not None:
+                source = (event, now, native_ids, stream_offsets)
+                for pending_event in result.events:
+                    pending_inputs[pending_event.event_id] = source
             await batcher.add(
                 base_version=base_version,
                 state=result.state,
@@ -1049,6 +1096,31 @@ class CommandProcessor:
             if result.terminal:
                 await self._wake_queued_submit(conversation_id)
             return True
+
+    @staticmethod
+    def _runtime_matches_binding(
+        managed: ManagedRuntime,
+        state: ConversationState,
+    ) -> bool:
+        binding = state.binding
+        return bool(
+            binding is not None
+            and not binding.requires_session_recreation
+            and managed.session.binding_id == binding.id
+            and managed.session.native_session_id == binding.native_session_id
+        )
+
+    async def _close_stale_runtime(
+        self,
+        conversation_id: UUID,
+        managed: ManagedRuntime,
+    ) -> None:
+        logger.warning(
+            "discarding event from stale binding conversation=%s binding=%s",
+            conversation_id,
+            managed.session.binding_id,
+        )
+        await self._runtime.close_replaced_runtime(managed, reason="stale_binding")
 
     async def _wake_queued_submit(self, conversation_id: UUID) -> None:
         """Re-accept a deferred queued submit so claim can start the next turn."""

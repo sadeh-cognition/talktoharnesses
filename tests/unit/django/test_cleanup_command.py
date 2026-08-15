@@ -12,7 +12,6 @@ from django.core.management import call_command
 from talktoharnesses.application.retention import CleanupCounts, DryRunCounts
 
 
-@pytest.mark.django_db(transaction=True)
 def test_talktoharnesses_cleanup_prints_counts() -> None:
     counts = CleanupCounts(
         purged_conversations=1,
@@ -35,7 +34,6 @@ def test_talktoharnesses_cleanup_prints_counts() -> None:
     assert "bindings_requiring_recreation=5" in text
 
 
-@pytest.mark.django_db(transaction=True)
 def test_talktoharnesses_cleanup_dry_run_prints_preview_counts() -> None:
     counts = DryRunCounts(
         soft_deleted_conversations=2,
@@ -59,7 +57,6 @@ def test_talktoharnesses_cleanup_dry_run_prints_preview_counts() -> None:
     assert "pruned_turns=" not in text
 
 
-@pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
 async def test_cleanup_composition_uses_default_registry() -> None:
     from talktoharnesses.django.management.commands import talktoharnesses_cleanup as cmd

@@ -163,7 +163,9 @@ uv sync --extra django --extra client
 uv run ruff check .
 uv run ruff format --check .
 uv run pyright
-uv run pytest --cov=talktoharnesses --cov-fail-under=91
+uv run pytest -n auto --maxprocesses=4 --dist=worksteal \
+  --ignore=tests/live --ignore=tests/performance \
+  --cov=talktoharnesses --cov-fail-under=91
 uv lock
 ```
 

@@ -6,6 +6,7 @@ import asyncio
 import json
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
+from json import dumps
 from typing import Any, cast
 from uuid import uuid4
 
@@ -167,13 +168,13 @@ class _HttpResponse:
 class _OpenStreamResponse(_HttpResponse):
     """SSE response that stays open until the consumer is cancelled."""
 
+    events: asyncio.Queue[bytes] = field(default_factory=lambda: asyncio.Queue[bytes]())
+
     async def aiter_bytes(self) -> AsyncIterator[bytes]:
         for chunk in self.chunks:
             yield chunk
         while True:
-            await asyncio.sleep(3600)
-            if False:  # pragma: no cover
-                yield b""
+            yield await self.events.get()
 
 
 class _FakeOpenCodeHttp:
@@ -181,6 +182,7 @@ class _FakeOpenCodeHttp:
         self.base_url = base_url
         self.session_id = f"oc-{uuid4()}"
         self.closed = False
+        self.events: asyncio.Queue[bytes] = asyncio.Queue()
 
     async def get(self, path: str) -> _HttpResponse:
         if path == "/global/health":
@@ -197,6 +199,12 @@ class _FakeOpenCodeHttp:
         del json
         if path == "/session":
             return _HttpResponse(200, {"id": self.session_id})
+        if path.endswith("/prompt_async"):
+            payload = {
+                "type": "session.status",
+                "properties": {"sessionID": self.session_id, "status": {"type": "idle"}},
+            }
+            self.events.put_nowait(f"data: {dumps(payload)}\n\n".encode())
         return _HttpResponse(200, {"id": "ok"})
 
     def stream(self, method: str, path: str) -> _HttpResponse:
@@ -207,6 +215,7 @@ class _FakeOpenCodeHttp:
         return _OpenStreamResponse(
             200,
             chunks=[b"data: " + payload + b"\n\n"],
+            events=self.events,
         )
 
     async def aclose(self) -> None:

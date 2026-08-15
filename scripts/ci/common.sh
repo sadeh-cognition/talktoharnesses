@@ -21,10 +21,14 @@ ci_static() {
 }
 
 ci_coverage() {
-  # Live suites are opt-in and excluded. Performance reference tests are part of
-  # the non-live suite and exercise persistence paths counted toward coverage.
+  # Live suites are opt-in. Performance has its own CI gate and its repeated
+  # warmups/samples should not delay the coverage gate.
   uv run pytest \
+    -n auto \
+    --maxprocesses=4 \
+    --dist=worksteal \
     --ignore=tests/live \
+    --ignore=tests/performance \
     --cov=talktoharnesses \
     --cov-report=term-missing \
     "$@" \
@@ -61,7 +65,7 @@ ci_runtime_os() {
 }
 
 ci_performance() {
-  uv run pytest tests/performance -q --tb=short
+  uv run pytest -n 0 tests/performance -q --tb=short
 }
 
 ci_build() {

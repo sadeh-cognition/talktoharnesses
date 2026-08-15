@@ -19,7 +19,7 @@ from tests.runtime.conftest import (
     make_state,
 )
 
-from talktoharnesses.domain import DomainError, ErrorCode, HarnessKind
+from talktoharnesses.domain import DomainError, ErrorCode, HarnessKind, submit_turn
 from talktoharnesses.domain.enums import ActivityStatus
 from talktoharnesses.domain.models import (
     BackgroundActivity,
@@ -216,6 +216,63 @@ async def test_idle_reap_preserves_native_id(
     assert persistence.launch_history[cid]
     types = {e.type for e in persistence.events[cid]}
     assert "session_reaped" in types
+
+
+@pytest.mark.asyncio
+async def test_idle_reap_does_not_close_runtime_after_concurrent_prompt(
+    persistence: MemoryPersistence,
+    registry: AdapterRegistry,
+    short_policy: RuntimePolicy,
+    owned_python: Path,
+    now: datetime,
+) -> None:
+    policy = short_policy.model_copy(update={"idle_reap": 60})
+    mgr = RuntimeManager(persistence, registry, policy=policy)
+    cid = conversation_id_of(persistence)
+    config = persistence.states[cid].binding.configuration  # type: ignore[union-attr]
+    await mgr.start(
+        conversation_id=cid,
+        owner_id="owner-1",
+        configuration=config,
+        argv=_argv("silence", "5"),
+        executable_path=str(owned_python),
+    )
+    managed = mgr.get_runtime(cid)
+    assert managed is not None
+
+    original_get_snapshot = persistence.get_snapshot
+    inject_prompt = True
+
+    async def get_snapshot_with_concurrent_prompt(
+        conversation_id: Any,
+        owner_id: str,
+    ) -> Any:
+        nonlocal inject_prompt
+        state = await original_get_snapshot(conversation_id, owner_id)
+        if inject_prompt:
+            inject_prompt = False
+            queued = submit_turn(
+                state,
+                prompt="arrived during reap",
+                idempotency_key="reap-race",
+                now=now,
+            )
+            await persistence.commit_turn_batch(
+                conversation_id,
+                state.conversation.version,
+                queued.state,
+                queued.events,
+                (queued.command,),  # type: ignore[arg-type]
+            )
+        return state
+
+    persistence.get_snapshot = get_snapshot_with_concurrent_prompt  # type: ignore[method-assign]
+
+    assert not await mgr.reap_if_eligible(cid)
+    assert mgr.get_runtime(cid) is managed
+    assert managed.adapter.closed is False  # type: ignore[attr-defined]
+    assert "session_reaped" not in {event.type for event in persistence.events[cid]}
+    await mgr.shutdown()
 
 
 @pytest.mark.asyncio
@@ -479,7 +536,8 @@ async def test_launch_snapshot_survives_adapter_start_timeout(
     store.seed(state)
     reg = AdapterRegistry()
     reg.register(HarnessKind.OPENCODE, lambda: FakeAdapter(hang_start=True))
-    mgr = RuntimeManager(store, reg, policy=short_policy)
+    policy = short_policy.model_copy(update={"start_resume_timeout": 0.05})
+    mgr = RuntimeManager(store, reg, policy=policy)
     with pytest.raises(DomainError) as exc_info:
         await mgr.start(
             conversation_id=state.conversation.id,

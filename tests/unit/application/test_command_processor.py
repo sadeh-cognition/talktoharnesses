@@ -7,7 +7,7 @@ from collections.abc import AsyncIterator, Iterable, Sequence
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from tests.runtime.memory_persistence import MemoryPersistence
@@ -27,6 +27,7 @@ from talktoharnesses.domain import (
     submit_turn,
 )
 from talktoharnesses.domain.events import (
+    AssistantMessageDeltaPayload,
     ConversationEvent,
     HarnessEvent,
     ProviderWarningPayload,
@@ -80,11 +81,63 @@ class _Adapter:
         return gen()
 
 
+class _ConflictingAdapter(_Adapter):
+    def __init__(
+        self,
+        persistence: MemoryPersistence,
+        conversation_id: UUID,
+        turn_id: UUID,
+        *,
+        invalidate_runtime: bool = False,
+    ) -> None:
+        super().__init__()
+        self._persistence = persistence
+        self._conversation_id = conversation_id
+        self._turn_id = turn_id
+        self._invalidate_runtime = invalidate_runtime
+
+    def events(self, session: HarnessSession) -> AsyncIterator[HarnessEvent]:
+        async def gen() -> AsyncIterator[HarnessEvent]:
+            yield AssistantMessageDeltaPayload(
+                turn_id=self._turn_id,
+                message_id=uuid4(),
+                sequence=1,
+                text="partial",
+            )
+            state = await self._persistence.get_worker_snapshot(self._conversation_id)
+            if self._invalidate_runtime:
+                assert state.binding is not None
+                state = state.model_copy(
+                    update={
+                        "binding": state.binding.model_copy(
+                            update={"requires_session_recreation": True}
+                        )
+                    }
+                )
+            next_state, events = append_events(
+                state,
+                datetime.now(UTC),
+                [ProviderWarningPayload(message="concurrent lifecycle commit")],
+            )
+            await self._persistence.commit_runtime_lifecycle(
+                self._conversation_id,
+                state.conversation.version,
+                next_state,
+                None,
+                None,
+                events,
+            )
+            await asyncio.sleep(0.1)
+
+        return gen()
+
+
 class _Runtime:
     def __init__(self, persistence: MemoryPersistence, adapter: _Adapter) -> None:
         self.persistence = persistence
         self.adapter = adapter
         self.managed = None
+        self.closed_replaced_reason: str | None = None
 
     def get_runtime(self, conversation_id: UUID):
         return self.managed
@@ -132,6 +185,11 @@ class _Runtime:
 
     async def close(self, conversation_id: UUID, *, reason: str) -> None:
         self.managed = None
+
+    async def close_replaced_runtime(self, managed: Any, *, reason: str) -> None:
+        self.closed_replaced_reason = reason
+        if self.managed is managed:
+            self.managed = None
 
 
 class _HangingRuntime:
@@ -212,6 +270,77 @@ async def test_lazy_start_delivers_coalesced_prompt_with_claim_and_dedupe_state(
     assert stored.attempts == 1
     assert final.seen_native_ids == frozenset({"native-1"})
     assert final.seen_stream_offsets == frozenset({"session-1:1"})
+
+
+@pytest.mark.asyncio
+async def test_event_batch_rebases_after_concurrent_lifecycle_commit() -> None:
+    now, state = _bound_state()
+    queued = submit_turn(state, prompt="active", idempotency_key="active", now=now)
+    started = start_turn(queued.state, now=now)
+    assert started.state.active_turn is not None
+
+    persistence = MemoryPersistence()
+    persistence.seed(started.state)
+    adapter = _ConflictingAdapter(
+        persistence,
+        state.conversation.id,
+        started.state.active_turn.id,
+    )
+    runtime = _Runtime(persistence, adapter)
+    assert state.binding is not None
+    runtime.managed = SimpleNamespace(
+        adapter=adapter,
+        session=HarnessSession(
+            conversation_id=state.conversation.id,
+            binding_id=state.binding.id,
+            kind=HarnessKind.GROK,
+        ),
+    )
+    publisher = _Publisher()
+    processor = CommandProcessor(persistence, publisher, runtime)  # type: ignore[arg-type]
+
+    await processor._event_pump(state.conversation.id)  # pyright: ignore[reportPrivateUsage]
+
+    event_types = [event.type for event in persistence.events[state.conversation.id]]
+    assert event_types == ["provider_warning", "assistant_message_delta"]
+    assert [event.type for event in publisher.events] == ["assistant_message_delta"]
+
+
+@pytest.mark.asyncio
+async def test_event_batch_discards_stale_runtime_after_rotation_conflict() -> None:
+    now, state = _bound_state()
+    queued = submit_turn(state, prompt="active", idempotency_key="active", now=now)
+    started = start_turn(queued.state, now=now)
+    assert started.state.active_turn is not None
+
+    persistence = MemoryPersistence()
+    persistence.seed(started.state)
+    adapter = _ConflictingAdapter(
+        persistence,
+        state.conversation.id,
+        started.state.active_turn.id,
+        invalidate_runtime=True,
+    )
+    runtime = _Runtime(persistence, adapter)
+    assert state.binding is not None
+    runtime.managed = SimpleNamespace(
+        adapter=adapter,
+        session=HarnessSession(
+            conversation_id=state.conversation.id,
+            binding_id=state.binding.id,
+            kind=HarnessKind.GROK,
+        ),
+    )
+    publisher = _Publisher()
+    processor = CommandProcessor(persistence, publisher, runtime)  # type: ignore[arg-type]
+
+    await processor._event_pump(state.conversation.id)  # pyright: ignore[reportPrivateUsage]
+
+    assert [event.type for event in persistence.events[state.conversation.id]] == [
+        "provider_warning"
+    ]
+    assert publisher.events == []
+    assert runtime.closed_replaced_reason == "stale_binding"
 
 
 @pytest.mark.asyncio

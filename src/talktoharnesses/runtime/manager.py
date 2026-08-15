@@ -124,6 +124,7 @@ class ManagedRuntime:
     worker_id: str | None = None
     fence: int | None = None
     tasks: list[asyncio.Task[None]] = field(default_factory=_empty_tasks)
+    closing: bool = False
     closed: bool = False
     terminal_persisted: bool = False
     stderr_truncation_persisted: bool = False
@@ -174,7 +175,10 @@ class RuntimeManager:
         return lock
 
     def get_runtime(self, conversation_id: UUID) -> ManagedRuntime | None:
-        return self._runtimes.get(conversation_id)
+        managed = self._runtimes.get(conversation_id)
+        if managed is None or managed.closing or managed.closed:
+            return None
+        return managed
 
     async def start(
         self,
@@ -1367,7 +1371,7 @@ class RuntimeManager:
         idle runtime still holds it, so a mismatch or pending recreation closes
         the runtime and forces a fresh start.
         """
-        managed = self._runtimes.get(conversation_id)
+        managed = self.get_runtime(conversation_id)
         if managed is None:
             return None
         binding = state.binding
@@ -1632,8 +1636,9 @@ class RuntimeManager:
         reason: str | None,
         session_action: str | None = "close",
     ) -> None:
-        if managed.closed:
+        if managed.closing or managed.closed:
             return
+        managed.closing = True
         try:
             await asyncio.wait_for(
                 managed.adapter.close(managed.session),
@@ -1661,6 +1666,28 @@ class RuntimeManager:
             )
             if not state.idle_reap_eligible:
                 return False
+
+            # Reserve the reap before closing resources. A prompt committed after
+            # the snapshot makes this write conflict and leaves the runtime live.
+            result = reap_session(state, now=self._clock(), reason="idle")
+            try:
+                await self._persistence.commit_runtime_lifecycle(
+                    conversation_id,
+                    state.conversation.version,
+                    result.state,
+                    None,
+                    None,
+                    result.events,
+                    worker_id=managed.worker_id,
+                    fence=managed.fence,
+                )
+            except DomainError as exc:
+                if exc.code is ErrorCode.OPTIMISTIC_CONFLICT:
+                    return False
+                raise
+            get_observability().observe_committed_events(result.events, state=result.state)
+            managed.closing = True
+
             # Close live resources; preserve native resume ID and launch history.
             with contextlib.suppress(Exception):
                 await asyncio.wait_for(
@@ -1669,7 +1696,7 @@ class RuntimeManager:
                 )
             if managed.process is not None:
                 await managed.process.close()
-            await self._persist_terminal(managed, session_action="reap", reason="idle")
+            await self._persist_terminal(managed, reason="idle")
             await self._teardown_runtime(managed, close_adapter=False)
             return True
 

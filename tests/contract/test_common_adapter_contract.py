@@ -125,13 +125,8 @@ async def test_probe_start_resume_submit_terminal_steer_interrupt_close_isolatio
 
     import asyncio
 
-    try:
-        await asyncio.wait_for(_drain_terminal(), timeout=2.0)
-    except TimeoutError:
-        saw_terminal = False
-    # OpenCode may race SSE status before begin_turn; other adapters must settle.
-    if kind is not HarnessKind.OPENCODE:
-        assert saw_terminal
+    await asyncio.wait_for(_drain_terminal(), timeout=2.0)
+    assert saw_terminal
 
     await adapter.interrupt(session)
     await adapter.interrupt(session)  # idempotent at orchestration boundary
