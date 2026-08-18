@@ -45,6 +45,12 @@ def test_match_1_0_4_release() -> None:
     ]
 
 
+def test_match_1_0_5_release() -> None:
+    release = match_release("grok 1.0.5 (5115b46bc9) [stable]", platform="linux")
+
+    assert release.id == "grok-1.0.5-5115b46bc9"
+
+
 def test_unknown_version_fails() -> None:
     with pytest.raises(DomainError) as exc:
         match_release("grok 9.9.9 (deadbeef) [stable]")

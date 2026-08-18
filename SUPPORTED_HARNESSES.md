@@ -15,6 +15,7 @@ Do not edit provider tables by hand; regenerate via
 | `grok-1.0.0-3cd0d0cbce` | 1.0.0 | `3cd0d0cbce` | v1 | linux, darwin, win32 | yes | yes | no | yes | no |
 | `grok-1.0.3-1a29d5bc12` | 1.0.3 | `1a29d5bc12` | v1 | linux | yes | yes | no | yes | no |
 | `grok-1.0.4-d846eb93d9` | 1.0.4 | `d846eb93d9` | v1 | linux | yes | yes | no | yes | no |
+| `grok-1.0.5-5115b46bc9` | 1.0.5 | `5115b46bc9` | v1 | linux | yes | yes | no | yes | no |
 
 ### Published create matrix
 
@@ -23,6 +24,7 @@ Do not edit provider tables by hand; regenerate via
 | `grok-1.0.0-3cd0d0cbce` | `linux` |
 | `grok-1.0.3-1a29d5bc12` | `linux` |
 | `grok-1.0.4-d846eb93d9` | `linux` |
+| `grok-1.0.5-5115b46bc9` | `linux` |
 
 ### Published resume matrix
 
@@ -31,6 +33,7 @@ Do not edit provider tables by hand; regenerate via
 | `grok-1.0.0-3cd0d0cbce` | `linux` |
 | `grok-1.0.3-1a29d5bc12` | `linux` |
 | `grok-1.0.4-d846eb93d9` | `linux` |
+| `grok-1.0.5-5115b46bc9` | `linux` |
 
 ### Published steer matrix
 
@@ -43,6 +46,7 @@ _No published steer combinations yet. Steer rows are added only after the opt-in
 | `grok-1.0.0-3cd0d0cbce` | `linux` |
 | `grok-1.0.3-1a29d5bc12` | `linux` |
 | `grok-1.0.4-d846eb93d9` | `linux` |
+| `grok-1.0.5-5115b46bc9` | `linux` |
 
 ### Published multi-interaction matrix
 
@@ -51,6 +55,7 @@ _No published steer combinations yet. Steer rows are added only after the opt-in
 | `grok-1.0.0-3cd0d0cbce` | `linux` |
 | `grok-1.0.3-1a29d5bc12` | `linux` |
 | `grok-1.0.4-d846eb93d9` | `linux` |
+| `grok-1.0.5-5115b46bc9` | `linux` |
 
 ### Published nested-activity matrix
 
