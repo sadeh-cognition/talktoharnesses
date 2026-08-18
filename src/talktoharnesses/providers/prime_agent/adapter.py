@@ -6,17 +6,20 @@ import asyncio
 import contextlib
 import json
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from typing import Any, Literal, cast
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from talktoharnesses.domain.enums import ErrorCode, HarnessKind
 from talktoharnesses.domain.errors import DomainError
-from talktoharnesses.domain.events import HarnessEvent
+from talktoharnesses.domain.events import HarnessEvent, InteractionRequestedPayload
 from talktoharnesses.domain.models import (
+    CanonicalQuestion,
     HarnessCapabilities,
     HarnessConfiguration,
     InteractionAnswer,
 )
+from talktoharnesses.domain.questions import canonical_answer_values, canonical_questions
 from talktoharnesses.providers.acp.framing import FrameDecodeError, iter_json_frames
 from talktoharnesses.providers.adapter import (
     HarnessInteractionRequest,
@@ -42,6 +45,19 @@ def _mapping(value: object) -> dict[str, Any]:
     return {str(key): item for key, item in cast(dict[object, object], value).items()}
 
 
+_HOST_QUESTION = "talktoharnesses/structured-question"
+_HOST_ANSWER = "talktoharnesses/structured-answer"
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingExtensionUi:
+    request_id: str
+    method: str
+    questions: tuple[CanonicalQuestion, ...]
+    response_values: dict[str, str]
+    structured: bool = False
+
+
 class PrimeAgentAdapter:
     """One supervised Prime Agent RPC client per conversation runtime."""
 
@@ -57,6 +73,7 @@ class PrimeAgentAdapter:
             asyncio.Queue()
         )
         self._pending: dict[str, asyncio.Future[dict[str, Any]]] = {}
+        self._pending_interactions: dict[UUID, _PendingExtensionUi] = {}
         self._router_task: asyncio.Task[None] | None = None
         self._write_lock = asyncio.Lock()
         self._closed = False
@@ -161,6 +178,9 @@ class PrimeAgentAdapter:
         self._require_session(session)
         if self._release is not None and self._release.capabilities.supports_interrupt:
             enforce_published_operation(self._release, mode="interrupt")
+        for interaction_id, pending in list(self._pending_interactions.items()):
+            await self._write_extension_response(pending.request_id, cancelled=True)
+            del self._pending_interactions[interaction_id]
         if self._normalizer.turn_active:
             await self._request("abort")
 
@@ -170,11 +190,34 @@ class PrimeAgentAdapter:
         answer: InteractionAnswer,
     ) -> None:
         self._require_session(session)
-        raise DomainError(
-            ErrorCode.INVALID_STATE,
-            "prime agent has no pending interaction",
-            details={"interaction_id": str(answer.interaction_id)},
-        )
+        pending = self._pending_interactions.get(answer.interaction_id)
+        if pending is None:
+            raise DomainError(
+                ErrorCode.INVALID_STATE,
+                "prime agent has no pending interaction",
+                details={"interaction_id": str(answer.interaction_id)},
+            )
+        values = canonical_answer_values(answer, pending.questions)
+        selected_values = values[pending.questions[0].id]
+        if pending.structured:
+            await self._write_extension_response(
+                pending.request_id,
+                value=json.dumps(
+                    {"type": _HOST_ANSWER, "values": selected_values},
+                    separators=(",", ":"),
+                ),
+            )
+        elif pending.method == "confirm":
+            await self._write_extension_response(
+                pending.request_id,
+                confirmed=selected_values[0] == "yes",
+            )
+        else:
+            await self._write_extension_response(
+                pending.request_id,
+                value=pending.response_values.get(selected_values[0], selected_values[0]),
+            )
+        del self._pending_interactions[answer.interaction_id]
 
     def events(
         self,
@@ -255,7 +298,7 @@ class PrimeAgentAdapter:
                         pending.set_result(frame)
                     continue
                 if frame.get("type") == "extension_ui_request":
-                    await self._dismiss_extension_ui(frame)
+                    await self._handle_extension_ui(frame)
                     continue
                 for event in self._normalizer.on_event(frame):
                     await self._event_q.put(event)
@@ -280,8 +323,7 @@ class PrimeAgentAdapter:
             if not future.done():
                 future.set_exception(DomainError(ErrorCode.PROTOCOL_ERROR, message))
 
-    async def _dismiss_extension_ui(self, request: dict[str, Any]) -> None:
-        """Cancel unsupported dialogs; fire-and-forget UI requests need no reply."""
+    async def _handle_extension_ui(self, request: dict[str, Any]) -> None:
         if request.get("method") not in {"select", "confirm", "input", "editor"}:
             return
         request_id = request.get("id")
@@ -290,9 +332,87 @@ class PrimeAgentAdapter:
                 ErrorCode.PROTOCOL_ERROR,
                 "prime agent extension UI request missing id",
             )
+        method = str(request["method"])
+        title = str(request.get("title") or request.get("message") or "Question").strip()
+        raw_options: list[dict[str, str]] = []
+        response_values: dict[str, str] = {}
+        structured = False
+        questions: tuple[CanonicalQuestion, ...] | None = None
+        if method == "select":
+            options = request.get("options")
+            if isinstance(options, list):
+                option_items = cast(list[object], options)
+                if len(option_items) == 1:
+                    try:
+                        envelope = _mapping(json.loads(str(option_items[0])))
+                    except json.JSONDecodeError:
+                        envelope = {}
+                    question = envelope.get("question")
+                    if envelope.get("type") == _HOST_QUESTION and isinstance(question, dict):
+                        questions = canonical_questions([_mapping(cast(object, question))])
+                        structured = True
+                for option in option_items:
+                    if structured:
+                        break
+                    native_value = str(option)
+                    try:
+                        decoded = _mapping(json.loads(native_value))
+                    except json.JSONDecodeError:
+                        decoded = {}
+                    if decoded.get("label") and decoded.get("value"):
+                        canonical_option = {
+                            "label": str(decoded["label"]),
+                            "value": str(decoded["value"]),
+                        }
+                        if decoded.get("description"):
+                            canonical_option["description"] = str(decoded["description"])
+                    else:
+                        canonical_option = {"label": native_value, "value": native_value}
+                    raw_options.append(canonical_option)
+                    response_values[canonical_option["value"]] = native_value
+        elif method == "confirm":
+            raw_options = [
+                {"label": "Yes", "value": "yes"},
+                {"label": "No", "value": "no"},
+            ]
+        if questions is None:
+            questions = canonical_questions(
+                [
+                    {
+                        "id": request_id,
+                        "question": str(request.get("message") or title),
+                        "header": title,
+                        "options": raw_options,
+                        "multiSelect": False,
+                    }
+                ]
+            )
+        interaction_id = uuid4()
+        self._pending_interactions[interaction_id] = _PendingExtensionUi(
+            request_id=request_id,
+            method=method,
+            questions=questions,
+            response_values=response_values,
+            structured=structured,
+        )
+        for event in self._normalizer.on_question(
+            questions,
+            interaction_id=interaction_id,
+        ):
+            if isinstance(event, InteractionRequestedPayload):
+                await self._event_q.put(
+                    HarnessInteractionRequest(
+                        payload=event,
+                        provider_correlation={"extension_ui_request_id": request_id},
+                    )
+                )
+            else:
+                await self._event_q.put(event)
+
+    async def _write_extension_response(self, request_id: str, **payload: object) -> None:
         assert self._process is not None
         frame = json.dumps(
-            {"type": "extension_ui_response", "id": request_id, "cancelled": True},
+            {"type": "extension_ui_response", "id": request_id, **payload},
             separators=(",", ":"),
         )
         async with self._write_lock:

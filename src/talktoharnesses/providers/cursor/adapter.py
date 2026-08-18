@@ -18,8 +18,14 @@ from talktoharnesses.domain.models import (
     HarnessConfiguration,
     InteractionAnswer,
 )
+from talktoharnesses.domain.questions import canonical_answer_values, canonical_questions
 from talktoharnesses.providers.acp.connection import AcpConnection
 from talktoharnesses.providers.acp.jsonrpc import JsonRpcRemoteError, ProtocolCloseError
+from talktoharnesses.providers.acp.pending import (
+    PendingAcpApproval,
+    PendingAcpInteraction,
+    PendingAcpQuestion,
+)
 from talktoharnesses.providers.acp.protocol import cursor_acp_protocol
 from talktoharnesses.providers.acp.schemas.cursor_ext import (
     CURSOR_CONTROL_NOTIFICATIONS,
@@ -83,7 +89,7 @@ class CursorAdapter:
             asyncio.Queue()
         )
         self._prompt_task: asyncio.Task[None] | None = None
-        self._pending_interactions: dict[UUID, tuple[str | int, list[dict[str, Any]]]] = {}
+        self._pending_interactions: dict[UUID, PendingAcpInteraction] = {}
         self._closed = False
         self._active_prompt_request_id: int | None = None
         self._config_options: tuple[CursorSelectConfigOption, ...] = ()
@@ -230,10 +236,10 @@ class CursorAdapter:
             enforce_published_operation(self._release, mode="interrupt")
         assert self._connection is not None
         # Cancel pending permission waiters as cancelled outcomes.
-        for interaction_id, (rpc_id, _options) in list(self._pending_interactions.items()):
+        for interaction_id, pending in list(self._pending_interactions.items()):
             with contextlib.suppress(Exception):
                 await self._connection.respond(
-                    rpc_id,
+                    pending.rpc_id,
                     {"outcome": {"outcome": "cancelled"}},
                 )
             del self._pending_interactions[interaction_id]
@@ -257,8 +263,26 @@ class CursorAdapter:
                 "no pending interaction for answer",
                 details={"interaction_id": str(answer.interaction_id)},
             )
-        rpc_id, options = pending
-        result = self._normalizer.map_approval_decision(answer.decision, options)
+        if isinstance(pending, PendingAcpQuestion):
+            values = canonical_answer_values(answer, pending.questions)
+            del self._pending_interactions[answer.interaction_id]
+            await self._connection.respond(
+                pending.rpc_id,
+                {
+                    "outcome": {
+                        "outcome": "answered",
+                        "answers": [
+                            {
+                                "questionId": question.id,
+                                "selectedOptionIds": values[question.id],
+                            }
+                            for question in pending.questions
+                        ],
+                    }
+                },
+            )
+            return
+        result = self._normalizer.map_approval_decision(answer.decision, pending.options)
         outcome = result.get("outcome")
         outcome_map = _map_dict(outcome)
         # Reject unmapped decisions before popping the native waiter.
@@ -273,7 +297,7 @@ class CursorAdapter:
                 details={"interaction_id": str(answer.interaction_id)},
             )
         del self._pending_interactions[answer.interaction_id]
-        await self._connection.respond(rpc_id, result)
+        await self._connection.respond(pending.rpc_id, result)
 
     def events(
         self,
@@ -323,6 +347,7 @@ class CursorAdapter:
                 "session/request_permission",
                 self._on_permission_request,
             )
+            conn.set_request_handler("cursor/ask_question", self._on_question_request)
             await conn.start()
             self._connection = conn
 
@@ -374,8 +399,7 @@ class CursorAdapter:
                 )
             thought_option = thought_options[0]
             if selection is not None and any(
-                parameter_id == thought_option.id
-                for parameter_id, _value in selection.parameters
+                parameter_id == thought_option.id for parameter_id, _value in selection.parameters
             ):
                 raise DomainError(
                     ErrorCode.PROVIDER_INCOMPATIBLE,
@@ -581,7 +605,10 @@ class CursorAdapter:
                 mapped = _map_dict(item)
                 if mapped:
                     options.append(mapped)
-        self._pending_interactions[interaction_id] = (request.id, options)
+        self._pending_interactions[interaction_id] = PendingAcpApproval(
+            rpc_id=request.id,
+            options=tuple(options),
+        )
         events = self._normalizer.on_permission_request(
             params,
             interaction_id=interaction_id,
@@ -605,6 +632,53 @@ class CursorAdapter:
             else:
                 await self._event_q.put(event)
         # Respond later via answer_interaction.
+        return None
+
+    async def _on_question_request(self, request: Any) -> Any | None:
+        params = _map_dict(request.params)
+        questions_obj = params.get("questions")
+        questions: list[dict[str, Any]] = []
+        if isinstance(questions_obj, list):
+            for item in cast(list[object], questions_obj):
+                raw = _map_dict(item)
+                options: list[dict[str, Any]] = []
+                options_obj = raw.get("options")
+                if isinstance(options_obj, list):
+                    for option_obj in cast(list[object], options_obj):
+                        option = _map_dict(option_obj)
+                        if option:
+                            options.append(
+                                {"label": option.get("label"), "value": option.get("id")}
+                            )
+                questions.append(
+                    {
+                        "id": raw.get("id"),
+                        "question": raw.get("prompt"),
+                        "header": params.get("title"),
+                        "options": options,
+                        "multiSelect": raw.get("allowMultiple"),
+                    }
+                )
+        canonical = canonical_questions(questions)
+        interaction_id = uuid4()
+        self._pending_interactions[interaction_id] = PendingAcpQuestion(
+            rpc_id=request.id,
+            questions=canonical,
+        )
+        events = self._normalizer.on_question(canonical, interaction_id=interaction_id)
+        for event in events:
+            if isinstance(event, InteractionRequestedPayload):
+                await self._event_q.put(
+                    HarnessInteractionRequest(
+                        payload=event,
+                        provider_correlation={
+                            "json_rpc_request_id": str(request.id),
+                            "tool_call_id": str(params.get("toolCallId") or ""),
+                        },
+                    )
+                )
+            else:
+                await self._event_q.put(event)
         return None
 
     async def _emit_many(self, events: list[HarnessEvent]) -> None:

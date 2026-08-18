@@ -210,7 +210,7 @@ async def test_inbound_request_without_handler_and_control_notification() -> Non
         outbound_methods=frozenset({"initialize"}),
         inbound_request_methods=frozenset({"session/request_permission"}),
         control_notifications=frozenset({"_x.ai/ping"}),
-        permission_request_validator=lambda params: True,
+        request_validators={},
         session_update_validator=lambda params: True,
     )
     conn = AcpConnection(proc, protocol=protocol)  # type: ignore[arg-type]

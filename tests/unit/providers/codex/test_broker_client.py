@@ -88,12 +88,12 @@ async def test_interrupt_and_close_cancel_pending(
     fut = loop.create_future()
     adapter._pending_interactions[uuid4()] = fut  # pyright: ignore[reportPrivateUsage]
     await adapter.interrupt(session)
-    assert fut.result() is ApprovalDecision.CANCEL
+    assert fut.result().decision is ApprovalDecision.CANCEL
 
     fut2 = loop.create_future()
     adapter._pending_interactions[uuid4()] = fut2  # pyright: ignore[reportPrivateUsage]
     await adapter.close(session)
-    assert fut2.result() is ApprovalDecision.CANCEL
+    assert fut2.result().decision is ApprovalDecision.CANCEL
 
 
 @pytest.mark.asyncio

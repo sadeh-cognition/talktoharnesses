@@ -21,6 +21,7 @@ from talktoharnesses.domain.models import (
     LaunchSnapshot,
 )
 from talktoharnesses.providers.acp.jsonrpc import JsonRpcRemoteError
+from talktoharnesses.providers.acp.pending import PendingAcpApproval
 from talktoharnesses.providers.adapter import (
     HarnessInteractionRequest,
     HarnessSession,
@@ -77,6 +78,72 @@ def _launch() -> LaunchSnapshot:
         model="composer-2.5[fast=false]",
         mode="ask",
     )
+
+
+@pytest.mark.asyncio
+async def test_cursor_ask_question_extension_blocks_until_canonical_answer() -> None:
+    adapter = CursorAdapter()
+    session = HarnessSession(
+        conversation_id=uuid4(),
+        binding_id=uuid4(),
+        kind=HarnessKind.CURSOR,
+        native_session_id="cursor-session",
+    )
+    adapter._session = session  # pyright: ignore[reportPrivateUsage]
+    adapter._normalizer.set_session("cursor-session")  # pyright: ignore[reportPrivateUsage]
+    adapter._normalizer.begin_turn(uuid4())  # pyright: ignore[reportPrivateUsage]
+    responses: list[tuple[object, object]] = []
+
+    async def respond(request_id: object, result: object) -> None:
+        responses.append((request_id, result))
+
+    adapter._connection = SimpleNamespace(respond=respond)  # type: ignore[assignment]
+    await adapter._on_question_request(  # pyright: ignore[reportPrivateUsage]
+        SimpleNamespace(
+            id="rpc-question",
+            params={
+                "toolCallId": "tool-question",
+                "title": "Preferences",
+                "questions": [
+                    {
+                        "id": "style",
+                        "prompt": "Choose styles",
+                        "options": [
+                            {"id": "brief", "label": "Brief"},
+                            {"id": "detailed", "label": "Detailed"},
+                        ],
+                        "allowMultiple": True,
+                    }
+                ],
+            },
+        )
+    )
+    interaction = adapter._event_q.get_nowait()  # pyright: ignore[reportPrivateUsage]
+    assert isinstance(interaction, HarnessInteractionRequest)
+    assert interaction.payload.request.questions[0].id == "style"  # type: ignore[attr-defined]
+    await adapter.answer_interaction(
+        session,
+        InteractionAnswer(
+            interaction_id=interaction.payload.interaction_id,
+            answers={"style": ["brief", "detailed"]},
+        ),
+    )
+    assert responses == [
+        (
+            "rpc-question",
+            {
+                "outcome": {
+                    "outcome": "answered",
+                    "answers": [
+                        {
+                            "questionId": "style",
+                            "selectedOptionIds": ["brief", "detailed"],
+                        }
+                    ],
+                }
+            },
+        )
+    ]
 
 
 async def _probed_adapter(
@@ -778,9 +845,9 @@ async def test_close_cancels_pending_and_watch_prompt_branches() -> None:
         notify=notify,
         close=close,
     )
-    adapter._pending_interactions[uuid4()] = (  # pyright: ignore[reportPrivateUsage]
-        "rpc-pending",
-        [{"optionId": "allow-once", "kind": "allow_once"}],
+    adapter._pending_interactions[uuid4()] = PendingAcpApproval(  # pyright: ignore[reportPrivateUsage]
+        rpc_id="rpc-pending",
+        options=({"optionId": "allow-once", "kind": "allow_once"},),
     )
 
     # Unmapped decision rejected before native respond.

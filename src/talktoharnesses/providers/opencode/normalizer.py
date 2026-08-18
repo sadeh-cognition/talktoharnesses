@@ -19,7 +19,11 @@ from talktoharnesses.domain.events import (
     TurnInterruptedPayload,
     TurnOutcomeUnknownPayload,
 )
-from talktoharnesses.domain.models import ApprovalRequestPayload, StructuredQuestionPayload
+from talktoharnesses.domain.models import (
+    ApprovalRequestPayload,
+    CanonicalQuestion,
+    StructuredQuestionPayload,
+)
 from talktoharnesses.providers.opencode.schemas import parse_server_event
 
 _NS = UUID("d0f6b2c4-5e7a-619c-bd3f-4a5b6c7d8e9f")
@@ -146,7 +150,7 @@ class OpenCodeNormalizer:
         self,
         *,
         question_id: str,
-        questions: list[dict[str, Any]],
+        questions: tuple[CanonicalQuestion, ...],
         interaction_id: UUID,
     ) -> list[HarnessEvent]:
         if self._active_turn_id is None:
@@ -157,7 +161,7 @@ class OpenCodeNormalizer:
                 turn_id=self._active_turn_id,
                 interaction_id=interaction_id,
                 kind=InteractionKind.STRUCTURED_QUESTION,
-                request=StructuredQuestionPayload(questions=tuple(questions)),
+                request=StructuredQuestionPayload(questions=questions),
             )
         ]
 

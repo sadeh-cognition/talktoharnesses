@@ -14,10 +14,12 @@ from talktoharnesses.domain.enums import ApprovalDecision, ErrorCode, HarnessKin
 from talktoharnesses.domain.errors import DomainError
 from talktoharnesses.domain.events import HarnessEvent, InteractionRequestedPayload
 from talktoharnesses.domain.models import (
+    CanonicalQuestion,
     HarnessCapabilities,
     HarnessConfiguration,
     InteractionAnswer,
 )
+from talktoharnesses.domain.questions import canonical_answer_values, canonical_questions
 from talktoharnesses.providers.adapter import (
     HarnessInteractionRequest,
     HarnessSession,
@@ -33,15 +35,16 @@ from talktoharnesses.providers.codex.compatibility import (
 from talktoharnesses.providers.codex.normalizer import CodexNormalizer
 from talktoharnesses.providers.codex.probe import probe_codex
 from talktoharnesses.providers.codex.schemas import (
-    parse_codex_approval_params,
+    CodexUserInputParams,
     parse_codex_notification,
+    parse_codex_server_request_params,
 )
 
 logger = logging.getLogger(__name__)
 
 ClientFactory = Callable[[], Any]
 
-_APPROVAL_TIMEOUT_S = 3600.0
+_INTERACTION_TIMEOUT_S = 3600.0
 
 
 def _codex_settings(mode: str | None) -> tuple[Any, Any]:
@@ -103,7 +106,7 @@ def _build_broker_async_codex(
     yolo: bool = False,
 ) -> Any:
     """Build AsyncCodex with public CodexClient and brokered or yolo approvals."""
-    from openai_codex import AsyncCodex, AsyncThread
+    from openai_codex import AsyncCodex, AsyncThread, CodexConfig
     from openai_codex.async_client import AsyncCodexClient
     from openai_codex.client import CodexClient
     from openai_codex.generated.v2_all import (
@@ -114,10 +117,7 @@ def _build_broker_async_codex(
     class BrokerAsyncCodexClient(AsyncCodexClient):
         def __init__(self, config: Any = None) -> None:
             # Public CodexClient accepts approval_handler; AsyncCodexClient does not forward it.
-            if yolo:
-                self._sync = CodexClient(config=config)
-            else:
-                self._sync = CodexClient(config=config, approval_handler=approval_handler)
+            self._sync = CodexClient(config=config, approval_handler=approval_handler)
 
     class BrokerAsyncCodex(AsyncCodex):
         def __init__(self, config: Any = None) -> None:
@@ -151,7 +151,9 @@ def _build_broker_async_codex(
             await self._client.thread_resume(thread_id, params)
             return AsyncThread(self, thread_id)
 
-    return BrokerAsyncCodex()
+    return BrokerAsyncCodex(
+        CodexConfig(config_overrides=("features.default_mode_request_user_input=true",))
+    )
 
 
 class CodexAdapter:
@@ -177,7 +179,7 @@ class CodexAdapter:
         self._event_q: asyncio.Queue[HarnessEvent | HarnessInteractionRequest | None] = (
             asyncio.Queue()
         )
-        self._pending_interactions: dict[UUID, asyncio.Future[ApprovalDecision | None]] = {}
+        self._pending_interactions: dict[UUID, asyncio.Future[InteractionAnswer]] = {}
         self._loop: asyncio.AbstractEventLoop | None = None
         self._closed = False
 
@@ -313,7 +315,12 @@ class CodexAdapter:
             enforce_published_operation(self._release, mode="interrupt")
         for interaction_id, future in list(self._pending_interactions.items()):
             if not future.done():
-                future.set_result(ApprovalDecision.CANCEL)
+                future.set_result(
+                    InteractionAnswer(
+                        interaction_id=interaction_id,
+                        decision=ApprovalDecision.CANCEL,
+                    )
+                )
             del self._pending_interactions[interaction_id]
         if self._turn_handle is not None:
             with contextlib.suppress(Exception):
@@ -334,7 +341,7 @@ class CodexAdapter:
             )
         del self._pending_interactions[answer.interaction_id]
         if not pending.done():
-            pending.set_result(answer.decision)
+            pending.set_result(answer)
 
     def events(
         self,
@@ -366,9 +373,14 @@ class CodexAdapter:
         self._stream_task = None
         self._turn_handle = None
         self._thread = None
-        for future in self._pending_interactions.values():
+        for interaction_id, future in self._pending_interactions.items():
             if not future.done():
-                future.set_result(ApprovalDecision.CANCEL)
+                future.set_result(
+                    InteractionAnswer(
+                        interaction_id=interaction_id,
+                        decision=ApprovalDecision.CANCEL,
+                    )
+                )
         self._pending_interactions.clear()
         if self._client is not None:
             close = getattr(self._client, "close", None)
@@ -396,7 +408,7 @@ class CodexAdapter:
         else:
             try:
                 client = _build_broker_async_codex(
-                    None if yolo else self._approval_handler,
+                    self._approval_handler,
                     yolo=yolo,
                 )
             except ImportError as exc:
@@ -423,7 +435,7 @@ class CodexAdapter:
         method: str,
         params: dict[str, Any] | None,
     ) -> dict[str, Any]:
-        """Public CodexClient approval callback; blocks the SDK reader until answered."""
+        """Broker a blocking Codex server request through the interaction API."""
         loop = self._loop
         if loop is None or loop.is_closed():
             raise DomainError(
@@ -434,22 +446,30 @@ class CodexAdapter:
 
         async def _emit_and_wait() -> dict[str, Any]:
             try:
-                parsed = parse_codex_approval_params(method, params)
+                parsed = parse_codex_server_request_params(method, params)
             except Exception as exc:
                 raise DomainError(
                     ErrorCode.UNSUPPORTED_NATIVE_EVENT,
-                    f"unsupported codex approval request: {exc}",
+                    f"unsupported codex server request: {exc}",
                 ) from exc
             interaction_id = uuid4()
-            future: asyncio.Future[ApprovalDecision | None] = (
-                asyncio.get_running_loop().create_future()
-            )
+            future: asyncio.Future[InteractionAnswer] = asyncio.get_running_loop().create_future()
             self._pending_interactions[interaction_id] = future
-            events = self._normalizer.on_approval_request(
-                method=method,
-                params=parsed,
-                interaction_id=interaction_id,
-            )
+            questions: tuple[CanonicalQuestion, ...] | None = None
+            if isinstance(parsed, CodexUserInputParams):
+                questions = canonical_questions(
+                    [item.model_dump(by_alias=True, exclude_none=True) for item in parsed.questions]
+                )
+                events = self._normalizer.on_user_input_request(
+                    questions=questions,
+                    interaction_id=interaction_id,
+                )
+            else:
+                events = self._normalizer.on_approval_request(
+                    method=method,
+                    params=parsed,
+                    interaction_id=interaction_id,
+                )
             for event in events:
                 if isinstance(event, InteractionRequestedPayload):
                     item_id = getattr(parsed, "item_id", None)
@@ -464,8 +484,10 @@ class CodexAdapter:
                     )
                 else:
                     await self._event_q.put(event)
-            decision = await future
-            return self._to_approval_result(method, decision)
+            answer = await future
+            if questions is not None:
+                return self._to_user_input_result(answer, questions)
+            return self._to_approval_result(method, answer.decision)
 
         def _done(task: concurrent.futures.Future[dict[str, Any]]) -> None:
             if bridge.done():
@@ -477,12 +499,24 @@ class CodexAdapter:
 
         asyncio.run_coroutine_threadsafe(_emit_and_wait(), loop).add_done_callback(_done)
         try:
-            return bridge.result(timeout=_APPROVAL_TIMEOUT_S)
+            return bridge.result(timeout=_INTERACTION_TIMEOUT_S)
         except concurrent.futures.TimeoutError as exc:
             raise DomainError(
                 ErrorCode.PROVIDER_INCOMPATIBLE,
-                "codex approval wait timed out",
+                "codex interaction wait timed out",
             ) from exc
+
+    def _to_user_input_result(
+        self,
+        answer: InteractionAnswer,
+        questions: tuple[CanonicalQuestion, ...],
+    ) -> dict[str, Any]:
+        values = canonical_answer_values(answer, questions)
+        return {
+            "answers": {
+                question_id: {"answers": selected} for question_id, selected in values.items()
+            }
+        }
 
     def _to_approval_result(
         self,

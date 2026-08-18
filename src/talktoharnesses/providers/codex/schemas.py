@@ -146,8 +146,42 @@ class CodexFileApprovalParams(BaseModel):
 
 CodexApprovalParams = CodexCommandApprovalParams | CodexFileApprovalParams
 
+
+class CodexUserInputOption(BaseModel):
+    model_config = _STRICT_ALIASED
+
+    label: str
+    description: str
+
+
+class CodexUserInputQuestion(BaseModel):
+    model_config = _STRICT_ALIASED
+
+    id: str
+    header: str
+    question: str
+    options: list[CodexUserInputOption] | None = None
+    is_other: bool = Field(default=False, alias="isOther")
+    is_secret: bool = Field(default=False, alias="isSecret")
+
+
+class CodexUserInputParams(BaseModel):
+    """Typed params for item/tool/requestUserInput."""
+
+    model_config = _STRICT_ALIASED
+
+    thread_id: str = Field(alias="threadId")
+    turn_id: str = Field(alias="turnId")
+    item_id: str = Field(alias="itemId")
+    questions: list[CodexUserInputQuestion]
+    auto_resolution_ms: int | None = Field(default=None, alias="autoResolutionMs")
+
+
+CodexServerRequestParams = CodexApprovalParams | CodexUserInputParams
+
 _COMMAND_APPROVAL_METHOD = "item/commandExecution/requestApproval"
 _FILE_APPROVAL_METHOD = "item/fileChange/requestApproval"
+_USER_INPUT_METHOD = "item/tool/requestUserInput"
 
 
 def parse_codex_approval_params(method: str, params: dict[str, Any] | None) -> CodexApprovalParams:
@@ -157,6 +191,15 @@ def parse_codex_approval_params(method: str, params: dict[str, Any] | None) -> C
     if method == _FILE_APPROVAL_METHOD:
         return CodexFileApprovalParams.model_validate(raw)
     raise ValueError(f"unsupported codex approval method: {method!r}")
+
+
+def parse_codex_server_request_params(
+    method: str,
+    params: dict[str, Any] | None,
+) -> CodexServerRequestParams:
+    if method == _USER_INPUT_METHOD:
+        return CodexUserInputParams.model_validate(params or {})
+    return parse_codex_approval_params(method, params)
 
 
 CodexNotification = (

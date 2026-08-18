@@ -29,6 +29,44 @@ class _Strict(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
 
+class CursorQuestionOption(_Strict):
+    id: str
+    label: str
+
+
+class CursorQuestion(_Strict):
+    id: str
+    prompt: str
+    options: tuple[CursorQuestionOption, ...]
+    allowMultiple: bool
+
+    @field_validator("options", mode="before")
+    @classmethod
+    def _coerce_options_tuple(cls, value: object) -> object:
+        return tuple(cast(list[object], value)) if isinstance(value, list) else value
+
+
+class CursorAskQuestionParams(_Strict):
+    toolCallId: str
+    title: str | None = None
+    questions: tuple[CursorQuestion, ...]
+
+    @field_validator("questions", mode="before")
+    @classmethod
+    def _coerce_questions_tuple(cls, value: object) -> object:
+        return tuple(cast(list[object], value)) if isinstance(value, list) else value
+
+
+def is_allowlisted_cursor_ask_question(params: dict[str, Any] | None) -> bool:
+    if params is None:
+        return False
+    try:
+        CursorAskQuestionParams.model_validate(params)
+    except ValidationError:
+        return False
+    return True
+
+
 class CursorConfigOptionValue(_Strict):
     """One advertised value for a Cursor select configuration option."""
 

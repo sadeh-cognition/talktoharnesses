@@ -31,6 +31,7 @@ from talktoharnesses.domain.events import (
 )
 from talktoharnesses.domain.models import (
     ApprovalRequestPayload,
+    CanonicalQuestion,
     CanonicalToolResult,
     StructuredQuestionPayload,
 )
@@ -139,7 +140,7 @@ class ClaudeNormalizer:
     def on_question_request(
         self,
         *,
-        questions: list[dict[str, Any]],
+        questions: tuple[CanonicalQuestion, ...],
         interaction_id: UUID,
     ) -> list[HarnessEvent]:
         if self._active_turn_id is None:
@@ -149,7 +150,7 @@ class ClaudeNormalizer:
                 turn_id=self._active_turn_id,
                 interaction_id=interaction_id,
                 kind=InteractionKind.STRUCTURED_QUESTION,
-                request=StructuredQuestionPayload(questions=tuple(questions)),
+                request=StructuredQuestionPayload(questions=questions),
             )
         ]
 

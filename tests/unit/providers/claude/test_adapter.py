@@ -531,7 +531,7 @@ async def test_yolo_routes_ask_user_question_and_auto_allows_other_tools() -> No
         session,
         InteractionAnswer(
             interaction_id=event.payload.interaction_id,
-            answers={"Pick a color": "Blue"},
+            answers={"question-1": ["Blue"]},
         ),
     )
     result = await asyncio.wait_for(task, timeout=1.0)

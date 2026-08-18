@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -31,7 +31,7 @@ class AcpProtocolConfig:
     inbound_request_methods: frozenset[str]
     control_notifications: frozenset[str]
     session_update_validator: ParamsValidator
-    permission_request_validator: ParamsValidator
+    request_validators: Mapping[str, ParamsValidator]
     control_notification_prefix: str | None = None
 
     def is_outbound_method(self, method: str) -> bool:
@@ -56,12 +56,19 @@ class AcpProtocolConfig:
 
 def grok_acp_protocol() -> AcpProtocolConfig:
     """Grok-pinned ACP allowlist (ACP v1 + grok_ext control notifications)."""
+    from talktoharnesses.providers.acp.schemas.grok_ext import (
+        is_allowlisted_ask_user_question,
+    )
+
     return AcpProtocolConfig(
         outbound_methods=ALLOWED_OUTBOUND_METHODS,
-        inbound_request_methods=ALLOWED_INBOUND_METHODS,
+        inbound_request_methods=ALLOWED_INBOUND_METHODS | {"_x.ai/ask_user_question"},
         control_notifications=GROK_CONTROL_NOTIFICATIONS,
         session_update_validator=is_allowlisted_session_update,
-        permission_request_validator=is_allowlisted_permission_request,
+        request_validators={
+            "session/request_permission": is_allowlisted_permission_request,
+            "_x.ai/ask_user_question": is_allowlisted_ask_user_question,
+        },
         # Grok emits additive `_x.ai/*` control notifications across CLI builds.
         control_notification_prefix="_x.ai/",
     )
@@ -71,14 +78,18 @@ def cursor_acp_protocol() -> AcpProtocolConfig:
     """Cursor-pinned ACP allowlist (ACP v1 + cursor_ext control notifications)."""
     from talktoharnesses.providers.acp.schemas.cursor_ext import (
         CURSOR_CONTROL_NOTIFICATIONS,
+        is_allowlisted_cursor_ask_question,
         is_allowlisted_cursor_permission_request,
         is_allowlisted_cursor_session_update,
     )
 
     return AcpProtocolConfig(
         outbound_methods=CURSOR_ALLOWED_OUTBOUND_METHODS,
-        inbound_request_methods=ALLOWED_INBOUND_METHODS,
+        inbound_request_methods=ALLOWED_INBOUND_METHODS | {"cursor/ask_question"},
         control_notifications=CURSOR_CONTROL_NOTIFICATIONS,
         session_update_validator=is_allowlisted_cursor_session_update,
-        permission_request_validator=is_allowlisted_cursor_permission_request,
+        request_validators={
+            "session/request_permission": is_allowlisted_cursor_permission_request,
+            "cursor/ask_question": is_allowlisted_cursor_ask_question,
+        },
     )

@@ -21,6 +21,7 @@ from talktoharnesses.domain.enums import ErrorCode, InteractionKind, Interaction
 from talktoharnesses.domain.errors import DomainError
 from talktoharnesses.domain.models import (
     ApprovalRequestPayload,
+    CanonicalQuestion,
     ConversationHarnessBinding,
     StructuredQuestionPayload,
 )
@@ -81,7 +82,7 @@ def test_interaction_from_row_question_branch() -> None:
         status=InteractionStatus.PENDING.value,
         turn_id=uuid4(),
         request=StructuredQuestionPayload(
-            questions=({"id": "q1", "prompt": "q?"},),
+            questions=(CanonicalQuestion(id="q1", question="q?"),),
         ).model_dump(mode="json"),
         draft=None,
         created_at=datetime.now(UTC),

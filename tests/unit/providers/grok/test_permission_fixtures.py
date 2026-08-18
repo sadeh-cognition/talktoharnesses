@@ -13,15 +13,77 @@ from talktoharnesses.domain.models import (
     ApprovalRequestPayload,
     CommandApprovalAction,
     FileApprovalAction,
+    InteractionAnswer,
     NetworkApprovalAction,
 )
-from talktoharnesses.providers.adapter import HarnessInteractionRequest
+from talktoharnesses.providers.acp.pending import PendingAcpApproval
+from talktoharnesses.providers.adapter import HarnessInteractionRequest, HarnessSession
 from talktoharnesses.providers.grok.adapter import GrokAdapter
 from talktoharnesses.providers.grok.normalizer import GrokNormalizer
 
 
 def _options(*kinds: str) -> list[dict[str, str]]:
     return [{"optionId": f"opt-{k}", "kind": k} for k in kinds]
+
+
+@pytest.mark.asyncio
+async def test_grok_ask_user_question_blocks_until_canonical_answer() -> None:
+    adapter = GrokAdapter()
+    session = HarnessSession(
+        conversation_id=uuid4(),
+        binding_id=uuid4(),
+        kind=adapter.kind,
+        native_session_id="s",
+    )
+    adapter._session = session  # pyright: ignore[reportPrivateUsage]
+    adapter._normalizer.set_session("s")  # pyright: ignore[reportPrivateUsage]
+    adapter._normalizer.begin_turn(uuid4())  # pyright: ignore[reportPrivateUsage]
+    responses: list[tuple[object, object]] = []
+
+    async def respond(request_id: object, result: object) -> None:
+        responses.append((request_id, result))
+
+    adapter._connection = SimpleNamespace(respond=respond)  # type: ignore[assignment]
+    await adapter._on_question_request(  # pyright: ignore[reportPrivateUsage]
+        SimpleNamespace(
+            id="rpc-question",
+            params={
+                "sessionId": "s",
+                "toolCallId": "tool-question",
+                "questions": [
+                    {
+                        "id": "style",
+                        "question": "Choose a style",
+                        "options": [
+                            {"label": "Brief", "description": "Short"},
+                            {"label": "Detailed", "description": "Long"},
+                        ],
+                        "multiSelect": False,
+                    }
+                ],
+                "mode": "default",
+            },
+        )
+    )
+    interaction = adapter._event_q.get_nowait()  # pyright: ignore[reportPrivateUsage]
+    assert isinstance(interaction, HarnessInteractionRequest)
+    await adapter.answer_interaction(
+        session,
+        InteractionAnswer(
+            interaction_id=interaction.payload.interaction_id,
+            answers={"style": ["Brief"]},
+        ),
+    )
+    assert responses == [
+        (
+            "rpc-question",
+            {
+                "outcome": "accepted",
+                "answers": {"Choose a style": "Brief"},
+                "annotations": {},
+            },
+        )
+    ]
 
 
 def test_permission_command_argv_action() -> None:
@@ -143,9 +205,9 @@ async def test_adapter_answer_rejects_unmapped_decision() -> None:
     adapter._normalizer.set_session("s")  # pyright: ignore[reportPrivateUsage]
     adapter._normalizer.begin_turn(uuid4())  # pyright: ignore[reportPrivateUsage]
     interaction_id = uuid4()
-    adapter._pending_interactions[interaction_id] = (  # pyright: ignore[reportPrivateUsage]
-        "rpc-1",
-        [{"optionId": "only-allow", "kind": "allow_once"}],
+    adapter._pending_interactions[interaction_id] = PendingAcpApproval(  # pyright: ignore[reportPrivateUsage]
+        rpc_id="rpc-1",
+        options=({"optionId": "only-allow", "kind": "allow_once"},),
     )
     from talktoharnesses.domain.errors import DomainError
     from talktoharnesses.domain.models import InteractionAnswer

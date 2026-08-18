@@ -19,6 +19,7 @@ from talktoharnesses.domain.events import (
     TurnOutcomeUnknownPayload,
 )
 from talktoharnesses.domain.models import ApprovalRequestPayload
+from talktoharnesses.providers.acp.pending import PendingAcpApproval
 from talktoharnesses.providers.acp.schemas.base import is_allowlisted_session_update
 from talktoharnesses.providers.adapter import HarnessInteractionRequest
 from talktoharnesses.providers.grok.adapter import GrokAdapter
@@ -267,9 +268,9 @@ async def test_grok_close_interrupt_and_watch_prompt_branches() -> None:
         respond=respond, notify=notify, close=close
     )
     pending_id = uuid4()
-    adapter._pending_interactions[pending_id] = (  # pyright: ignore[reportPrivateUsage]
-        "rpc-1",
-        [{"optionId": "allow-once", "kind": "allow_once"}],
+    adapter._pending_interactions[pending_id] = PendingAcpApproval(  # pyright: ignore[reportPrivateUsage]
+        rpc_id="rpc-1",
+        options=({"optionId": "allow-once", "kind": "allow_once"},),
     )
     await adapter.interrupt(session)
     assert responded and notified

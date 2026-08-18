@@ -7,7 +7,7 @@ from decimal import Decimal
 from typing import Annotated, Any, Generic, Literal, TypeVar, cast
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, Field, TypeAdapter, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator, model_validator
 
 from talktoharnesses.domain._base import FROZEN, UtcDateTime
 from talktoharnesses.domain.enums import (
@@ -427,11 +427,37 @@ class ApprovalRequestPayload(BaseModel):
     available_decisions: tuple[ApprovalDecision, ...] = ()
 
 
+class CanonicalQuestionOption(BaseModel):
+    model_config = FROZEN
+
+    label: str = Field(min_length=1)
+    value: str = Field(min_length=1)
+    description: str | None = None
+
+
+class CanonicalQuestion(BaseModel):
+    model_config = ConfigDict(
+        frozen=True,
+        extra="forbid",
+        strict=True,
+        populate_by_name=True,
+        serialize_by_alias=True,
+    )
+
+    id: str = Field(min_length=1)
+    question: str = Field(min_length=1)
+    options: tuple[CanonicalQuestionOption, ...] = ()
+    multi_select: bool = Field(default=False, alias="multiSelect")
+    header: str | None = None
+    allow_other: bool = Field(default=False, alias="allowOther")
+    is_secret: bool = Field(default=False, alias="isSecret")
+
+
 class StructuredQuestionPayload(BaseModel):
     model_config = FROZEN
 
     kind: Literal["structured_question"] = "structured_question"
-    questions: tuple[dict[str, Any], ...] = ()
+    questions: tuple[CanonicalQuestion, ...] = Field(min_length=1)
 
 
 InteractionRequestPayload = Annotated[

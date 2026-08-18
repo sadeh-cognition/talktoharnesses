@@ -18,8 +18,14 @@ from talktoharnesses.domain.models import (
     HarnessConfiguration,
     InteractionAnswer,
 )
+from talktoharnesses.domain.questions import canonical_answer_values, canonical_questions
 from talktoharnesses.providers.acp.connection import AcpConnection
 from talktoharnesses.providers.acp.jsonrpc import JsonRpcRemoteError, ProtocolCloseError
+from talktoharnesses.providers.acp.pending import (
+    PendingAcpApproval,
+    PendingAcpInteraction,
+    PendingAcpQuestion,
+)
 from talktoharnesses.providers.acp.protocol import grok_acp_protocol
 from talktoharnesses.providers.acp.schemas.base import ALLOWED_OUTBOUND_METHODS
 from talktoharnesses.providers.adapter import (
@@ -68,7 +74,7 @@ class GrokAdapter:
             asyncio.Queue()
         )
         self._prompt_task: asyncio.Task[None] | None = None
-        self._pending_interactions: dict[UUID, tuple[str | int, list[dict[str, Any]]]] = {}
+        self._pending_interactions: dict[UUID, PendingAcpInteraction] = {}
         self._closed = False
         self._active_prompt_request_id: int | None = None
 
@@ -192,11 +198,13 @@ class GrokAdapter:
             enforce_published_operation(self._release, mode="interrupt")
         assert self._connection is not None
         # Cancel pending permission waiters as cancelled outcomes.
-        for interaction_id, (rpc_id, _options) in list(self._pending_interactions.items()):
+        for interaction_id, pending in list(self._pending_interactions.items()):
             with contextlib.suppress(Exception):
                 await self._connection.respond(
-                    rpc_id,
-                    {"outcome": {"outcome": "cancelled"}},
+                    pending.rpc_id,
+                    {"outcome": {"outcome": "cancelled"}}
+                    if isinstance(pending, PendingAcpApproval)
+                    else {"outcome": "cancelled"},
                 )
             del self._pending_interactions[interaction_id]
         if session.native_session_id:
@@ -219,8 +227,20 @@ class GrokAdapter:
                 "no pending interaction for answer",
                 details={"interaction_id": str(answer.interaction_id)},
             )
-        rpc_id, options = pending
-        result = self._normalizer.map_approval_decision(answer.decision, options)
+        if isinstance(pending, PendingAcpQuestion):
+            values = canonical_answer_values(answer, pending.questions)
+            native_answers = {
+                question.question: (selected if question.multi_select else selected[0])
+                for question in pending.questions
+                for selected in [values[question.id]]
+            }
+            del self._pending_interactions[answer.interaction_id]
+            await self._connection.respond(
+                pending.rpc_id,
+                {"outcome": "accepted", "answers": native_answers, "annotations": {}},
+            )
+            return
+        result = self._normalizer.map_approval_decision(answer.decision, pending.options)
         outcome = result.get("outcome")
         outcome_map = _map_dict(outcome)
         # Reject unmapped decisions before popping the native waiter.
@@ -235,7 +255,7 @@ class GrokAdapter:
                 details={"interaction_id": str(answer.interaction_id)},
             )
         del self._pending_interactions[answer.interaction_id]
-        await self._connection.respond(rpc_id, result)
+        await self._connection.respond(pending.rpc_id, result)
 
     def events(
         self,
@@ -290,6 +310,10 @@ class GrokAdapter:
             conn.set_request_handler(
                 "session/request_permission",
                 self._on_permission_request,
+            )
+            conn.set_request_handler(
+                "_x.ai/ask_user_question",
+                self._on_question_request,
             )
             await conn.start()
             self._connection = conn
@@ -424,7 +448,10 @@ class GrokAdapter:
                 mapped = _map_dict(item)
                 if mapped:
                     options.append(mapped)
-        self._pending_interactions[interaction_id] = (request.id, options)
+        self._pending_interactions[interaction_id] = PendingAcpApproval(
+            rpc_id=request.id,
+            options=tuple(options),
+        )
         events = self._normalizer.on_permission_request(
             params,
             interaction_id=interaction_id,
@@ -448,6 +475,38 @@ class GrokAdapter:
             else:
                 await self._event_q.put(event)
         # Respond later via answer_interaction.
+        return None
+
+    async def _on_question_request(self, request: Any) -> Any | None:
+        params = _map_dict(request.params)
+        questions_obj = params.get("questions")
+        questions: list[dict[str, Any]] = []
+        if isinstance(questions_obj, list):
+            for item in cast(list[object], questions_obj):
+                mapped = _map_dict(item)
+                if mapped:
+                    questions.append(mapped)
+        canonical = canonical_questions(questions)
+        interaction_id = uuid4()
+        self._pending_interactions[interaction_id] = PendingAcpQuestion(
+            rpc_id=request.id,
+            questions=canonical,
+        )
+        events = self._normalizer.on_question(canonical, interaction_id=interaction_id)
+        correlation = {
+            "json_rpc_request_id": str(request.id),
+            "tool_call_id": str(params.get("toolCallId") or ""),
+        }
+        for event in events:
+            if isinstance(event, InteractionRequestedPayload):
+                await self._event_q.put(
+                    HarnessInteractionRequest(
+                        payload=event,
+                        provider_correlation=correlation,
+                    )
+                )
+            else:
+                await self._event_q.put(event)
         return None
 
     async def _emit_many(self, events: list[HarnessEvent]) -> None:

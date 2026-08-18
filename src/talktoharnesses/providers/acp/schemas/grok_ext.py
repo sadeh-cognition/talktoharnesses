@@ -20,3 +20,32 @@ class GrokControlNotification(_Strict):
 
     method: str
     params: dict[str, Any] = Field(default_factory=dict)
+
+
+class GrokQuestionOption(_Strict):
+    label: str
+    description: str | None = None
+
+
+class GrokQuestion(_Strict):
+    id: str | None = None
+    question: str
+    options: list[GrokQuestionOption]
+    multiSelect: bool | None = None
+
+
+class GrokAskUserQuestionParams(_Strict):
+    sessionId: str
+    toolCallId: str
+    questions: list[GrokQuestion]
+    mode: str | None = None
+
+
+def is_allowlisted_ask_user_question(params: dict[str, Any] | None) -> bool:
+    if params is None:
+        return False
+    try:
+        GrokAskUserQuestionParams.model_validate(params)
+    except ValueError:
+        return False
+    return True

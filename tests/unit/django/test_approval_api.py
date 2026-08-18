@@ -290,7 +290,7 @@ def test_draft_update_and_all_decisions_and_structured_question(
     import asyncio
     from uuid import UUID
 
-    from talktoharnesses.domain.models import StructuredQuestionPayload
+    from talktoharnesses.domain.models import CanonicalQuestion, StructuredQuestionPayload
 
     user_a, _ = two_users
     header = _auth(user_a)
@@ -388,7 +388,9 @@ def test_draft_update_and_all_decisions_and_structured_question(
             conversation_id=cid,
             turn_id=running.state.active_turn.id,  # type: ignore[union-attr]
             kind=InteractionKind.STRUCTURED_QUESTION,
-            request=StructuredQuestionPayload(questions=({"id": "q1", "prompt": "ok?"},)),
+            request=StructuredQuestionPayload(
+                questions=(CanonicalQuestion(id="q1", question="ok?"),)
+            ),
             created_at=_now(),
         )
         requested = request_interaction(running.state, interaction, now=_now())

@@ -17,6 +17,7 @@ from talktoharnesses.domain.models import (
     HarnessConfiguration,
     InteractionAnswer,
 )
+from talktoharnesses.domain.questions import canonical_answer_values, canonical_questions
 from talktoharnesses.providers.adapter import (
     HarnessInteractionRequest,
     HarnessSession,
@@ -309,9 +310,7 @@ class ClaudeAdapter:
                 "permission_mode": "bypassPermissions" if config.yolo else "default",
                 "cli_path": config.executable_path,
             }
-            options["can_use_tool"] = (
-                self._can_use_tool_yolo if config.yolo else self._can_use_tool
-            )
+            options["can_use_tool"] = self._can_use_tool_yolo if config.yolo else self._can_use_tool
             return options
         cli_path = None
         if config.executable_path:
@@ -452,20 +451,24 @@ class ClaudeAdapter:
             for item in cast(list[object], questions_obj):
                 if isinstance(item, dict):
                     questions.append(
-                        {
-                            str(key): value
-                            for key, value in cast(dict[object, object], item).items()
-                        }
+                        {str(key): value for key, value in cast(dict[object, object], item).items()}
                     )
+        canonical = canonical_questions(questions)
         events = self._normalizer.on_question_request(
-            questions=questions,
+            questions=canonical,
             interaction_id=interaction_id,
         )
         await self._publish_interaction(events, tool_name=tool_name)
         answer = await future
         if answer.decision is ApprovalDecision.CANCEL:
             return self._to_permission_result(ApprovalDecision.CANCEL)
-        updated_input = {**tool_input, "answers": answer.answers or {}}
+        values = canonical_answer_values(answer, canonical)
+        updated_input = {
+            **tool_input,
+            "answers": {
+                question.question: ", ".join(values[question.id]) for question in canonical
+            },
+        }
         return self._to_permission_result(
             ApprovalDecision.ALLOW_ONCE,
             updated_input=updated_input,

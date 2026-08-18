@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from talktoharnesses.domain.enums import ErrorCode
 from talktoharnesses.domain.errors import DomainError
 
@@ -9,7 +11,8 @@ THINKING_LEVELS = ("off", "minimal", "low", "medium", "high", "xhigh", "max")
 
 
 def build_prime_agent_argv(*, model: str | None, effort: str | None) -> tuple[str, ...]:
-    argv = ["--mode", "rpc"]
+    question_extension = Path(__file__).with_name("request_user_input.ts")
+    argv = ["--mode", "rpc", "--extension", str(question_extension)]
     if model:
         argv.extend(("--model", model))
     if effort:

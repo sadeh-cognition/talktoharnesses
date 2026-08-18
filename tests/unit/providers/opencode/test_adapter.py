@@ -553,7 +553,7 @@ async def test_question_asked_and_submit_model_ref(monkeypatch: pytest.MonkeyPat
         InteractionAnswer(
             interaction_id=item.payload.interaction_id,
             decision=ApprovalDecision.ALLOW_ONCE,
-            answers={"answers": [["a"]]},
+            answers={"question-1": ["a"]},
         ),
     )
     reply_posts = [body for path, body in client.posts if path.endswith("/question/q-1/reply")]
@@ -690,7 +690,7 @@ async def test_yolo_keeps_questions_interactive_and_answers_child_session_approv
         session,
         InteractionAnswer(
             interaction_id=item.payload.interaction_id,
-            answers={"answers": [["a"]]},
+            answers={"question-1": ["a"]},
         ),
     )
     assert any(path.endswith("/question/q-yolo/reply") for path, _ in client.posts)

@@ -70,6 +70,7 @@ from talktoharnesses.domain.models import (
     SwitchHarnessPayload,
     Turn,
 )
+from talktoharnesses.domain.questions import canonical_answer_values
 
 
 class ConversationState(BaseModel):
@@ -645,7 +646,7 @@ def _request_bytes(interaction: PendingInteraction) -> bytes:
 def _validate_interaction_answer(
     interaction: PendingInteraction,
     answer: InteractionAnswer,
-) -> None:
+) -> InteractionAnswer:
     if interaction.kind is InteractionKind.APPROVAL:
         if answer.answers is not None:
             raise DomainError(
@@ -665,7 +666,7 @@ def _validate_interaction_answer(
                 ErrorCode.INVALID_STATE,
                 f"decision {answer.decision.value} not available for this interaction",
             )
-        return
+        return answer
     if interaction.kind is InteractionKind.STRUCTURED_QUESTION:
         if answer.decision is not None:
             raise DomainError(
@@ -679,7 +680,9 @@ def _validate_interaction_answer(
             )
         if not isinstance(interaction.request, StructuredQuestionPayload):
             raise DomainError(ErrorCode.INVALID_STATE, "structured question payload mismatch")
-        return
+        return answer.model_copy(
+            update={"answers": canonical_answer_values(answer, interaction.request.questions)}
+        )
     raise DomainError(ErrorCode.INVALID_STATE, f"unknown interaction kind {interaction.kind}")
 
 
@@ -825,7 +828,7 @@ def submit_interaction_answer(
             "interaction already resolved",
         )
 
-    _validate_interaction_answer(interaction, answer)
+    answer = _validate_interaction_answer(interaction, answer)
 
     ts = _now(now)
     submitted = answer.model_copy(update={"is_draft": False, "submitted_at": ts})

@@ -8,6 +8,7 @@ import json
 import logging
 import socket
 from collections.abc import AsyncIterator, Callable
+from dataclasses import dataclass
 from typing import Any, Literal, cast
 from uuid import UUID, uuid4
 
@@ -16,10 +17,12 @@ from talktoharnesses.domain.enums import ApprovalDecision, ErrorCode, HarnessKin
 from talktoharnesses.domain.errors import DomainError
 from talktoharnesses.domain.events import HarnessEvent, InteractionRequestedPayload
 from talktoharnesses.domain.models import (
+    CanonicalQuestion,
     HarnessCapabilities,
     HarnessConfiguration,
     InteractionAnswer,
 )
+from talktoharnesses.domain.questions import canonical_answer_values, canonical_questions
 from talktoharnesses.providers.adapter import (
     HarnessInteractionRequest,
     HarnessSession,
@@ -41,6 +44,20 @@ from talktoharnesses.runtime.handle import ProcessHandle
 logger = logging.getLogger(__name__)
 
 HttpClientFactory = Callable[[str], Any]
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingPermission:
+    request_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingQuestion:
+    request_id: str
+    questions: tuple[CanonicalQuestion, ...]
+
+
+_PendingInteraction = _PendingPermission | _PendingQuestion
 
 
 def _allocate_loopback_port() -> int:
@@ -86,8 +103,7 @@ class OpenCodeAdapter:
         self._event_q: asyncio.Queue[HarnessEvent | HarnessInteractionRequest | None] = (
             asyncio.Queue()
         )
-        # Values are ("permission"|"question", native request id).
-        self._pending_interactions: dict[UUID, tuple[str, str]] = {}
+        self._pending_interactions: dict[UUID, _PendingInteraction] = {}
         self._closed = False
         self._connected_event = asyncio.Event()
         self._yolo = False
@@ -231,13 +247,13 @@ class OpenCodeAdapter:
             enforce_published_operation(self._release, mode="interrupt")
         assert self._client is not None
         for interaction_id in list(self._pending_interactions):
-            kind, request_id = self._pending_interactions.pop(interaction_id)
+            pending = self._pending_interactions.pop(interaction_id)
             with contextlib.suppress(Exception):
-                if kind == "question":
-                    await self._client.post(f"/question/{request_id}/reject")
+                if isinstance(pending, _PendingQuestion):
+                    await self._client.post(f"/question/{pending.request_id}/reject")
                 else:
                     await self._client.post(
-                        f"/session/{session.native_session_id}/permissions/{request_id}",
+                        f"/session/{session.native_session_id}/permissions/{pending.request_id}",
                         json={"response": "reject"},
                     )
         if session.native_session_id:
@@ -258,14 +274,12 @@ class OpenCodeAdapter:
                 "no pending interaction for answer",
                 details={"interaction_id": str(answer.interaction_id)},
             )
-        kind, request_id = pending
         del self._pending_interactions[answer.interaction_id]
-        if kind == "question":
-            answers = answer.answers.get("answers") if isinstance(answer.answers, dict) else None
-            if not isinstance(answers, list):
-                answers = [["yes"]]
+        if isinstance(pending, _PendingQuestion):
+            values = canonical_answer_values(answer, pending.questions)
+            answers = [values[question.id] for question in pending.questions]
             response = await self._client.post(
-                f"/question/{request_id}/reply",
+                f"/question/{pending.request_id}/reply",
                 json={"answers": answers},
             )
             self._raise_http(response, "POST question reply")
@@ -276,7 +290,7 @@ class OpenCodeAdapter:
         else:
             response_value = "reject"
         response = await self._client.post(
-            f"/session/{session.native_session_id}/permissions/{request_id}",
+            f"/session/{session.native_session_id}/permissions/{pending.request_id}",
             json={"response": response_value},
         )
         self._raise_http(response, "POST permissions")
@@ -504,7 +518,7 @@ class OpenCodeAdapter:
             self._raise_http(response, "POST /permission/{requestID}/reply")
             return
         interaction_id = uuid4()
-        self._pending_interactions[interaction_id] = ("permission", permission_id)
+        self._pending_interactions[interaction_id] = _PendingPermission(permission_id)
         tool = props.get("tool")
         tool_name = tool if isinstance(tool, str) else None
         if tool_name is None and isinstance(tool, dict):
@@ -539,10 +553,11 @@ class OpenCodeAdapter:
                         {str(k): v for k, v in cast(dict[object, object], item).items()}
                     )
         interaction_id = uuid4()
-        self._pending_interactions[interaction_id] = ("question", question_id)
+        canonical = canonical_questions(questions)
+        self._pending_interactions[interaction_id] = _PendingQuestion(question_id, canonical)
         events = self._normalizer.on_question(
             question_id=question_id,
-            questions=questions,
+            questions=canonical,
             interaction_id=interaction_id,
         )
         for event in events:

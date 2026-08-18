@@ -33,8 +33,10 @@ from talktoharnesses.domain.events import (
 )
 from talktoharnesses.domain.models import (
     ApprovalRequestPayload,
+    CanonicalQuestion,
     CommandApprovalAction,
     FileApprovalAction,
+    StructuredQuestionPayload,
 )
 from talktoharnesses.providers.codex.schemas import (
     CodexAgentMessageDelta,
@@ -180,6 +182,23 @@ class CodexNormalizer:
                         ApprovalDecision.CANCEL,
                     ),
                 ),
+            )
+        ]
+
+    def on_user_input_request(
+        self,
+        *,
+        questions: tuple[CanonicalQuestion, ...],
+        interaction_id: UUID,
+    ) -> list[HarnessEvent]:
+        if self._active_turn_id is None:
+            raise DomainError(ErrorCode.INVALID_STATE, "user input without active turn")
+        return [
+            InteractionRequestedPayload(
+                turn_id=self._active_turn_id,
+                interaction_id=interaction_id,
+                kind=InteractionKind.STRUCTURED_QUESTION,
+                request=StructuredQuestionPayload(questions=questions),
             )
         ]
 

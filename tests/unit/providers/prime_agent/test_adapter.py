@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -12,14 +13,91 @@ import pytest
 
 from talktoharnesses.domain.enums import HarnessKind
 from talktoharnesses.domain.errors import DomainError
-from talktoharnesses.domain.models import HarnessCapabilities, HarnessConfiguration, LaunchSnapshot
+from talktoharnesses.domain.models import (
+    HarnessCapabilities,
+    HarnessConfiguration,
+    InteractionAnswer,
+    LaunchSnapshot,
+    StructuredQuestionPayload,
+)
 from talktoharnesses.providers.adapter import (
+    HarnessInteractionRequest,
+    HarnessSession,
     ResumeSessionRequest,
     StartSessionRequest,
     SteerRequest,
     TurnRequest,
 )
 from talktoharnesses.providers.prime_agent.adapter import PrimeAgentAdapter
+
+
+@pytest.mark.asyncio
+async def test_prime_extension_question_preserves_multi_select() -> None:
+    writes: list[dict[str, Any]] = []
+
+    class Writer:
+        async def write_stdin(self, data: bytes) -> None:
+            writes.append(json.loads(data))
+
+    adapter = PrimeAgentAdapter()
+    session = HarnessSession(
+        conversation_id=uuid4(),
+        binding_id=uuid4(),
+        kind=HarnessKind.PRIME_AGENT,
+        native_session_id="prime-session",
+    )
+    adapter._session = session  # pyright: ignore[reportPrivateUsage]
+    adapter._process = Writer()  # type: ignore[assignment]
+    adapter._normalizer.begin_turn(uuid4())  # pyright: ignore[reportPrivateUsage]
+    await adapter._handle_extension_ui(  # pyright: ignore[reportPrivateUsage]
+        {
+            "type": "extension_ui_request",
+            "id": "ui-question",
+            "method": "select",
+            "title": "Choose a style",
+            "options": [
+                json.dumps(
+                    {
+                        "type": "talktoharnesses/structured-question",
+                        "question": {
+                            "id": "style",
+                            "question": "Choose styles",
+                            "options": [
+                                {"label": "Done", "value": "Done"},
+                                {
+                                    "label": "Detailed",
+                                    "value": "detailed",
+                                    "description": "More context",
+                                },
+                            ],
+                            "multiSelect": True,
+                        },
+                    }
+                ),
+            ],
+        }
+    )
+    interaction = adapter._event_q.get_nowait()  # pyright: ignore[reportPrivateUsage]
+    assert isinstance(interaction, HarnessInteractionRequest)
+    assert isinstance(interaction.payload.request, StructuredQuestionPayload)
+    question = interaction.payload.request.questions[0]
+    assert question.id == "style"
+    assert question.multi_select is True
+    assert question.options[0].value == "Done"
+    await adapter.answer_interaction(
+        session,
+        InteractionAnswer(
+            interaction_id=interaction.payload.interaction_id,
+            answers={"style": ["Done", "detailed"]},
+        ),
+    )
+    assert writes == [
+        {
+            "type": "extension_ui_response",
+            "id": "ui-question",
+            "value": ('{"type":"talktoharnesses/structured-answer","values":["Done","detailed"]}'),
+        }
+    ]
 
 
 class _FakePrimeProcess:
@@ -105,7 +183,11 @@ def _launch() -> LaunchSnapshot:
 
 def test_build_argv_uses_effort_and_rejects_legacy_mode() -> None:
     adapter = PrimeAgentAdapter()
-    assert adapter.build_argv(_config())[-2:] == ("--thinking", "high")
+    argv = adapter.build_argv(_config())
+    assert argv[-2:] == ("--thinking", "high")
+    extension_path = Path(argv[argv.index("--extension") + 1])
+    assert extension_path.name == "request_user_input.ts"
+    assert extension_path.is_file()
     with pytest.raises(DomainError, match="mode no longer represents thinking"):
         adapter.build_argv(_config().model_copy(update={"mode": "high", "effort": None}))
 
@@ -257,7 +339,7 @@ async def test_turn_model_override_is_restored(monkeypatch: pytest.MonkeyPatch) 
             TurnRequest(turn_id=uuid4(), prompt="finish", model=model),
         )
         async for event in adapter.events(session):
-            if event.type == "turn_completed":
+            if not isinstance(event, HarnessInteractionRequest) and event.type == "turn_completed":
                 return
 
     await submit_and_drain("openai/gpt-5.2")

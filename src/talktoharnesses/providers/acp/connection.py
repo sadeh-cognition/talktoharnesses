@@ -277,12 +277,13 @@ class AcpConnection:
                 f"inbound request method not allowlisted: {request.method}",
                 details={"method": request.method},
             )
-        if request.method == "session/request_permission":
+        validator = self._protocol.request_validators.get(request.method)
+        if validator is not None:
             params = request.params if isinstance(request.params, dict) else None
-            if not self._protocol.permission_request_validator(params):
+            if not validator(params):
                 raise DomainError(
                     ErrorCode.UNSUPPORTED_NATIVE_EVENT,
-                    "permission request shape not allowlisted",
+                    f"{request.method} request shape not allowlisted",
                     details={"params": request.params},
                 )
         handler = self._request_handlers.get(request.method)

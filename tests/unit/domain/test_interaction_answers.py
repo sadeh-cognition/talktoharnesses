@@ -13,6 +13,7 @@ from talktoharnesses.domain import (
     DomainError,
     ErrorCode,
     InteractionKind,
+    InteractionStatus,
     TransitionResult,
     TurnStatus,
     cancel_open_interactions,
@@ -24,6 +25,8 @@ from talktoharnesses.domain import (
 )
 from talktoharnesses.domain.models import (
     ApprovalRequestPayload,
+    CanonicalQuestion,
+    CanonicalQuestionOption,
     InteractionAnswer,
     PendingInteraction,
     StructuredQuestionPayload,
@@ -97,7 +100,9 @@ def test_structured_question_rejects_decision() -> None:
         conversation_id=r.state.conversation.id,
         turn_id=r.state.active_turn.id,  # type: ignore[union-attr]
         kind=InteractionKind.STRUCTURED_QUESTION,
-        request=StructuredQuestionPayload(questions=({"id": "q1"},)),
+        request=StructuredQuestionPayload(
+            questions=(CanonicalQuestion(id="q1", question="Proceed?"),)
+        ),
         created_at=_now(),
     )
     r = request_interaction(r.state, i, now=_now())
@@ -120,7 +125,9 @@ def test_structured_question_requires_answers() -> None:
         conversation_id=r.state.conversation.id,
         turn_id=r.state.active_turn.id,  # type: ignore[union-attr]
         kind=InteractionKind.STRUCTURED_QUESTION,
-        request=StructuredQuestionPayload(questions=({"id": "q1"},)),
+        request=StructuredQuestionPayload(
+            questions=(CanonicalQuestion(id="q1", question="Proceed?"),)
+        ),
         created_at=_now(),
     )
     r = request_interaction(r.state, i, now=_now())
@@ -139,7 +146,9 @@ def test_structured_question_submit_succeeds() -> None:
         conversation_id=r.state.conversation.id,
         turn_id=r.state.active_turn.id,  # type: ignore[union-attr]
         kind=InteractionKind.STRUCTURED_QUESTION,
-        request=StructuredQuestionPayload(questions=({"id": "q1"},)),
+        request=StructuredQuestionPayload(
+            questions=(CanonicalQuestion(id="q1", question="Proceed?"),)
+        ),
         created_at=_now(),
     )
     r = request_interaction(r.state, i, now=_now())
@@ -148,9 +157,39 @@ def test_structured_question_submit_succeeds() -> None:
         InteractionAnswer(interaction_id=i.id, answers={"q1": "yes"}),
         now=_now(),
     )
-    assert r.state.answers[i.id].answers == {"q1": "yes"}
+    assert r.state.answers[i.id].answers == {"q1": ["yes"]}
     assert r.state.active_turn is not None
     assert r.state.active_turn.status is TurnStatus.RUNNING
+
+
+def test_invalid_structured_answer_does_not_resolve_interaction() -> None:
+    r = _running()
+    i = PendingInteraction(
+        conversation_id=r.state.conversation.id,
+        turn_id=r.state.active_turn.id,  # type: ignore[union-attr]
+        kind=InteractionKind.STRUCTURED_QUESTION,
+        request=StructuredQuestionPayload(
+            questions=(
+                CanonicalQuestion(
+                    id="q1",
+                    question="Proceed?",
+                    options=(CanonicalQuestionOption(label="Yes", value="yes"),),
+                ),
+            ),
+        ),
+        created_at=_now(),
+    )
+    requested = request_interaction(r.state, i, now=_now())
+
+    with pytest.raises(DomainError, match="received an invalid option"):
+        submit_interaction_answer(
+            requested.state,
+            InteractionAnswer(interaction_id=i.id, answers={"q1": "no"}),
+            now=_now(),
+        )
+
+    assert requested.state.interactions[i.id].status is InteractionStatus.PENDING
+    assert i.id not in requested.state.answers
 
 
 def test_unavailable_decision_rejected() -> None:

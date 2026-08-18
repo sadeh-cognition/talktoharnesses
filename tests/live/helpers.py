@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
-from typing import Any, cast
+from typing import Any
 from uuid import UUID, uuid4
 
 from talktoharnesses import __version__
@@ -139,29 +139,16 @@ async def _answer_interaction(adapter: Any, session: HarnessSession, item: objec
         return False
     request = payload.request
     if getattr(request, "kind", None) == "structured_question":
-        answers: list[list[str]] = []
+        answers: dict[str, list[str]] = {}
         for question in getattr(request, "questions", ()) or ():
-            options: list[object] = []
-            if isinstance(question, dict):
-                q = cast(dict[str, Any], question)
-                maybe_options = q.get("options")
-                if isinstance(maybe_options, list):
-                    options.extend(cast(list[object], maybe_options))
-            label = "yes"
-            if options:
-                first = options[0]
-                if isinstance(first, dict):
-                    option_label = cast(dict[str, Any], first).get("label")
-                    if isinstance(option_label, str):
-                        label = option_label
-                elif isinstance(first, str):
-                    label = first
-            answers.append([label])
+            options = question.options
+            value = options[0].value if options else "yes"
+            answers[question.id] = [value]
         await adapter.answer_interaction(
             session,
             InteractionAnswer(
                 interaction_id=payload.interaction_id,
-                answers={"answers": answers or [["yes"]]},
+                answers=answers,
             ),
         )
     else:

@@ -37,8 +37,10 @@ from talktoharnesses.domain.events import (
 )
 from talktoharnesses.domain.models import (
     ApprovalRequestPayload,
+    CanonicalQuestion,
     CanonicalToolResult,
     PlanItem,
+    StructuredQuestionPayload,
 )
 
 # Namespace for deriving stable UUIDs from native IDs within a session.
@@ -103,6 +105,22 @@ class AcpSessionNormalizer:
         self._resync_mode = False
         self._close_open_streams_state_only()
         self._plan_id = None
+
+    def on_question(
+        self,
+        questions: tuple[CanonicalQuestion, ...],
+        *,
+        interaction_id: UUID,
+    ) -> list[HarnessEvent]:
+        turn_id = self._require_turn()
+        return [
+            InteractionRequestedPayload(
+                turn_id=turn_id,
+                interaction_id=interaction_id,
+                kind=InteractionKind.STRUCTURED_QUESTION,
+                request=StructuredQuestionPayload(questions=questions),
+            )
+        ]
 
     def end_turn_context(self) -> None:
         self._active_turn_id = None

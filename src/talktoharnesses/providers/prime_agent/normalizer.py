@@ -6,13 +6,14 @@ from collections.abc import Sequence
 from typing import Any, cast
 from uuid import UUID, uuid5
 
-from talktoharnesses.domain.enums import ErrorCode, ToolOutcome
+from talktoharnesses.domain.enums import ErrorCode, InteractionKind, ToolOutcome
 from talktoharnesses.domain.errors import DomainError
 from talktoharnesses.domain.events import (
     AssistantMessageCompletedPayload,
     AssistantMessageDeltaPayload,
     AssistantMessageStartedPayload,
     HarnessEvent,
+    InteractionRequestedPayload,
     ProviderWarningPayload,
     ReasoningCompletedPayload,
     ReasoningDeltaPayload,
@@ -26,6 +27,7 @@ from talktoharnesses.domain.events import (
     TurnInterruptedPayload,
     TurnOutcomeUnknownPayload,
 )
+from talktoharnesses.domain.models import CanonicalQuestion, StructuredQuestionPayload
 
 _NS = UUID("86eb9dd2-4c63-5c51-8ea4-e02f20cc742c")
 _IGNORED_EVENTS = {
@@ -139,6 +141,23 @@ class PrimeAgentNormalizer:
         self._active_turn_id = None
         self._pending_terminal = None
         return events
+
+    def on_question(
+        self,
+        questions: tuple[CanonicalQuestion, ...],
+        *,
+        interaction_id: UUID,
+    ) -> list[HarnessEvent]:
+        if self._active_turn_id is None:
+            raise DomainError(ErrorCode.INVALID_STATE, "question without active turn")
+        return [
+            InteractionRequestedPayload(
+                turn_id=self._active_turn_id,
+                interaction_id=interaction_id,
+                kind=InteractionKind.STRUCTURED_QUESTION,
+                request=StructuredQuestionPayload(questions=questions),
+            )
+        ]
 
     def _message_update(self, event: dict[str, Any]) -> list[HarnessEvent]:
         if self._active_turn_id is None:

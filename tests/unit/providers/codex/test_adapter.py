@@ -10,15 +10,26 @@ from uuid import uuid4
 
 import pytest
 
-from talktoharnesses.domain.enums import ApprovalDecision, ErrorCode, HarnessKind
+from talktoharnesses.domain.enums import (
+    ApprovalDecision,
+    ErrorCode,
+    HarnessKind,
+    InteractionKind,
+)
 from talktoharnesses.domain.errors import DomainError
-from talktoharnesses.domain.events import HarnessEvent, TurnCompletedPayload, TurnFailedPayload
+from talktoharnesses.domain.events import (
+    HarnessEvent,
+    InteractionRequestedPayload,
+    TurnCompletedPayload,
+    TurnFailedPayload,
+)
 from talktoharnesses.domain.models import (
     HarnessCapabilities,
     HarnessConfiguration,
     InteractionAnswer,
     LaunchSnapshot,
 )
+from talktoharnesses.domain.questions import canonical_questions
 from talktoharnesses.providers.adapter import (
     HarnessInteractionRequest,
     HarnessSession,
@@ -318,6 +329,71 @@ async def test_brokered_approval_handler_awaits_answer(
     await adapter.close(session)
 
 
+@pytest.mark.asyncio
+async def test_brokered_user_input_handler_awaits_structured_answers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_probe(config: HarnessConfiguration):
+        from talktoharnesses.providers.codex.compatibility import match_release
+
+        release = match_release(sdk_version="0.144.4", runtime_version="0.144.4", platform="linux")
+        return release.to_harness_capabilities(), release
+
+    monkeypatch.setattr("talktoharnesses.providers.codex.adapter.probe_codex", fake_probe)
+    adapter = CodexAdapter(client_factory=FakeCodex)
+    await adapter.probe(_config())
+    session = await adapter.start(
+        StartSessionRequest(
+            conversation_id=uuid4(),
+            binding_id=uuid4(),
+            configuration=_config(),
+            launch=_launch(),
+        )
+    )
+    adapter._normalizer.begin_turn(uuid4())  # pyright: ignore[reportPrivateUsage]
+
+    async def _answer_when_requested() -> None:
+        async for item in adapter.events(session):
+            if isinstance(item, HarnessInteractionRequest):
+                assert item.payload.kind is InteractionKind.STRUCTURED_QUESTION
+                await adapter.answer_interaction(
+                    session,
+                    InteractionAnswer(
+                        interaction_id=item.payload.interaction_id,
+                        answers={"scope": ["All surfaces"]},
+                    ),
+                )
+                return
+
+    answer_task = asyncio.create_task(_answer_when_requested())
+    result = await asyncio.to_thread(
+        adapter._approval_handler,  # pyright: ignore[reportPrivateUsage]
+        "item/tool/requestUserInput",
+        {
+            "threadId": session.native_session_id,
+            "turnId": "turn-1",
+            "itemId": "question-1",
+            "questions": [
+                {
+                    "id": "scope",
+                    "header": "Scope",
+                    "question": "Where should it appear?",
+                    "options": [{"label": "All surfaces", "description": "Show everywhere"}],
+                    "isOther": True,
+                    "isSecret": True,
+                }
+            ],
+        },
+    )
+    await asyncio.wait_for(answer_task, timeout=2.0)
+    assert result == {
+        "answers": {
+            "scope": {"answers": ["All surfaces"]},
+        }
+    }
+    await adapter.close(session)
+
+
 def test_normalizer_rejects_unknown_field() -> None:
     normalizer = CodexNormalizer()
     normalizer.set_session("t1")
@@ -594,7 +670,6 @@ def test_approval_decision_mapping() -> None:
 
 
 def test_normalizer_on_approval_request_command_and_file() -> None:
-    from talktoharnesses.domain.events import InteractionRequestedPayload
     from talktoharnesses.providers.codex.schemas import (
         CodexCommandApprovalParams,
         CodexFileApprovalParams,
@@ -619,6 +694,44 @@ def test_normalizer_on_approval_request_command_and_file() -> None:
         interaction_id=uuid4(),
     )
     assert any(isinstance(e, InteractionRequestedPayload) for e in file_events)
+
+
+def test_normalizer_on_user_input_request() -> None:
+    from talktoharnesses.providers.codex.schemas import CodexUserInputParams
+
+    normalizer = CodexNormalizer()
+    normalizer.set_session("t1")
+    normalizer.begin_turn(uuid4())
+    params = CodexUserInputParams.model_validate(
+        {
+            "threadId": "t1",
+            "turnId": "turn-1",
+            "itemId": "question-1",
+            "questions": [
+                {
+                    "id": "scope",
+                    "header": "Scope",
+                    "question": "Where should it appear?",
+                    "options": [{"label": "All surfaces", "description": "Show everywhere"}],
+                    "isOther": True,
+                    "isSecret": True,
+                }
+            ],
+        }
+    )
+    questions = canonical_questions(
+        [question.model_dump(by_alias=True, exclude_none=True) for question in params.questions]
+    )
+    events = normalizer.on_user_input_request(
+        questions=questions,
+        interaction_id=uuid4(),
+    )
+    event = events[0]
+    assert isinstance(event, InteractionRequestedPayload)
+    assert event.kind is InteractionKind.STRUCTURED_QUESTION
+    assert event.request.questions[0].id == "scope"  # type: ignore[attr-defined]
+    assert event.request.questions[0].allow_other is True  # type: ignore[attr-defined]
+    assert event.request.questions[0].is_secret is True  # type: ignore[attr-defined]
 
 
 @pytest.mark.asyncio
@@ -724,6 +837,10 @@ async def test_build_broker_async_codex_thread_start_and_resume(
         return {"decision": "accept"}
 
     broker = adapter_mod._build_broker_async_codex(handler)  # pyright: ignore[reportPrivateUsage]
+
+    assert broker._client._sync.config.config_overrides == (  # type: ignore[attr-defined]
+        "features.default_mode_request_user_input=true",
+    )
 
     async def _ensure() -> None:
         return None
