@@ -44,9 +44,6 @@ logger = logging.getLogger(__name__)
 
 ClientFactory = Callable[[], Any]
 
-_INTERACTION_TIMEOUT_S = 3600.0
-
-
 def _codex_settings(mode: str | None) -> tuple[Any, Any]:
     """Map finite canonical modes to tested Sandbox values."""
     try:
@@ -498,13 +495,7 @@ class CodexAdapter:
                 bridge.set_exception(exc)
 
         asyncio.run_coroutine_threadsafe(_emit_and_wait(), loop).add_done_callback(_done)
-        try:
-            return bridge.result(timeout=_INTERACTION_TIMEOUT_S)
-        except concurrent.futures.TimeoutError as exc:
-            raise DomainError(
-                ErrorCode.PROVIDER_INCOMPATIBLE,
-                "codex interaction wait timed out",
-            ) from exc
+        return bridge.result()
 
     def _to_user_input_result(
         self,
