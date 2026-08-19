@@ -334,6 +334,42 @@ async def test_token_omitted_and_supplied(handler: RecordingHandler) -> None:
             assert handler.requests[1].headers["Authorization"] == "Bearer secret"
 
 
+@pytest.mark.asyncio
+async def test_per_request_timeout_override_and_inherit() -> None:
+    recorded: list[Any] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"status": "ok"},
+            headers={"content-type": "application/json"},
+            request=request,
+        )
+
+    transport = httpx.MockTransport(handler)
+    real_cls = httpx.AsyncClient
+
+    def factory(*args: Any, **kwargs: Any) -> httpx.AsyncClient:
+        kwargs["transport"] = transport
+        client = real_cls(*args, **kwargs)
+        original_request = client.request
+
+        async def request(method: str, url: httpx.URL | str, **kw: Any) -> httpx.Response:
+            recorded.append(kw.get("timeout"))
+            return await original_request(method, url, **kw)
+
+        client.request = request  # type: ignore[method-assign]
+        return client
+
+    with patch("talktoharnesses.client.httpx.AsyncClient", side_effect=factory):
+        async with AsyncTalkToHarnessesClient(_BASE, timeout=12.0) as client:
+            await client.health()
+            await client.health(timeout=None)
+            await client.health(timeout=1.5)
+
+    assert recorded == [12.0, None, 1.5]
+
+
 # ---------------------------------------------------------------------------
 # Errors
 # ---------------------------------------------------------------------------
@@ -1216,6 +1252,65 @@ async def test_sse_timeout_none_and_midstream_transport_error() -> None:
 
     assert [item.sequence for item in items] == [1, 2]
     assert sleeps == [1.0]
+
+
+@pytest.mark.asyncio
+async def test_sse_per_request_timeout_override() -> None:
+    recorded: list[Any] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _sse_response(
+            request,
+            [
+                _frame(
+                    event="conversation_metadata_changed",
+                    data=_deletion_event(1).model_dump_json(),
+                    event_id=1,
+                )
+            ],
+        )
+
+    transport = httpx.MockTransport(handler)
+    real_cls = httpx.AsyncClient
+
+    def factory(*args: Any, **kwargs: Any) -> httpx.AsyncClient:
+        kwargs["transport"] = transport
+        client = real_cls(*args, **kwargs)
+        original_stream = client.stream
+
+        def stream(method: str, url: httpx.URL | str, **kw: Any) -> Any:
+            recorded.append(kw.get("timeout"))
+            return original_stream(method, url, **kw)
+
+        client.stream = stream  # type: ignore[method-assign]
+        return client
+
+    with patch("talktoharnesses.client.httpx.AsyncClient", side_effect=factory):
+        async with AsyncTalkToHarnessesClient(_BASE, token="tok-a", timeout=12.0) as client:
+            async for _item in client.stream_conversation_events(_CONV_ID):
+                pass
+            async for _item in client.stream_conversation_events(_CONV_ID, timeout=None):
+                pass
+            async for _item in client.stream_conversation_events(_CONV_ID, timeout=2.0):
+                pass
+
+    assert len(recorded) == 3
+    inherited, disabled, override = recorded
+    assert isinstance(inherited, httpx.Timeout)
+    assert inherited.connect == 12.0
+    assert inherited.write == 12.0
+    assert inherited.pool == 12.0
+    assert inherited.read is None
+    assert isinstance(disabled, httpx.Timeout)
+    assert disabled.connect is None
+    assert disabled.write is None
+    assert disabled.pool is None
+    assert disabled.read is None
+    assert isinstance(override, httpx.Timeout)
+    assert override.connect == 2.0
+    assert override.write == 2.0
+    assert override.pool == 2.0
+    assert override.read is None
 
 
 @pytest.mark.asyncio

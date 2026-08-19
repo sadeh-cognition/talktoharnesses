@@ -16,6 +16,7 @@ from talktoharnesses.domain import (
 )
 from talktoharnesses.domain.events import (
     ConversationMetadataChangedPayload,
+    CostUpdatedPayload,
     TurnCompletedPayload,
     TurnStartedPayload,
 )
@@ -43,6 +44,20 @@ def test_known_payload_round_trip() -> None:
     parsed = event_payload_adapter.validate_json(payload.model_dump_json())
     assert isinstance(parsed, TurnStartedPayload)
     assert parsed.turn_id == turn_id
+
+
+def test_cost_payload_round_trips_currency_and_accepts_legacy_wire() -> None:
+    qualified = event_payload_adapter.validate_python(
+        {"type": "cost_updated", "cost": "0.0123", "currency": "USD"}
+    )
+    legacy = event_payload_adapter.validate_python(
+        {"type": "cost_updated", "cost": "0.0123"}
+    )
+
+    assert isinstance(qualified, CostUpdatedPayload)
+    assert qualified.currency == "USD"
+    assert isinstance(legacy, CostUpdatedPayload)
+    assert legacy.currency is None
 
 
 def test_envelope_sequence_and_type() -> None:

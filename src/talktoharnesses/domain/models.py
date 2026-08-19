@@ -693,6 +693,7 @@ class UsageRecord(BaseModel):
     total_tokens: int | None = None
     cached_input_tokens: int | None = None
     cost: Decimal | None = None
+    currency: str | None = None
 
 
 # ---------------------------------------------------------------------------

@@ -88,6 +88,14 @@ _BACKOFF_CAP_S = 30.0
 _BACKOFF_INITIAL_S = 1.0
 
 
+class _UnsetType:
+    __slots__ = ()
+
+
+_UNSET = _UnsetType()
+_Timeout: TypeAlias = float | None | _UnsetType
+
+
 class APIError(Exception):
     """Typed failure for non-success HTTP responses from the API."""
 
@@ -166,6 +174,11 @@ class AsyncTalkToHarnessesClient:
             headers.update(extra)
         return headers
 
+    def _resolved_timeout(self, timeout: _Timeout) -> float | None:
+        if isinstance(timeout, _UnsetType):
+            return self._timeout
+        return timeout
+
     async def _request(
         self,
         method: str,
@@ -175,6 +188,7 @@ class AsyncTalkToHarnessesClient:
         params: Mapping[str, str | int | bool | None] | None = None,
         json: Any | None = None,
         headers: Mapping[str, str] | None = None,
+        timeout: _Timeout = _UNSET,
     ) -> httpx.Response:
         accepted_set = {accepted} if isinstance(accepted, int) else set(accepted)
         query: dict[str, str | int | bool] | None = None
@@ -187,6 +201,7 @@ class AsyncTalkToHarnessesClient:
             params=query,
             json=json,
             headers=self._request_headers(extra=headers),
+            timeout=self._resolved_timeout(timeout),
         )
         if response.status_code not in accepted_set:
             raise APIError.from_response(response)
@@ -200,22 +215,22 @@ class AsyncTalkToHarnessesClient:
     # System and authentication
     # ------------------------------------------------------------------
 
-    async def health(self) -> dict[str, str]:
-        response = await self._request("GET", "health", accepted=200)
+    async def health(self, *, timeout: _Timeout = _UNSET) -> dict[str, str]:
+        response = await self._request("GET", "health", accepted=200, timeout=timeout)
         return _HEALTH.validate_json(response.content)
 
-    async def ready(self) -> ReadinessProjection:
-        response = await self._request("GET", "ready", accepted=(200, 503))
+    async def ready(self, *, timeout: _Timeout = _UNSET) -> ReadinessProjection:
+        response = await self._request("GET", "ready", accepted=(200, 503), timeout=timeout)
         return self._parse_model(ReadinessProjection, response)
 
-    async def rotate_token(self) -> TokenProjection:
-        response = await self._request("POST", "auth/token/rotate", accepted=200)
+    async def rotate_token(self, *, timeout: _Timeout = _UNSET) -> TokenProjection:
+        response = await self._request("POST", "auth/token/rotate", accepted=200, timeout=timeout)
         projection = self._parse_model(TokenProjection, response)
         self._token = projection.token
         return projection
 
-    async def revoke_token(self) -> None:
-        await self._request("POST", "auth/token/revoke", accepted=204)
+    async def revoke_token(self, *, timeout: _Timeout = _UNSET) -> None:
+        await self._request("POST", "auth/token/revoke", accepted=204, timeout=timeout)
         self._token = None
 
     # ------------------------------------------------------------------
@@ -227,12 +242,14 @@ class AsyncTalkToHarnessesClient:
         *,
         cursor: str | None = None,
         limit: int = 50,
+        timeout: _Timeout = _UNSET,
     ) -> Page[HarnessProjection]:
         response = await self._request(
             "GET",
             "harnesses",
             accepted=200,
             params={"cursor": cursor, "limit": limit},
+            timeout=timeout,
         )
         return _PAGE_HARNESS.validate_json(response.content)
 
@@ -241,6 +258,7 @@ class AsyncTalkToHarnessesClient:
         *,
         name: str,
         configuration: HarnessConfiguration,
+        timeout: _Timeout = _UNSET,
     ) -> HarnessProjection:
         response = await self._request(
             "POST",
@@ -250,53 +268,85 @@ class AsyncTalkToHarnessesClient:
                 "name": name,
                 "configuration": configuration.model_dump(mode="json", exclude_none=True),
             },
+            timeout=timeout,
         )
         return self._parse_model(HarnessProjection, response)
 
-    async def get_harness(self, harness_id: UUID) -> HarnessProjection:
+    async def get_harness(
+        self,
+        harness_id: UUID,
+        *,
+        timeout: _Timeout = _UNSET,
+    ) -> HarnessProjection:
         response = await self._request(
             "GET",
             f"harnesses/{harness_id}",
             accepted=200,
+            timeout=timeout,
         )
         return self._parse_model(HarnessProjection, response)
 
-    async def delete_harness(self, harness_id: UUID) -> None:
+    async def delete_harness(self, harness_id: UUID, *, timeout: _Timeout = _UNSET) -> None:
         await self._request(
             "DELETE",
             f"harnesses/{harness_id}",
             accepted=204,
+            timeout=timeout,
         )
 
-    async def probe_harness(self, harness_id: UUID) -> HarnessProbeProjection:
+    async def probe_harness(
+        self,
+        harness_id: UUID,
+        *,
+        timeout: _Timeout = _UNSET,
+    ) -> HarnessProbeProjection:
         response = await self._request(
             "POST",
             f"harnesses/{harness_id}/probe",
             accepted=200,
+            timeout=timeout,
         )
         return self._parse_model(HarnessProbeProjection, response)
 
-    async def get_harness_capabilities(self, harness_id: UUID) -> HarnessProbeProjection:
+    async def get_harness_capabilities(
+        self,
+        harness_id: UUID,
+        *,
+        timeout: _Timeout = _UNSET,
+    ) -> HarnessProbeProjection:
         response = await self._request(
             "GET",
             f"harnesses/{harness_id}/capabilities",
             accepted=200,
+            timeout=timeout,
         )
         return self._parse_model(HarnessProbeProjection, response)
 
-    async def get_harness_models(self, harness_id: UUID) -> tuple[HarnessModelInfo, ...]:
+    async def get_harness_models(
+        self,
+        harness_id: UUID,
+        *,
+        timeout: _Timeout = _UNSET,
+    ) -> tuple[HarnessModelInfo, ...]:
         response = await self._request(
             "GET",
             f"harnesses/{harness_id}/models",
             accepted=200,
+            timeout=timeout,
         )
         return _HARNESS_MODELS.validate_json(response.content)
 
-    async def get_harness_modes(self, harness_id: UUID) -> tuple[HarnessModeInfo, ...]:
+    async def get_harness_modes(
+        self,
+        harness_id: UUID,
+        *,
+        timeout: _Timeout = _UNSET,
+    ) -> tuple[HarnessModeInfo, ...]:
         response = await self._request(
             "GET",
             f"harnesses/{harness_id}/modes",
             accepted=200,
+            timeout=timeout,
         )
         return _HARNESS_MODES.validate_json(response.content)
 
@@ -310,6 +360,7 @@ class AsyncTalkToHarnessesClient:
         cursor: str | None = None,
         limit: int = 50,
         include_archived: bool = True,
+        timeout: _Timeout = _UNSET,
     ) -> Page[ConversationShell]:
         response = await self._request(
             "GET",
@@ -320,6 +371,7 @@ class AsyncTalkToHarnessesClient:
                 "limit": limit,
                 "include_archived": include_archived,
             },
+            timeout=timeout,
         )
         return _PAGE_CONVERSATION.validate_json(response.content)
 
@@ -328,6 +380,7 @@ class AsyncTalkToHarnessesClient:
         harness_id: UUID,
         *,
         title: str | None = None,
+        timeout: _Timeout = _UNSET,
     ) -> ConversationSnapshot:
         body: dict[str, Any] = {"harness_id": str(harness_id)}
         if title is not None:
@@ -337,6 +390,7 @@ class AsyncTalkToHarnessesClient:
             "conversations",
             accepted=201,
             json=body,
+            timeout=timeout,
         )
         return self._parse_model(ConversationSnapshot, response)
 
@@ -344,6 +398,8 @@ class AsyncTalkToHarnessesClient:
         self,
         harness_id: UUID,
         document: TranscriptDocument,
+        *,
+        timeout: _Timeout = _UNSET,
     ) -> ConversationSnapshot:
         response = await self._request(
             "POST",
@@ -353,6 +409,7 @@ class AsyncTalkToHarnessesClient:
                 "harness_id": str(harness_id),
                 "document": document.model_dump(mode="json"),
             },
+            timeout=timeout,
         )
         return self._parse_model(ConversationSnapshot, response)
 
@@ -362,52 +419,84 @@ class AsyncTalkToHarnessesClient:
         *,
         cursor: str | None = None,
         limit: int = 50,
+        timeout: _Timeout = _UNSET,
     ) -> Page[ConversationSearchHit]:
         response = await self._request(
             "GET",
             "conversations/search",
             accepted=200,
             params={"q": query, "cursor": cursor, "limit": limit},
+            timeout=timeout,
         )
         return _PAGE_SEARCH.validate_json(response.content)
 
-    async def get_conversation(self, conversation_id: UUID) -> ConversationSnapshot:
+    async def get_conversation(
+        self,
+        conversation_id: UUID,
+        *,
+        timeout: _Timeout = _UNSET,
+    ) -> ConversationSnapshot:
         response = await self._request(
             "GET",
             f"conversations/{conversation_id}",
             accepted=200,
+            timeout=timeout,
         )
         return self._parse_model(ConversationSnapshot, response)
 
-    async def archive_conversation(self, conversation_id: UUID) -> ConversationSnapshot:
+    async def archive_conversation(
+        self,
+        conversation_id: UUID,
+        *,
+        timeout: _Timeout = _UNSET,
+    ) -> ConversationSnapshot:
         response = await self._request(
             "POST",
             f"conversations/{conversation_id}/archive",
             accepted=200,
+            timeout=timeout,
         )
         return self._parse_model(ConversationSnapshot, response)
 
-    async def unarchive_conversation(self, conversation_id: UUID) -> ConversationSnapshot:
+    async def unarchive_conversation(
+        self,
+        conversation_id: UUID,
+        *,
+        timeout: _Timeout = _UNSET,
+    ) -> ConversationSnapshot:
         response = await self._request(
             "POST",
             f"conversations/{conversation_id}/unarchive",
             accepted=200,
+            timeout=timeout,
         )
         return self._parse_model(ConversationSnapshot, response)
 
-    async def pin_conversation(self, conversation_id: UUID) -> ConversationSnapshot:
+    async def pin_conversation(
+        self,
+        conversation_id: UUID,
+        *,
+        timeout: _Timeout = _UNSET,
+    ) -> ConversationSnapshot:
         response = await self._request(
             "POST",
             f"conversations/{conversation_id}/pin",
             accepted=200,
+            timeout=timeout,
         )
         return self._parse_model(ConversationSnapshot, response)
 
-    async def unpin_conversation(self, conversation_id: UUID) -> ConversationSnapshot:
+    async def unpin_conversation(
+        self,
+        conversation_id: UUID,
+        *,
+        timeout: _Timeout = _UNSET,
+    ) -> ConversationSnapshot:
         response = await self._request(
             "POST",
             f"conversations/{conversation_id}/unpin",
             accepted=200,
+            timeout=timeout,
         )
         return self._parse_model(ConversationSnapshot, response)
 
@@ -416,28 +505,42 @@ class AsyncTalkToHarnessesClient:
         conversation_id: UUID,
         *,
         until: datetime,
+        timeout: _Timeout = _UNSET,
     ) -> ConversationSnapshot:
         response = await self._request(
             "POST",
             f"conversations/{conversation_id}/snooze",
             accepted=200,
             json={"until": until.isoformat()},
+            timeout=timeout,
         )
         return self._parse_model(ConversationSnapshot, response)
 
-    async def unsnooze_conversation(self, conversation_id: UUID) -> ConversationSnapshot:
+    async def unsnooze_conversation(
+        self,
+        conversation_id: UUID,
+        *,
+        timeout: _Timeout = _UNSET,
+    ) -> ConversationSnapshot:
         response = await self._request(
             "POST",
             f"conversations/{conversation_id}/unsnooze",
             accepted=200,
+            timeout=timeout,
         )
         return self._parse_model(ConversationSnapshot, response)
 
-    async def delete_conversation(self, conversation_id: UUID) -> None:
+    async def delete_conversation(
+        self,
+        conversation_id: UUID,
+        *,
+        timeout: _Timeout = _UNSET,
+    ) -> None:
         await self._request(
             "DELETE",
             f"conversations/{conversation_id}",
             accepted=204,
+            timeout=timeout,
         )
 
     async def set_retention_exemption(
@@ -445,20 +548,28 @@ class AsyncTalkToHarnessesClient:
         conversation_id: UUID,
         *,
         exempt: bool,
+        timeout: _Timeout = _UNSET,
     ) -> ConversationSnapshot:
         response = await self._request(
             "PUT",
             f"conversations/{conversation_id}/retention-exemption",
             accepted=200,
             json={"exempt": exempt},
+            timeout=timeout,
         )
         return self._parse_model(ConversationSnapshot, response)
 
-    async def export_transcript(self, conversation_id: UUID) -> TranscriptDocument:
+    async def export_transcript(
+        self,
+        conversation_id: UUID,
+        *,
+        timeout: _Timeout = _UNSET,
+    ) -> TranscriptDocument:
         response = await self._request(
             "GET",
             f"conversations/{conversation_id}/transcript",
             accepted=200,
+            timeout=timeout,
         )
         return self._parse_model(TranscriptDocument, response)
 
@@ -466,21 +577,35 @@ class AsyncTalkToHarnessesClient:
     # Retention
     # ------------------------------------------------------------------
 
-    async def get_retention_policy(self) -> RetentionPolicyProjection:
-        response = await self._request("GET", "retention", accepted=200)
+    async def get_retention_policy(
+        self,
+        *,
+        timeout: _Timeout = _UNSET,
+    ) -> RetentionPolicyProjection:
+        response = await self._request("GET", "retention", accepted=200, timeout=timeout)
         return self._parse_model(RetentionPolicyProjection, response)
 
-    async def replace_retention_policy(self, months: int) -> RetentionPolicyProjection:
+    async def replace_retention_policy(
+        self,
+        months: int,
+        *,
+        timeout: _Timeout = _UNSET,
+    ) -> RetentionPolicyProjection:
         response = await self._request(
             "PUT",
             "retention",
             accepted=200,
             json={"months": months},
+            timeout=timeout,
         )
         return self._parse_model(RetentionPolicyProjection, response)
 
-    async def preview_retention(self) -> RetentionPreviewProjection:
-        response = await self._request("GET", "retention/preview", accepted=200)
+    async def preview_retention(
+        self,
+        *,
+        timeout: _Timeout = _UNSET,
+    ) -> RetentionPreviewProjection:
+        response = await self._request("GET", "retention/preview", accepted=200, timeout=timeout)
         return self._parse_model(RetentionPreviewProjection, response)
 
     # ------------------------------------------------------------------
@@ -493,12 +618,14 @@ class AsyncTalkToHarnessesClient:
         *,
         cursor: str | None = None,
         limit: int = 50,
+        timeout: _Timeout = _UNSET,
     ) -> Page[TurnProjection]:
         response = await self._request(
             "GET",
             f"conversations/{conversation_id}/turns",
             accepted=200,
             params={"cursor": cursor, "limit": limit},
+            timeout=timeout,
         )
         return _PAGE_TURN.validate_json(response.content)
 
@@ -508,12 +635,14 @@ class AsyncTalkToHarnessesClient:
         *,
         cursor: str | None = None,
         limit: int = 50,
+        timeout: _Timeout = _UNSET,
     ) -> Page[MessageProjection]:
         response = await self._request(
             "GET",
             f"conversations/{conversation_id}/messages",
             accepted=200,
             params={"cursor": cursor, "limit": limit},
+            timeout=timeout,
         )
         return _PAGE_MESSAGE.validate_json(response.content)
 
@@ -523,12 +652,14 @@ class AsyncTalkToHarnessesClient:
         *,
         cursor: str | None = None,
         limit: int = 50,
+        timeout: _Timeout = _UNSET,
     ) -> Page[ToolProjection]:
         response = await self._request(
             "GET",
             f"conversations/{conversation_id}/tools",
             accepted=200,
             params={"cursor": cursor, "limit": limit},
+            timeout=timeout,
         )
         return _PAGE_TOOL.validate_json(response.content)
 
@@ -538,12 +669,14 @@ class AsyncTalkToHarnessesClient:
         *,
         cursor: str | None = None,
         limit: int = 50,
+        timeout: _Timeout = _UNSET,
     ) -> Page[PlanProjection]:
         response = await self._request(
             "GET",
             f"conversations/{conversation_id}/plans",
             accepted=200,
             params={"cursor": cursor, "limit": limit},
+            timeout=timeout,
         )
         return _PAGE_PLAN.validate_json(response.content)
 
@@ -553,12 +686,14 @@ class AsyncTalkToHarnessesClient:
         *,
         cursor: str | None = None,
         limit: int = 50,
+        timeout: _Timeout = _UNSET,
     ) -> Page[ActivityProjection]:
         response = await self._request(
             "GET",
             f"conversations/{conversation_id}/activity",
             accepted=200,
             params={"cursor": cursor, "limit": limit},
+            timeout=timeout,
         )
         return _PAGE_ACTIVITY.validate_json(response.content)
 
@@ -573,6 +708,7 @@ class AsyncTalkToHarnessesClient:
         prompt: str,
         idempotency_key: str,
         model: str | None = None,
+        timeout: _Timeout = _UNSET,
     ) -> SubmitTurnResult:
         body: dict[str, Any] = {"prompt": prompt}
         if model is not None:
@@ -583,6 +719,7 @@ class AsyncTalkToHarnessesClient:
             accepted=202,
             json=body,
             headers={"Idempotency-Key": idempotency_key},
+            timeout=timeout,
         )
         return self._parse_model(SubmitTurnResult, response)
 
@@ -591,23 +728,28 @@ class AsyncTalkToHarnessesClient:
         conversation_id: UUID,
         *,
         prompt: str,
+        timeout: _Timeout = _UNSET,
     ) -> ConversationSnapshot:
         response = await self._request(
             "PATCH",
             f"conversations/{conversation_id}/queued-prompt",
             accepted=200,
             json={"prompt": prompt},
+            timeout=timeout,
         )
         return self._parse_model(ConversationSnapshot, response)
 
     async def cancel_queued_prompt(
         self,
         conversation_id: UUID,
+        *,
+        timeout: _Timeout = _UNSET,
     ) -> CommandProjection | None:
         response = await self._request(
             "DELETE",
             f"conversations/{conversation_id}/queued-prompt",
             accepted=(200, 204),
+            timeout=timeout,
         )
         if response.status_code == 204:
             return None
@@ -619,6 +761,7 @@ class AsyncTalkToHarnessesClient:
         *,
         prompt: str,
         idempotency_key: str,
+        timeout: _Timeout = _UNSET,
     ) -> CommandProjection:
         response = await self._request(
             "POST",
@@ -626,6 +769,7 @@ class AsyncTalkToHarnessesClient:
             accepted=202,
             json={"prompt": prompt},
             headers={"Idempotency-Key": idempotency_key},
+            timeout=timeout,
         )
         return self._parse_model(CommandProjection, response)
 
@@ -635,6 +779,7 @@ class AsyncTalkToHarnessesClient:
         *,
         harness_id: UUID,
         idempotency_key: str,
+        timeout: _Timeout = _UNSET,
     ) -> CommandProjection:
         response = await self._request(
             "POST",
@@ -642,14 +787,21 @@ class AsyncTalkToHarnessesClient:
             accepted=202,
             json={"harness_id": str(harness_id)},
             headers={"Idempotency-Key": idempotency_key},
+            timeout=timeout,
         )
         return self._parse_model(CommandProjection, response)
 
-    async def interrupt(self, conversation_id: UUID) -> CommandProjection:
+    async def interrupt(
+        self,
+        conversation_id: UUID,
+        *,
+        timeout: _Timeout = _UNSET,
+    ) -> CommandProjection:
         response = await self._request(
             "POST",
             f"conversations/{conversation_id}/interrupt",
             accepted=202,
+            timeout=timeout,
         )
         return self._parse_model(CommandProjection, response)
 
@@ -663,12 +815,14 @@ class AsyncTalkToHarnessesClient:
         *,
         cursor: str | None = None,
         limit: int = 50,
+        timeout: _Timeout = _UNSET,
     ) -> Page[InteractionProjection]:
         response = await self._request(
             "GET",
             f"conversations/{conversation_id}/interactions",
             accepted=200,
             params={"cursor": cursor, "limit": limit},
+            timeout=timeout,
         )
         return _PAGE_INTERACTION.validate_json(response.content)
 
@@ -678,12 +832,14 @@ class AsyncTalkToHarnessesClient:
         interaction_id: UUID,
         *,
         draft: dict[str, Any],
+        timeout: _Timeout = _UNSET,
     ) -> InteractionProjection:
         response = await self._request(
             "PATCH",
             f"conversations/{conversation_id}/interactions/{interaction_id}/draft",
             accepted=200,
             json={"draft": draft},
+            timeout=timeout,
         )
         return self._parse_model(InteractionProjection, response)
 
@@ -695,6 +851,7 @@ class AsyncTalkToHarnessesClient:
         decision: ApprovalDecision | None = None,
         answers: dict[str, Any] | None = None,
         create_rule: ApprovalRuleInput | None = None,
+        timeout: _Timeout = _UNSET,
     ) -> CommandProjection:
         body: dict[str, Any] = {}
         if decision is not None:
@@ -708,6 +865,7 @@ class AsyncTalkToHarnessesClient:
             f"conversations/{conversation_id}/interactions/{interaction_id}/resolve",
             accepted=202,
             json=body,
+            timeout=timeout,
         )
         return self._parse_model(CommandProjection, response)
 
@@ -720,29 +878,43 @@ class AsyncTalkToHarnessesClient:
         *,
         cursor: str | None = None,
         limit: int = 50,
+        timeout: _Timeout = _UNSET,
     ) -> Page[ApprovalRuleProjection]:
         response = await self._request(
             "GET",
             "approval-rules",
             accepted=200,
             params={"cursor": cursor, "limit": limit},
+            timeout=timeout,
         )
         return _PAGE_APPROVAL_RULE.validate_json(response.content)
 
-    async def create_approval_rule(self, rule: ApprovalRuleInput) -> ApprovalRuleProjection:
+    async def create_approval_rule(
+        self,
+        rule: ApprovalRuleInput,
+        *,
+        timeout: _Timeout = _UNSET,
+    ) -> ApprovalRuleProjection:
         response = await self._request(
             "POST",
             "approval-rules",
             accepted=201,
             json=rule.model_dump(mode="json"),
+            timeout=timeout,
         )
         return self._parse_model(ApprovalRuleProjection, response)
 
-    async def get_approval_rule(self, rule_id: UUID) -> ApprovalRuleProjection:
+    async def get_approval_rule(
+        self,
+        rule_id: UUID,
+        *,
+        timeout: _Timeout = _UNSET,
+    ) -> ApprovalRuleProjection:
         response = await self._request(
             "GET",
             f"approval-rules/{rule_id}",
             accepted=200,
+            timeout=timeout,
         )
         return self._parse_model(ApprovalRuleProjection, response)
 
@@ -750,20 +922,24 @@ class AsyncTalkToHarnessesClient:
         self,
         rule_id: UUID,
         rule: ApprovalRuleInput,
+        *,
+        timeout: _Timeout = _UNSET,
     ) -> ApprovalRuleProjection:
         response = await self._request(
             "PUT",
             f"approval-rules/{rule_id}",
             accepted=200,
             json=rule.model_dump(mode="json"),
+            timeout=timeout,
         )
         return self._parse_model(ApprovalRuleProjection, response)
 
-    async def delete_approval_rule(self, rule_id: UUID) -> None:
+    async def delete_approval_rule(self, rule_id: UUID, *, timeout: _Timeout = _UNSET) -> None:
         await self._request(
             "DELETE",
             f"approval-rules/{rule_id}",
             accepted=204,
+            timeout=timeout,
         )
 
     async def list_interaction_audits(
@@ -771,20 +947,28 @@ class AsyncTalkToHarnessesClient:
         *,
         cursor: str | None = None,
         limit: int = 50,
+        timeout: _Timeout = _UNSET,
     ) -> Page[InteractionAuditProjection]:
         response = await self._request(
             "GET",
             "interaction-audits",
             accepted=200,
             params={"cursor": cursor, "limit": limit},
+            timeout=timeout,
         )
         return _PAGE_INTERACTION_AUDIT.validate_json(response.content)
 
-    async def get_interaction_audit(self, audit_id: UUID) -> InteractionAuditProjection:
+    async def get_interaction_audit(
+        self,
+        audit_id: UUID,
+        *,
+        timeout: _Timeout = _UNSET,
+    ) -> InteractionAuditProjection:
         response = await self._request(
             "GET",
             f"interaction-audits/{audit_id}",
             accepted=200,
+            timeout=timeout,
         )
         return self._parse_model(InteractionAuditProjection, response)
 
@@ -797,10 +981,12 @@ class AsyncTalkToHarnessesClient:
         conversation_id: UUID,
         *,
         after_sequence: int = 0,
+        timeout: _Timeout = _UNSET,
     ) -> AsyncIterator[ConversationStreamItem]:
         return self._stream_conversation_events(
             conversation_id,
             after_sequence=after_sequence,
+            timeout=timeout,
         )
 
     async def _stream_conversation_events(
@@ -808,6 +994,7 @@ class AsyncTalkToHarnessesClient:
         conversation_id: UUID,
         *,
         after_sequence: int = 0,
+        timeout: _Timeout = _UNSET,
     ) -> AsyncGenerator[ConversationStreamItem, None]:
         cursor = after_sequence
         next_delay = _BACKOFF_INITIAL_S
@@ -823,10 +1010,11 @@ class AsyncTalkToHarnessesClient:
             if not first_attempt or cursor != 0:
                 headers["Last-Event-ID"] = str(cursor)
 
-            if self._timeout is None:
+            effective = self._resolved_timeout(timeout)
+            if effective is None:
                 stream_timeout: httpx.Timeout | None = httpx.Timeout(None)
             else:
-                stream_timeout = httpx.Timeout(self._timeout, read=None)
+                stream_timeout = httpx.Timeout(effective, read=None)
 
             try:
                 async with self._client.stream(

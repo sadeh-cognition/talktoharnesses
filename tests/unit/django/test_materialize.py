@@ -16,6 +16,7 @@ from talktoharnesses.django.models import (
     ReasoningRecord,
     ToolRecord,
     TurnRecord,
+    UsageRecordRow,
 )
 from talktoharnesses.django.persistence import DjangoPersistence
 from talktoharnesses.domain.enums import ToolOutcome, TurnStatus
@@ -24,6 +25,7 @@ from talktoharnesses.domain.events import (
     AssistantMessageDeltaPayload,
     AssistantMessageStartedPayload,
     ConversationEvent,
+    CostUpdatedPayload,
     PlanCreatedPayload,
     PlanUpdatedPayload,
     ReasoningCompletedPayload,
@@ -38,6 +40,7 @@ from talktoharnesses.domain.events import (
     TurnFailedPayload,
     TurnInterruptedPayload,
     TurnOutcomeUnknownPayload,
+    UsageUpdatedPayload,
 )
 from talktoharnesses.domain.models import PlanItem
 
@@ -208,3 +211,47 @@ def test_materialize_reasoning_tool_plan_and_terminal_branches() -> None:
         seq += 1
         row = TurnRecord.objects.get(turn_id=turn)
         assert row.status == expected.value
+
+
+@pytest.mark.django_db(transaction=True)
+def test_materialize_usage_preserves_cost_currency() -> None:
+    now = datetime(2026, 8, 19, tzinfo=UTC)
+    persistence = DjangoPersistence()
+    state = idle_state()
+    async_to_sync(persistence.save_snapshot)(state)
+    conversation_id = state.conversation.id
+    turn_id = uuid4()
+    events = (
+        ConversationEvent(
+            conversation_id=conversation_id,
+            sequence=1,
+            timestamp=now,
+            type="usage_updated",
+            payload=UsageUpdatedPayload(
+                turn_id=turn_id,
+                input_tokens=10,
+                output_tokens=5,
+                total_tokens=15,
+                cached_input_tokens=2,
+            ),
+        ),
+        ConversationEvent(
+            conversation_id=conversation_id,
+            sequence=2,
+            timestamp=now,
+            type="cost_updated",
+            payload=CostUpdatedPayload(
+                turn_id=turn_id,
+                cost="0.0123",
+                currency="USD",
+            ),
+        ),
+    )
+
+    materialize_projections(state, events)
+
+    usage = UsageRecordRow.objects.get(turn_id=turn_id)
+    assert usage.input_tokens == 10
+    assert usage.cached_input_tokens == 2
+    assert usage.cost == "0.0123"
+    assert usage.currency == "USD"

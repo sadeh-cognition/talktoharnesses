@@ -508,6 +508,8 @@ class CostUpdatedPayload(BaseModel):
     type: Literal["cost_updated"] = "cost_updated"
     turn_id: UUID | None = None
     cost: str  # decimal string for wire stability
+    # Optional so persisted events from before currency qualification still parse.
+    currency: str | None = None
 
 
 class ProviderWarningPayload(BaseModel):

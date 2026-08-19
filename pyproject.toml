@@ -1,6 +1,6 @@
 [project]
 name = "talktoharnesses"
-version = "2026.8.4"
+version = "2026.8.5"
 description = "Unified coding-agent harness interface and optional Django app scaffold"
 readme = "README.md"
 requires-python = ">=3.11"

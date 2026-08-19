@@ -259,6 +259,9 @@ class UsageRecordRow(models.Model):
     cost: models.CharField[str | None, str | None] = models.CharField(
         max_length=64, null=True, blank=True
     )
+    currency: models.CharField[str | None, str | None] = models.CharField(
+        max_length=8, null=True, blank=True
+    )
 
     class Meta:
         db_table = "talktoharnesses_usage"

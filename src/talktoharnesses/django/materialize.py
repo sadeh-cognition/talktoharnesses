@@ -462,6 +462,7 @@ def _apply_event(conversation_id: UUID, event: ConversationEvent) -> None:
             defaults={
                 "conversation_id": conversation_id,
                 "cost": payload.cost,
+                "currency": payload.currency,
             },
         )
         return

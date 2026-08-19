@@ -112,6 +112,23 @@ except APIError as exc:
 Ordinary HTTP calls are not retried. Callers own backoff and retries for
 non-streaming requests.
 
+## Timeouts
+
+The client constructor accepts `timeout` (default `30.0` seconds). Pass
+`timeout=None` to disable timeouts client-wide.
+
+Every public method also accepts an optional keyword-only `timeout=`. Omit it
+to inherit the client value; pass a float to override that call; pass `None`
+to disable timeouts for that call only:
+
+```python
+await client.probe_harness(harness_id, timeout=120.0)
+```
+
+For `stream_conversation_events`, `timeout=` bounds connect, write, and pool
+only. The stream read timeout stays disabled so long-lived SSE connections are
+not cut off.
+
 ## Token rotation and revocation
 
 `rotate_token()` replaces the client's in-memory bearer token only after the
