@@ -10,7 +10,7 @@ tags:
   - capability/interactions
   - status/implemented
 last_verified: 2026-08-20
-verified_against_commit: bb3d2b755500fc663816d6cbd1a7cd7947a8920b
+verified_against_commit: bffc9566181f4309b7f22d446dc950451d78a0d1
 ---
 
 # Apply Approval Rules
@@ -25,7 +25,7 @@ CRUD endpoints manage `ApprovalRule` records. Matching uses canonical matcher fi
 
 ## Gap
 
-No gap remains against the Phase 6 approval-rule contract.
+No product gap remains against the Phase 6 approval-rule contract. Deterministic closed-loop test evidence (adapter request through rule auto-resolve through `answer_interaction` under a running command worker) is proposed in [Orchestration Interaction Test Harness](../analyses/orchestration-interaction-test-harness.md) and is not present yet.
 
 ## Acceptance criteria
 
@@ -46,8 +46,11 @@ No gap remains against the Phase 6 approval-rule contract.
 - `tests/unit/django/test_approval_api.py`
 - `tests/unit/domain/test_approval_matching.py`
 
+`tests/orchestration/` is proposed by [Orchestration Interaction Test Harness](../analyses/orchestration-interaction-test-harness.md) and is not in the tree at the inspected commit.
+
 ## Related
 
 - [Resolve approvals and structured questions](resolve-approvals-and-structured-questions.md)
 - [Approvals and structured questions](../capabilities/approvals-and-questions.md)
 - [Interaction](../domain/interaction.md)
+- [Orchestration Interaction Test Harness](../analyses/orchestration-interaction-test-harness.md)

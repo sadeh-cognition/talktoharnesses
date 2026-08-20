@@ -21,7 +21,7 @@ TalkToHarnesses is a library-plus-optional-Django-app that sits between a host p
 - `TalkToHarnessesService` is the in-process facade.
 - Provider adapters talk to Grok, Cursor, Codex, Claude Code, OpenCode, or Prime Agent.
 - The relational database is canonical for conversations, events, and commands.
-- Optional HTTP clients, including Agentbahn, call `/api/v1`.
+- Optional HTTP clients call `/api/v1`.
 
 ## Boundaries
 

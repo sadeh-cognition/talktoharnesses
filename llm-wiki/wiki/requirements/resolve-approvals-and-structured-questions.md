@@ -10,7 +10,7 @@ tags:
   - capability/interactions
   - status/implemented
 last_verified: 2026-08-20
-verified_against_commit: bb3d2b755500fc663816d6cbd1a7cd7947a8920b
+verified_against_commit: bffc9566181f4309b7f22d446dc950451d78a0d1
 ---
 
 # Resolve Approvals and Structured Questions
@@ -25,7 +25,7 @@ Pending interactions are listed per conversation. Approval resolution accepts `a
 
 ## Gap
 
-No gap remains against the documented interaction contract.
+No product gap remains against the documented interaction contract. Deterministic closed-loop test evidence (adapter request through resolve through `answer_interaction` under a running command worker) is proposed in [Orchestration Interaction Test Harness](../analyses/orchestration-interaction-test-harness.md) and is not present yet.
 
 ## Acceptance criteria
 
@@ -49,9 +49,12 @@ No gap remains against the documented interaction contract.
 - `tests/unit/domain/test_questions.py`
 - `tests/unit/django/test_approval_api.py`
 
+`tests/orchestration/` is proposed by [Orchestration Interaction Test Harness](../analyses/orchestration-interaction-test-harness.md) and is not in the tree at the inspected commit.
+
 ## Related
 
 - [Approvals and structured questions](../capabilities/approvals-and-questions.md)
 - [Apply approval rules](apply-approval-rules.md)
 - [Interaction](../domain/interaction.md)
 - [Resolve a pending approval](../journeys/resolve-a-pending-approval.md)
+- [Orchestration Interaction Test Harness](../analyses/orchestration-interaction-test-harness.md)

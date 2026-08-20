@@ -16,7 +16,7 @@ last_verified: 2026-08-20
 
 # TalkToHarnesses Knowledge Base
 
-TalkToHarnesses is a unified coding-agent harness interface for [library embedders, Django hosts, and Agentbahn-class products](wiki/concepts/target-users.md).
+TalkToHarnesses is a unified coding-agent harness interface for [library embedders, Django hosts, and remote HTTP clients](wiki/concepts/target-users.md).
 
 This vault connects public contracts to architecture, implementation, and tests. Begin with the view that matches your question:
 

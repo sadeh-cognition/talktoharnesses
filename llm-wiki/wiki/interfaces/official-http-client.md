@@ -18,7 +18,7 @@ verified_against_commit: bb3d2b755500fc663816d6cbd1a7cd7947a8920b
 
 Public exports are `APIError`, `AsyncTalkToHarnessesClient`, and `ConversationStreamItem`. Stream items are conversation events, snapshots, or sync projections.
 
-The client is the supported remote boundary for Agentbahn and similar products.
+The client is the supported remote boundary for HTTP consumers.
 
 ## Related
 

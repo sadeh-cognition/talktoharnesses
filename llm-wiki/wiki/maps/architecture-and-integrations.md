@@ -24,7 +24,7 @@ TalkToHarnesses sits between host applications and local coding-agent CLIs.
 - Host Django settings, ASGI process, database, and JWT users.
 - Six provider CLIs or SDKs, each behind [adapter protocol](../interfaces/adapter-protocol.md).
 - Optional OpenTelemetry SDK/exporter installed by the host.
-- Official HTTP client for remote consumers such as Agentbahn.
+- Official HTTP client for remote consumers.
 
 ## Persistence and workers
 

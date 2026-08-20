@@ -4,8 +4,8 @@ This directory is an Obsidian-first knowledge base connecting TalkToHarnesses
 public contracts to architecture, implementation, and tests.
 
 Open `llm-wiki/` as an Obsidian vault and begin at [Home](Home.md). The content
-uses portable standard Markdown and can be read through Agentbahn's project wiki
-UI, which serves `<project>/llm-wiki`.
+uses portable standard Markdown and can also be read through a wiki web viewer
+that serves `<project>/llm-wiki`.
 
 Human operator docs in the repository `docs/` directory remain canonical for
 install, deploy, upgrade, and release procedures. This vault snapshots those
@@ -27,9 +27,8 @@ recorded commit, including tests, describes current behavior. The generated wiki
 must show disagreements explicitly.
 
 Follow [WIKI_AGENTS.md](WIKI_AGENTS.md) when maintaining the vault. Validate
-with Agentbahn's linter pointed at this root:
+with the wiki linter pointed at this root:
 
 ```bash
-# from the Agentbahn repository
 uv run manage.py wiki_lint --root /path/to/talktoharnesses/llm-wiki
 ```

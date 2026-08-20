@@ -7,8 +7,8 @@ HTTP/SSE APIs.
 
 Accepted architectural decisions live under [`docs/adr/`](docs/adr/). Floor
 identities, adapter-owned capabilities, and last-verified notes are generated in
-[`SUPPORTED_HARNESSES.md`](SUPPORTED_HARNESSES.md). The Agentbahn-renderable
-Obsidian knowledge graph lives in [`llm-wiki/`](llm-wiki/). Operational detail lives in:
+[`SUPPORTED_HARNESSES.md`](SUPPORTED_HARNESSES.md). The Obsidian knowledge graph
+lives in [`llm-wiki/`](llm-wiki/). Operational detail lives in:
 
 - [`docs/deployment.md`](docs/deployment.md)
 - [`docs/upgrading.md`](docs/upgrading.md)

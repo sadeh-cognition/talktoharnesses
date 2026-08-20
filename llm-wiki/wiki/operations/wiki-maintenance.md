@@ -26,7 +26,7 @@ Open the repository's `llm-wiki/` directory as an Obsidian vault. Shared setting
 3. Update affected capability, requirement, journey, and technical pages.
 4. Update Maps of Content and the index.
 5. Append the operation to the log.
-6. Run the linter from Agentbahn:
+6. Run the wiki linter:
 
 ```bash
 uv run manage.py wiki_lint --root /path/to/talktoharnesses/llm-wiki

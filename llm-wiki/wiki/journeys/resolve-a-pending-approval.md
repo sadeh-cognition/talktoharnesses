@@ -10,7 +10,7 @@ tags:
   - capability/interactions
   - status/implemented
 last_verified: 2026-08-20
-verified_against_commit: bb3d2b755500fc663816d6cbd1a7cd7947a8920b
+verified_against_commit: bffc9566181f4309b7f22d446dc950451d78a0d1
 ---
 
 # Resolve a Pending Approval
@@ -31,10 +31,11 @@ The client posts a decision (`allow_once`, `allow_session`, `deny`, `cancel`) an
 
 ## 4. Resume
 
-The adapter receives the answer, the turn continues, and the SSE stream is followed with `Last-Event-ID`.
+The adapter receives the answer, the turn continues, and the SSE stream is followed with `Last-Event-ID`. Offline proof of this resume step is proposed in [Orchestration Interaction Test Harness](../analyses/orchestration-interaction-test-harness.md).
 
 ## Related
 
 - [Approvals and structured questions](../capabilities/approvals-and-questions.md)
 - [Interaction](../domain/interaction.md)
 - [Submit turns and stream events](../requirements/submit-turns-and-stream-events.md)
+- [Orchestration Interaction Test Harness](../analyses/orchestration-interaction-test-harness.md)

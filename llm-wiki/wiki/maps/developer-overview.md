@@ -8,7 +8,7 @@ tags:
   - type/map
   - audience/developer
 last_verified: 2026-08-20
-verified_against_commit: bb3d2b755500fc663816d6cbd1a7cd7947a8920b
+verified_against_commit: bffc9566181f4309b7f22d446dc950451d78a0d1
 ---
 
 # Developer Overview
@@ -52,6 +52,10 @@ Use this map to trace public contracts into layers, interfaces, decisions, and t
 - [Testing guidelines](../operations/testing-guidelines.md)
 - [Deployment](../operations/deployment.md)
 - [Wiki maintenance](../operations/wiki-maintenance.md)
+
+## Analyses
+
+- [Orchestration Interaction Test Harness](../analyses/orchestration-interaction-test-harness.md)
 
 ## Related
 

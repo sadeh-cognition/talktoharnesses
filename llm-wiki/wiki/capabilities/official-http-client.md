@@ -19,7 +19,7 @@ The `client` extra ships `AsyncTalkToHarnessesClient`, a hand-written async clie
 
 ## Product value
 
-Remote consumers such as Agentbahn call TalkToHarnesses without depending on Django internals. The client covers harnesses, conversations, turns, interactions, search, retention, transcripts, and SSE replay.
+Remote consumers call TalkToHarnesses without depending on Django internals. The client covers harnesses, conversations, turns, interactions, search, retention, transcripts, and SSE replay.
 
 ## Current implementation
 

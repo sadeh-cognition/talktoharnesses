@@ -13,7 +13,7 @@ verified_against_commit: bb3d2b755500fc663816d6cbd1a7cd7947a8920b
 
 # Development Guidelines
 
-After completing code changes, run `make lint` and resolve reported issues before handing off. Typical local checks:
+After completing code changes, run `make lint` and resolve any reported issues before handing off. Typical local checks:
 
 ```bash
 uv sync --extra django --extra client

@@ -12,7 +12,7 @@ last_verified: 2026-08-20
 
 # Wiki Index
 
-Use this catalog to route into the maintained knowledge graph. Obsidian users should normally begin at [TalkToHarnesses Knowledge Base](../Home.md). Agentbahn opens this page first.
+Use this catalog to route into the maintained knowledge graph. Obsidian users should normally begin at [TalkToHarnesses Knowledge Base](../Home.md). Wiki web viewers typically open this page first.
 
 ## Maps of Content
 
@@ -90,7 +90,7 @@ Use this catalog to route into the maintained knowledge graph. Obsidian users sh
 
 ## Analyses
 
-No durable analysis pages have been created yet.
+- [Orchestration Interaction Test Harness](analyses/orchestration-interaction-test-harness.md)
 
 ## Related
 

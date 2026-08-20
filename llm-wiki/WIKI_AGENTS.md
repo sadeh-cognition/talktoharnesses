@@ -71,12 +71,12 @@ Do not link to files outside this vault. Cite repository paths as prose.
 ## Link and attachment rules
 
 - The vault root is `llm-wiki/`; `Home.md` is its Obsidian entry point.
-  Agentbahn opens `wiki/index.md` first.
+  Wiki web viewers typically open `wiki/index.md` first.
 - Prefer links to pages over links to headings when the concept has its own page.
 - Do not create generic links solely to silence orphan checks.
 - Each substantive page must have an inbound link from a map, capability, or journey.
 - Store derived media in `wiki/assets/` and immutable source attachments in `raw/assets/`.
-- Use relative embeds for images so both Obsidian and the Agentbahn web viewer can resolve them.
+- Use relative embeds for images so both Obsidian and wiki web viewers can resolve them.
 - When moving or renaming pages, update every inbound Markdown link in the same change.
 
 ## Ingest workflow
@@ -95,7 +95,7 @@ Do not link to files outside this vault. Cite repository paths as prose.
    acceptance criteria require human approval.
 7. Update the relevant maps and `wiki/index.md`.
 8. Append one entry to `wiki/log.md` using `## [YYYY-MM-DD] operation | Title`.
-9. Run Agentbahn `wiki_lint --root` against this vault and resolve errors before
+9. Run `wiki_lint --root` against this vault and resolve errors before
    completing the ingest.
 
 ## Query workflow
@@ -110,7 +110,7 @@ Do not link to files outside this vault. Cite repository paths as prose.
 
 ## Lint and review workflow
 
-Run Agentbahn's wiki linter after every maintenance pass:
+Run the wiki linter after every maintenance pass:
 
 ```bash
 uv run manage.py wiki_lint --root /path/to/talktoharnesses/llm-wiki

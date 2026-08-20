@@ -23,9 +23,9 @@ Python applications import `TalkToHarnessesService` and provider adapters withou
 
 Applications add `talktoharnesses.django` to `INSTALLED_APPS`, wrap ASGI with `talktoharnesses_lifespan`, and mount `/api/v1/`. They issue JWTs for authenticated users. Harness processes run as the Django OS user; this is not a sandbox.
 
-## Agentbahn-class products
+## Remote HTTP clients
 
-Products such as Agentbahn consume the official HTTP client and treat TalkToHarnesses as the authority for conversations, transcripts, approvals, and provider execution.
+Hosted products consume the official HTTP client and treat TalkToHarnesses as the authority for conversations, transcripts, approvals, and provider execution.
 
 ## Related
 

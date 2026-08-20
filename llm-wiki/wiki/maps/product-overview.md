@@ -13,7 +13,7 @@ verified_against_commit: bb3d2b755500fc663816d6cbd1a7cd7947a8920b
 
 # Product Overview
 
-TalkToHarnesses gives [library embedders, Django hosts, and Agentbahn-class products](../concepts/target-users.md) one persistence-backed way to drive local coding-agent CLIs.
+TalkToHarnesses gives [library embedders, Django hosts, and remote HTTP clients](../concepts/target-users.md) one persistence-backed way to drive local coding-agent CLIs.
 
 ## Capabilities
 
