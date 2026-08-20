@@ -16,3 +16,8 @@ host/db.sqlite3
 .DS_Store
 
 # uv.lock is committed for reproducible installs
+
+# Obsidian per-user state (shared vault settings remain versioned)
+llm-wiki/.obsidian/workspace.json
+llm-wiki/.obsidian/workspace-mobile.json
+llm-wiki/.obsidian/cache
