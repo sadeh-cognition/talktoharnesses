@@ -7,13 +7,20 @@ audiences:
   - developer
 tags:
   - type/log
-last_verified: 2026-08-20
+last_verified: 2026-08-21
 verified_against_commit: bffc9566181f4309b7f22d446dc950451d78a0d1
 ---
 
 # Wiki Log
 
 Entries are appended using `## [YYYY-MM-DD] operation | Title`.
+
+## [2026-08-21] operation | Record TTH abbreviation
+
+- Added product source `raw/product/abbreviation.md`.
+- Documented TTH as the abbreviation for TalkToHarnesses in the
+  [glossary](glossary.md), [overview](overview.md),
+  [product overview](maps/product-overview.md), and vault home.
 
 ## [2026-08-20] operation | Propose orchestration interaction test harness
 

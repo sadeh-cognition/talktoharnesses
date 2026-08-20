@@ -1,19 +1,21 @@
 ---
 type: overview
 title: TalkToHarnesses Overview
+aliases:
+  - TTH
 status: maintained
 audiences:
   - product
   - developer
 tags:
   - type/overview
-last_verified: 2026-08-20
+last_verified: 2026-08-21
 verified_against_commit: bb3d2b755500fc663816d6cbd1a7cd7947a8920b
 ---
 
 # TalkToHarnesses Overview
 
-TalkToHarnesses is a Python 3.11+ package that unifies six coding-agent harnesses behind one adapter protocol, a persistence-backed asynchronous facade, and optional authenticated HTTP/SSE APIs.
+TalkToHarnesses (TTH) is a Python 3.11+ package that unifies six coding-agent harnesses behind one adapter protocol, a persistence-backed asynchronous facade, and optional authenticated HTTP/SSE APIs.
 
 One distribution exposes Grok, Cursor, Codex, Claude Code, OpenCode, and Prime Agent adapters. Hosts install optional extras for Django, PostgreSQL, the official HTTP client, and provider SDKs. External executables are never discovered, installed, or upgraded by the package.
 

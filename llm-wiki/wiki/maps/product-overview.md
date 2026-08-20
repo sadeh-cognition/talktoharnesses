@@ -7,13 +7,13 @@ audiences:
 tags:
   - type/map
   - audience/product
-last_verified: 2026-08-20
+last_verified: 2026-08-21
 verified_against_commit: bb3d2b755500fc663816d6cbd1a7cd7947a8920b
 ---
 
 # Product Overview
 
-TalkToHarnesses gives [library embedders, Django hosts, and remote HTTP clients](../concepts/target-users.md) one persistence-backed way to drive local coding-agent CLIs.
+TalkToHarnesses (TTH) gives [library embedders, Django hosts, and remote HTTP clients](../concepts/target-users.md) one persistence-backed way to drive local coding-agent CLIs.
 
 ## Capabilities
 

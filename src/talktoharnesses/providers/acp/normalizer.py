@@ -162,13 +162,7 @@ class AcpSessionNormalizer:
         self,
         params: dict[str, Any],
     ) -> list[HarnessEvent]:
-        session_id = params.get("sessionId")
-        if self._native_session_id and session_id not in (None, self._native_session_id):
-            raise DomainError(
-                ErrorCode.PROTOCOL_ERROR,
-                "session/update for mismatched session",
-                details={"expected": self._native_session_id, "got": session_id},
-            )
+        self._validate_session(params, "session/update")
         update = _as_dict(params.get("update"))
         if update is None:
             raise DomainError(ErrorCode.PROTOCOL_ERROR, "session/update missing update object")
@@ -219,6 +213,15 @@ class AcpSessionNormalizer:
             f"unsupported sessionUpdate: {kind}",
             details={"kind": kind},
         )
+
+    def _validate_session(self, params: dict[str, Any], method: str) -> None:
+        session_id = params.get("sessionId")
+        if self._native_session_id and session_id not in (None, self._native_session_id):
+            raise DomainError(
+                ErrorCode.PROTOCOL_ERROR,
+                f"{method} for mismatched session",
+                details={"expected": self._native_session_id, "got": session_id},
+            )
 
     def _record_resync(self, update: dict[str, Any]) -> None:
         native = update.get("toolCallId") or update.get("messageId")

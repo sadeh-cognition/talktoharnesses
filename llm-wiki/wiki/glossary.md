@@ -9,7 +9,7 @@ tags:
   - type/glossary
   - audience/product
   - audience/developer
-last_verified: 2026-08-20
+last_verified: 2026-08-21
 verified_against_commit: bb3d2b755500fc663816d6cbd1a7cd7947a8920b
 ---
 
@@ -50,6 +50,10 @@ Live inspection of an installed CLI against the packaged floor, returning capabi
 ## SSE
 
 Server-Sent Events stream at `GET /conversations/{id}/events`. Replay uses conversation-local sequence ids and `Last-Event-ID`.
+
+## TTH
+
+Abbreviation for TalkToHarnesses, the unified coding-agent harness interface. The Python package and import path remain `talktoharnesses`. See [TalkToHarnesses overview](overview.md).
 
 ## Turn
 

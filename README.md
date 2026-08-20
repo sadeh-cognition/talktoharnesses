@@ -1,6 +1,6 @@
-# talktoharnesses
+# talktoharnesses (TTH)
 
-Unified coding-agent harness interface with an optional Django application
+TalkToHarnesses (TTH) is a unified coding-agent harness interface with an optional Django application
 surface. One distribution exposes six adapters (Grok, Cursor, Codex, Claude
 Code, OpenCode, Prime Agent), a persistence-backed asynchronous facade, and authenticated
 HTTP/SSE APIs.

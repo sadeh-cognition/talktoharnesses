@@ -12,11 +12,13 @@ from talktoharnesses.domain.errors import DomainError
 from talktoharnesses.domain.events import (
     AssistantMessageDeltaPayload,
     AssistantMessageStartedPayload,
+    CostUpdatedPayload,
     InteractionRequestedPayload,
     ToolRequestedPayload,
     TurnCompletedPayload,
     TurnInterruptedPayload,
     TurnOutcomeUnknownPayload,
+    UsageUpdatedPayload,
 )
 from talktoharnesses.domain.models import ApprovalRequestPayload
 from talktoharnesses.providers.acp.pending import PendingAcpApproval
@@ -25,6 +27,54 @@ from talktoharnesses.providers.adapter import HarnessInteractionRequest
 from talktoharnesses.providers.grok.adapter import GrokAdapter
 from talktoharnesses.providers.grok.compatibility import match_release
 from talktoharnesses.providers.grok.normalizer import GrokNormalizer
+
+
+def test_xai_turn_completed_maps_usage_and_cost() -> None:
+    normalizer = GrokNormalizer()
+    normalizer.set_session("sess-1")
+    turn_id = uuid4()
+    normalizer.begin_turn(turn_id)
+
+    events = normalizer.on_xai_session_notification(
+        {
+            "sessionId": "sess-1",
+            "update": {
+                "sessionUpdate": "turn_completed",
+                "usage": {
+                    "inputTokens": 72_738,
+                    "outputTokens": 1_294,
+                    "totalTokens": 74_032,
+                    "cachedReadTokens": 33_408,
+                    "costUsdTicks": 327_917_760,
+                },
+            },
+        }
+    )
+
+    assert len(events) == 2
+    usage = events[0]
+    assert isinstance(usage, UsageUpdatedPayload)
+    assert usage.turn_id == turn_id
+    assert usage.input_tokens == 72_738
+    assert usage.output_tokens == 1_294
+    assert usage.total_tokens == 74_032
+    assert usage.cached_input_tokens == 33_408
+    cost = events[1]
+    assert isinstance(cost, CostUpdatedPayload)
+    assert cost.cost == "0.032791776"
+    assert cost.currency == "USD"
+
+
+def test_xai_session_notification_ignores_non_terminal_updates() -> None:
+    normalizer = GrokNormalizer()
+    normalizer.set_session("sess-1")
+
+    assert normalizer.on_xai_session_notification(
+        {
+            "sessionId": "sess-1",
+            "update": {"sessionUpdate": "model_changed", "model_id": "grok"},
+        }
+    ) == []
 
 
 def test_message_stream_and_terminal() -> None:

@@ -13,6 +13,7 @@ from talktoharnesses.domain.events import (
     AssistantMessageStartedPayload,
     ConversationEvent,
     ConversationTitleUpdatedPayload,
+    CostUpdatedPayload,
     HarnessEvent,
     InteractionRequestedPayload,
     InteractionResolvedPayload,
@@ -149,6 +150,7 @@ def dispatch_harness_event(
             ToolCompletedPayload,
             ToolFailedPayload,
             UsageUpdatedPayload,
+            CostUpdatedPayload,
             InteractionResolvedPayload,
         ),
     ):

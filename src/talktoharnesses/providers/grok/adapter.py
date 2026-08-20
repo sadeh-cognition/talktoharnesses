@@ -46,6 +46,7 @@ from talktoharnesses.runtime.handle import ProcessHandle
 
 logger = logging.getLogger(__name__)
 
+
 def _map_dict(value: object) -> dict[str, Any]:
     # Accept partially-unknown JSON dicts under strict Pyright.
     if not isinstance(value, dict):
@@ -295,6 +296,10 @@ class GrokAdapter:
         if self._connection is None:
             conn = AcpConnection(self._process, protocol=grok_acp_protocol())
             conn.set_notification_handler("session/update", self._on_session_update)
+            conn.set_notification_handler(
+                "_x.ai/session_notification",
+                self._on_xai_session_notification,
+            )
             for method in (
                 "_x.ai/mcp/servers_updated",
                 "_x.ai/settings/update",
@@ -373,6 +378,11 @@ class GrokAdapter:
     async def _on_session_update(self, notification: Any) -> None:
         params = _map_dict(cast(object, notification.params))
         events = self._normalizer.on_session_update(params)
+        await self._emit_many(events)
+
+    async def _on_xai_session_notification(self, notification: Any) -> None:
+        params = _map_dict(cast(object, notification.params))
+        events = self._normalizer.on_xai_session_notification(params)
         await self._emit_many(events)
 
     async def _on_control_notification(self, notification: Any) -> None:
