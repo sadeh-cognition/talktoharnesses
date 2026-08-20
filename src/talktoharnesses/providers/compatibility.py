@@ -1,16 +1,17 @@
-"""Provider-neutral compatibility envelope and SUPPORTED_HARNESSES rendering."""
+"""Provider-neutral compatibility floor, operation gating, and SUPPORTED_HARNESSES rendering."""
 
 from __future__ import annotations
 
 import sys
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Sequence
 from importlib.metadata import version as package_version
-from typing import Literal, Protocol, runtime_checkable
+from typing import Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from talktoharnesses.domain.enums import ErrorCode, HarnessKind
 from talktoharnesses.domain.errors import DomainError
+from talktoharnesses.domain.models import HarnessCapabilities, VersionAdvisory
 
 _COMPAT = ConfigDict(extra="forbid", frozen=True)
 
@@ -24,6 +25,7 @@ MatrixMode = Literal[
     "nested_activity",
 ]
 ValidationMode = Literal["development", "stable"]
+VersionCompare = Callable[[str, str], int | None]
 _KNOWN_PLATFORMS: frozenset[str] = frozenset({"linux", "darwin", "win32"})
 MATRIX_MODES: tuple[MatrixMode, ...] = (
     "create",
@@ -40,47 +42,12 @@ CAPABILITY_FLAG_FOR_MODE: dict[MatrixMode, str] = {
     "multi_interaction": "supports_multi_interaction",
     "nested_activity": "supports_nested_activity",
 }
-_MATRIX_HEADINGS: dict[MatrixMode, tuple[str, str]] = {
-    "create": (
-        "### Published create matrix",
-        "Create rows are added only after the opt-in create suite passes.",
-    ),
-    "resume": (
-        "### Published resume matrix",
-        "Resume rows are added only after the opt-in resume suite passes.",
-    ),
-    "steer": (
-        "### Published steer matrix",
-        "Steer rows are added only after the opt-in steer gate passes.",
-    ),
-    "interrupt": (
-        "### Published interrupt matrix",
-        "Interrupt rows are added only after the opt-in interrupt gate passes.",
-    ),
-    "multi_interaction": (
-        "### Published multi-interaction matrix",
-        "Multi-interaction rows are added only after the opt-in multi-interaction gate passes.",
-    ),
-    "nested_activity": (
-        "### Published nested-activity matrix",
-        "Nested-activity rows are added only after the opt-in nested-activity gate passes.",
-    ),
-}
 CAPABILITY_TABLE_HEADER = "Resume | Interrupt | Steer | Multi-interaction | Nested"
 CAPABILITY_TABLE_DIVIDER = "--- | --- | --- | --- | ---"
 
 
-class CompatibilityMatrixEntry(BaseModel):
-    """Exact support claim for one release on one platform."""
-
-    model_config = _COMPAT
-
-    release_id: str
-    platform: PlatformName
-
-
 class ReleaseCapabilities(BaseModel):
-    """Shared capability flags for one exact harness release."""
+    """Adapter-owned capability flags copied onto probed identities."""
 
     model_config = _COMPAT
 
@@ -91,18 +58,37 @@ class ReleaseCapabilities(BaseModel):
     supports_nested_activity: bool = False
 
 
-@runtime_checkable
-class ReleaseLike(Protocol):
-    """Minimal release shape needed for matrix validation."""
+class LatestVerified(BaseModel):
+    """Last live-proven identity. Advisory only; not an allowlist."""
+
+    model_config = _COMPAT
+
+    version: str
+    identity: str | None = None
+    platform: PlatformName | None = None
+
+
+class CompatibilityFloor(BaseModel):
+    """Minimum identity the adapter will drive on published platforms."""
+
+    model_config = _COMPAT
+
+    version: str
+    platforms: list[PlatformName] = Field(default_factory=list[PlatformName])
+    capabilities: ReleaseCapabilities = Field(default_factory=ReleaseCapabilities)
+
+
+class FloorDocument(Protocol):
+    """Packaged JSON document shape used by validation."""
 
     @property
-    def id(self) -> str: ...
+    def adapter_version(self) -> str: ...
 
     @property
-    def platforms(self) -> Sequence[str]: ...
+    def floor(self) -> CompatibilityFloor: ...
 
     @property
-    def capabilities(self) -> ReleaseCapabilities: ...
+    def latest_verified(self) -> LatestVerified | None: ...
 
 
 class CompatibilitySection(Protocol):
@@ -114,36 +100,25 @@ class CompatibilitySection(Protocol):
     @property
     def adapter_version(self) -> str: ...
 
-    def matrix(self, mode: MatrixMode) -> Sequence[CompatibilityMatrixEntry]:
-        """Return the published matrix for one operation or capability."""
-        ...
+    @property
+    def floor_label(self) -> str: ...
 
-    def render_release_rows(self) -> list[str]:
-        """Return Markdown table rows (without header) for known releases."""
+    @property
+    def platforms(self) -> Sequence[str]: ...
+
+    @property
+    def capabilities(self) -> ReleaseCapabilities: ...
+
+    @property
+    def latest_verified(self) -> LatestVerified | None: ...
+
+    def render_extra_floor_lines(self) -> list[str]:
+        """Optional extra bullet lines under the floor summary."""
         ...
 
     def render_extra_notes(self) -> list[str]:
         """Optional trailing Markdown lines for this harness section."""
         ...
-
-
-@runtime_checkable
-class CompatibilityDocument(Protocol):
-    """Packaged JSON document shape used by validation."""
-
-    @property
-    def adapter_version(self) -> str: ...
-
-    @property
-    def releases(self) -> Sequence[ReleaseLike]: ...
-
-    @property
-    def create_matrix(self) -> Sequence[CompatibilityMatrixEntry]: ...
-
-    @property
-    def resume_matrix(self) -> Sequence[CompatibilityMatrixEntry]: ...
-
-    def as_mapping(self) -> Mapping[MatrixMode, Sequence[CompatibilityMatrixEntry]]: ...
 
 
 _SectionLoader = Callable[[], CompatibilitySection]
@@ -160,145 +135,245 @@ def installed_package_version() -> str:
     return package_version("talktoharnesses")
 
 
-def _release_map(releases: Sequence[ReleaseLike]) -> dict[str, ReleaseLike]:
-    mapping: dict[str, ReleaseLike] = {}
-    for release in releases:
-        if release.id in mapping:
-            raise DomainError(
-                ErrorCode.PROVIDER_INCOMPATIBLE,
-                "duplicate release id in compatibility document",
-                details={"release_id": release.id},
-            )
-        mapping[release.id] = release
-    return mapping
+def compare_dotted(left: str, right: str) -> int | None:
+    """Compare dotted numeric versions (``1.0.5``, ``0.144.4``)."""
+    parsed_left = _dotted_parts(left)
+    parsed_right = _dotted_parts(right)
+    if parsed_left is None or parsed_right is None:
+        return None
+    length = max(len(parsed_left), len(parsed_right))
+    padded_left = parsed_left + (0,) * (length - len(parsed_left))
+    padded_right = parsed_right + (0,) * (length - len(parsed_right))
+    if padded_left < padded_right:
+        return -1
+    if padded_left > padded_right:
+        return 1
+    return 0
 
 
-def validate_matrices(
+def compare_cursor_date(left: str, right: str) -> int | None:
+    """Compare Cursor ``YYYY.MM.DD`` prefixes; ignore the trailing build hash."""
+    parsed_left = _cursor_date_parts(left)
+    parsed_right = _cursor_date_parts(right)
+    if parsed_left is None or parsed_right is None:
+        return None
+    if parsed_left < parsed_right:
+        return -1
+    if parsed_left > parsed_right:
+        return 1
+    return 0
+
+
+def version_advisory(
     *,
-    releases: Sequence[ReleaseLike],
-    matrices: Mapping[MatrixMode, Sequence[CompatibilityMatrixEntry]],
-    harness_label: str,
-) -> None:
-    """Reject unknown, duplicate, platform-mismatched, or capability-mismatched rows."""
-    by_id = _release_map(releases)
-    for mode in MATRIX_MODES:
-        matrix = matrices.get(mode, ())
-        seen: set[tuple[str, str]] = set()
-        for entry in matrix:
-            key = (entry.release_id, entry.platform)
-            if key in seen:
-                raise DomainError(
-                    ErrorCode.PROVIDER_INCOMPATIBLE,
-                    f"duplicate {mode} matrix entry",
-                    details={
-                        "harness": harness_label,
-                        "release_id": entry.release_id,
-                        "platform": entry.platform,
-                    },
-                )
-            seen.add(key)
-            release = by_id.get(entry.release_id)
-            if release is None:
-                raise DomainError(
-                    ErrorCode.PROVIDER_INCOMPATIBLE,
-                    f"unknown release in {mode} matrix",
-                    details={
-                        "harness": harness_label,
-                        "release_id": entry.release_id,
-                        "known_releases": sorted(by_id),
-                    },
-                )
-            if entry.platform not in _KNOWN_PLATFORMS:
-                raise DomainError(
-                    ErrorCode.PROVIDER_INCOMPATIBLE,
-                    f"unsupported platform in {mode} matrix",
-                    details={
-                        "harness": harness_label,
-                        "release_id": entry.release_id,
-                        "platform": entry.platform,
-                    },
-                )
-            if entry.platform not in release.platforms:
-                raise DomainError(
-                    ErrorCode.PROVIDER_INCOMPATIBLE,
-                    "matrix platform absent from release record",
-                    details={
-                        "harness": harness_label,
-                        "release_id": entry.release_id,
-                        "platform": entry.platform,
-                        "supported_platforms": list(release.platforms),
-                    },
-                )
-            flag = CAPABILITY_FLAG_FOR_MODE.get(mode)
-            if flag is not None and not bool(getattr(release.capabilities, flag)):
-                raise DomainError(
-                    ErrorCode.PROVIDER_INCOMPATIBLE,
-                    f"{mode} matrix entry for release without {flag}",
-                    details={
-                        "harness": harness_label,
-                        "release_id": entry.release_id,
-                        "platform": entry.platform,
-                    },
-                )
-
-
-def matrix_contains(
-    matrix: Sequence[CompatibilityMatrixEntry],
-    *,
-    release_id: str,
-    platform: str,
-) -> bool:
-    """Return whether an exact release/platform pair is published."""
-    return any(entry.release_id == release_id and entry.platform == platform for entry in matrix)
-
-
-def assert_matrix_membership(
-    *,
-    release_id: str,
-    platform: str,
-    matrix: Sequence[CompatibilityMatrixEntry],
-    mode: MatrixMode,
-    harness_label: str,
-    package_version: str | None = None,
-    enforce_published: bool = True,
-) -> None:
-    """Fail when a published matrix is enforced and the release/platform is absent."""
-    if not enforce_published:
-        return
-    version = package_version if package_version is not None else installed_package_version()
-    if not matrix:
-        if is_development_version(version):
-            return
-        raise DomainError(
-            ErrorCode.PROVIDER_INCOMPATIBLE,
-            f"empty published {mode} matrix is not allowed for a stable release",
-            details={"harness": harness_label, "package_version": version},
+    probed: str,
+    floor: str,
+    latest_verified: str | None,
+    compare: VersionCompare,
+) -> VersionAdvisory:
+    """Compare a probed identity to the floor and last live proof. Never raises."""
+    if compare(probed, floor) is None:
+        return VersionAdvisory(
+            status="unknown",
+            probed_version=probed,
+            floor_version=floor,
+            latest_verified=latest_verified,
         )
+    if latest_verified is None or compare(probed, latest_verified) is None:
+        return VersionAdvisory(
+            status="unknown",
+            probed_version=probed,
+            floor_version=floor,
+            latest_verified=latest_verified,
+        )
+    versus_latest = compare(probed, latest_verified)
+    if versus_latest == 0:
+        status: Literal["verified", "behind_verified", "ahead_of_verified", "unknown"] = "verified"
+    elif versus_latest is not None and versus_latest < 0:
+        status = "behind_verified"
+    else:
+        status = "ahead_of_verified"
+    return VersionAdvisory(
+        status=status,
+        probed_version=probed,
+        floor_version=floor,
+        latest_verified=latest_verified,
+    )
+
+
+def comparable_probe_version(capabilities: HarnessCapabilities) -> str:
+    """Extract the identity used for floor/advisory comparison."""
+    raw = capabilities.version
+    if capabilities.kind is HarnessKind.GROK:
+        return raw.split()[0] if raw.split() else raw
+    if capabilities.kind is HarnessKind.CURSOR:
+        return raw.split("-", 1)[0]
+    if capabilities.kind is HarnessKind.CLAUDE and "+cli-" in raw:
+        return raw.split("+cli-", 1)[1]
+    return raw
+
+
+def advisory_for_capabilities(capabilities: HarnessCapabilities) -> VersionAdvisory:
+    """Build an advisory from a probed capabilities snapshot and packaged floor."""
+    floor_version, latest, compare = _floor_compare_for_kind(capabilities.kind)
+    return version_advisory(
+        probed=comparable_probe_version(capabilities),
+        floor=floor_version,
+        latest_verified=latest,
+        compare=compare,
+    )
+
+
+def assert_supported_platform(
+    platform: str,
+    platforms: Sequence[str],
+    *,
+    harness_label: str,
+) -> None:
+    """Reject unknown or unpublished platforms."""
     if platform not in _KNOWN_PLATFORMS:
         raise DomainError(
             ErrorCode.PROVIDER_INCOMPATIBLE,
-            f"unsupported platform for {mode}",
+            f"unsupported platform for {harness_label}",
             details={"harness": harness_label, "platform": platform},
         )
-    if not matrix_contains(matrix, release_id=release_id, platform=platform):
+    if platform not in platforms:
         raise DomainError(
             ErrorCode.PROVIDER_INCOMPATIBLE,
-            f"{harness_label} release not in published {mode} matrix for this platform",
+            f"{harness_label} release not supported on this platform",
             details={
-                "release_id": release_id,
                 "platform": platform,
-                "matrix": [
-                    {"release_id": entry.release_id, "platform": entry.platform} for entry in matrix
-                ],
+                "supported_platforms": list(platforms),
             },
         )
 
 
-def sorted_matrix_entries(
-    matrix: Sequence[CompatibilityMatrixEntry],
-) -> list[CompatibilityMatrixEntry]:
-    """Deterministic matrix order: release ID, then platform."""
-    return sorted(matrix, key=lambda entry: (entry.release_id, entry.platform))
+def reject_below_floor(
+    *,
+    probed: str,
+    floor: str,
+    compare: VersionCompare,
+    harness_label: str,
+    details: dict[str, object],
+) -> None:
+    """Fail when the probed identity is older than the packaged floor."""
+    versus = compare(probed, floor)
+    if versus is None:
+        raise DomainError(
+            ErrorCode.PROVIDER_INCOMPATIBLE,
+            f"malformed {harness_label} version for floor comparison",
+            details=details,
+        )
+    if versus < 0:
+        raise DomainError(
+            ErrorCode.PROVIDER_INCOMPATIBLE,
+            f"{harness_label} release is below the compatibility floor",
+            details={**details, "floor_version": floor, "probed_version": probed},
+        )
+
+
+def enforce_operation(
+    capabilities: ReleaseCapabilities,
+    *,
+    mode: MatrixMode,
+    platforms: Sequence[str],
+    harness_label: str,
+    platform: str | None = None,
+    enforce: bool = True,
+) -> None:
+    """Gate create/resume/steer/interrupt by floor platform and capability flags."""
+    if not enforce:
+        return
+    assert_supported_platform(
+        platform or sys.platform,
+        platforms,
+        harness_label=harness_label,
+    )
+    if mode == "create":
+        return
+    flag = CAPABILITY_FLAG_FOR_MODE.get(mode)
+    if flag is None or bool(getattr(capabilities, flag)):
+        return
+    raise DomainError(
+        ErrorCode.PROVIDER_INCOMPATIBLE,
+        f"{harness_label} does not advertise {mode}",
+        details={"harness": harness_label, "mode": mode},
+    )
+
+
+def validate_floor_document(
+    doc: FloorDocument,
+    *,
+    harness_label: str,
+    compare: VersionCompare,
+) -> None:
+    """Reject malformed floors or latest_verified entries below the floor."""
+    if not doc.floor.version.strip():
+        raise DomainError(
+            ErrorCode.PROVIDER_INCOMPATIBLE,
+            "compatibility floor is missing a version",
+            details={"harness": harness_label},
+        )
+    if compare(doc.floor.version, doc.floor.version) is None:
+        raise DomainError(
+            ErrorCode.PROVIDER_INCOMPATIBLE,
+            "compatibility floor version is malformed",
+            details={"harness": harness_label, "floor_version": doc.floor.version},
+        )
+    if not doc.floor.platforms:
+        raise DomainError(
+            ErrorCode.PROVIDER_INCOMPATIBLE,
+            "compatibility floor requires at least one platform",
+            details={"harness": harness_label},
+        )
+    for platform in doc.floor.platforms:
+        if platform not in _KNOWN_PLATFORMS:
+            raise DomainError(
+                ErrorCode.PROVIDER_INCOMPATIBLE,
+                "unsupported platform in compatibility floor",
+                details={"harness": harness_label, "platform": platform},
+            )
+    latest = doc.latest_verified
+    if latest is None:
+        return
+    versus = compare(latest.version, doc.floor.version)
+    if versus is not None and versus < 0:
+        raise DomainError(
+            ErrorCode.PROVIDER_INCOMPATIBLE,
+            "latest_verified is below the compatibility floor",
+            details={
+                "harness": harness_label,
+                "floor_version": doc.floor.version,
+                "latest_verified": latest.version,
+            },
+        )
+    if latest.platform is not None and latest.platform not in doc.floor.platforms:
+        raise DomainError(
+            ErrorCode.PROVIDER_INCOMPATIBLE,
+            "latest_verified platform is absent from the floor",
+            details={
+                "harness": harness_label,
+                "platform": latest.platform,
+                "supported_platforms": list(doc.floor.platforms),
+            },
+        )
+
+
+def yes_no(value: bool) -> str:
+    return "yes" if value else "no"
+
+
+def capability_cells(caps: ReleaseCapabilities) -> str:
+    """Markdown cells for the shared capability columns."""
+    return " | ".join(
+        (
+            yes_no(caps.supports_resume),
+            yes_no(caps.supports_interrupt),
+            yes_no(caps.supports_steer),
+            yes_no(caps.supports_multi_interaction),
+            yes_no(caps.supports_nested_activity),
+        )
+    )
 
 
 def _default_loaders() -> list[_SectionLoader]:
@@ -363,25 +438,6 @@ def load_compatibility_sections(
     return sorted(sections, key=lambda section: order.get(section.kind, 999))
 
 
-def _render_matrix_section(
-    title: str,
-    matrix: Sequence[CompatibilityMatrixEntry],
-    *,
-    empty_message: str,
-) -> list[str]:
-    lines = [title, ""]
-    if not matrix:
-        lines.append(empty_message)
-        lines.append("")
-        return lines
-    lines.append("| Release ID | Platform |")
-    lines.append("| --- | --- |")
-    for entry in sorted_matrix_entries(matrix):
-        lines.append(f"| `{entry.release_id}` | `{entry.platform}` |")
-    lines.append("")
-    return lines
-
-
 def render_supported_harnesses_markdown(
     sections: Sequence[CompatibilitySection] | None = None,
 ) -> str:
@@ -393,6 +449,11 @@ def render_supported_harnesses_markdown(
         "This document is generated from packaged compatibility data.",
         "Do not edit provider tables by hand; regenerate via",
         "`python -m talktoharnesses.providers.render_supported`.",
+        "",
+        "Each harness publishes a **floor** (minimum identity and platforms) and",
+        "adapter-owned capability flags. Models, modes, and efforts are discovered",
+        "at probe from the installed CLI. Newer identities above the floor are",
+        "accepted; `latest_verified` is advisory only.",
         "",
     ]
     if not resolved:
@@ -408,31 +469,39 @@ def render_supported_harnesses_markdown(
             title = "Claude Code"
         elif section.kind is HarnessKind.PRIME_AGENT:
             title = "Prime Agent"
-        lines.append(f"## {title}")
-        lines.append("")
-        lines.append(f"- Adapter version: `{section.adapter_version}`")
-        lines.append("")
-        lines.append("### Known releases (implementation targets)")
-        lines.append("")
-        rows = section.render_release_rows()
-        if not rows:
-            lines.append("_No releases recorded._")
-            lines.append("")
-        else:
-            lines.extend(rows)
-            if rows and not rows[-1].endswith("\n") and rows[-1] != "":
-                lines.append("")
-        for mode in MATRIX_MODES:
-            heading, empty_reason = _MATRIX_HEADINGS[mode]
-            lines.extend(
-                _render_matrix_section(
-                    heading,
-                    section.matrix(mode),
-                    empty_message=(
-                        f"_No published {mode.replace('_', '-')} combinations yet. {empty_reason}_"
-                    ),
-                )
+        platforms = ", ".join(section.platforms) if section.platforms else "—"
+        lines.extend(
+            (
+                f"## {title}",
+                "",
+                f"- Adapter version: `{section.adapter_version}`",
+                f"- Floor: {section.floor_label} on {platforms}",
             )
+        )
+        latest = section.latest_verified
+        if latest is None:
+            lines.append("- Latest verified: _none_")
+        else:
+            identity = latest.identity or latest.version
+            latest_platform = latest.platform or "—"
+            lines.append(f"- Latest verified: `{identity}` on {latest_platform}")
+        lines.append(
+            "- Models, modes, and efforts are discovered at probe from the installed CLI."
+        )
+        extra_floor = section.render_extra_floor_lines()
+        if extra_floor:
+            lines.extend(extra_floor)
+        lines.extend(
+            (
+                "",
+                "### Adapter capabilities",
+                "",
+                f"| {CAPABILITY_TABLE_HEADER} |",
+                f"| {CAPABILITY_TABLE_DIVIDER} |",
+                f"| {capability_cells(section.capabilities)} |",
+                "",
+            )
+        )
         extra = section.render_extra_notes()
         if extra:
             lines.extend(extra)
@@ -441,7 +510,7 @@ def render_supported_harnesses_markdown(
     return "\n".join(lines)
 
 
-def _load_provider_documents() -> list[tuple[str, CompatibilityDocument]]:
+def _load_provider_documents() -> list[tuple[str, FloorDocument, VersionCompare]]:
     """Load every packaged provider document for validation."""
     from talktoharnesses.providers.claude.compatibility import load_claude_compatibility
     from talktoharnesses.providers.codex.compatibility import load_codex_compatibility
@@ -451,36 +520,13 @@ def _load_provider_documents() -> list[tuple[str, CompatibilityDocument]]:
     from talktoharnesses.providers.prime_agent.compatibility import load_prime_agent_compatibility
 
     return [
-        ("grok", load_grok_compatibility()),
-        ("cursor", load_cursor_compatibility()),
-        ("codex", load_codex_compatibility()),
-        ("claude", load_claude_compatibility()),
-        ("opencode", load_opencode_compatibility()),
-        ("prime_agent", load_prime_agent_compatibility()),
+        ("grok", load_grok_compatibility(), compare_dotted),
+        ("cursor", load_cursor_compatibility(), compare_cursor_date),
+        ("codex", load_codex_compatibility(), compare_dotted),
+        ("claude", load_claude_compatibility(), compare_dotted),
+        ("opencode", load_opencode_compatibility(), compare_dotted),
+        ("prime_agent", load_prime_agent_compatibility(), compare_dotted),
     ]
-
-
-def _require_advertised_matrix_rows(
-    *,
-    releases: Sequence[ReleaseLike],
-    matrices: Mapping[MatrixMode, Sequence[CompatibilityMatrixEntry]],
-    harness_label: str,
-) -> None:
-    """Stable releases must publish a row for every advertised capability."""
-    for release in releases:
-        for mode, flag in CAPABILITY_FLAG_FOR_MODE.items():
-            if not bool(getattr(release.capabilities, flag)):
-                continue
-            matrix = matrices.get(mode, ())
-            if not any(entry.release_id == release.id for entry in matrix):
-                raise DomainError(
-                    ErrorCode.PROVIDER_INCOMPATIBLE,
-                    f"advertised {flag} requires a published {mode} matrix row",
-                    details={
-                        "harness": harness_label,
-                        "release_id": release.id,
-                    },
-                )
 
 
 def validate_compatibility_documents(*, mode: ValidationMode = "development") -> None:
@@ -493,126 +539,71 @@ def validate_compatibility_documents(*, mode: ValidationMode = "development") ->
             "expected one compatibility document per harness kind",
             details={"count": len(docs)},
         )
-    for label, doc in docs:
-        matrices = doc.as_mapping()
-        validate_matrices(
-            releases=doc.releases,
-            matrices=matrices,
-            harness_label=label,
-        )
-        if mode == "stable":
-            if is_development_version(installed) or is_development_version(doc.adapter_version):
-                raise DomainError(
-                    ErrorCode.PROVIDER_INCOMPATIBLE,
-                    "stable validation rejects development versions",
-                    details={
-                        "harness": label,
-                        "package_version": installed,
-                        "adapter_version": doc.adapter_version,
-                    },
-                )
-            if doc.adapter_version != installed:
-                raise DomainError(
-                    ErrorCode.PROVIDER_INCOMPATIBLE,
-                    "adapter version must equal installed package version",
-                    details={
-                        "harness": label,
-                        "adapter_version": doc.adapter_version,
-                        "package_version": installed,
-                    },
-                )
-            if not doc.create_matrix or not doc.resume_matrix:
-                raise DomainError(
-                    ErrorCode.PROVIDER_INCOMPATIBLE,
-                    "stable release requires non-empty create and resume matrices",
-                    details={
-                        "harness": label,
-                        "create_count": len(doc.create_matrix),
-                        "resume_count": len(doc.resume_matrix),
-                    },
-                )
-            if not doc.releases:
-                raise DomainError(
-                    ErrorCode.PROVIDER_INCOMPATIBLE,
-                    "stable release requires pinned release records",
-                    details={"harness": label},
-                )
-            _require_advertised_matrix_rows(
-                releases=doc.releases,
-                matrices=matrices,
-                harness_label=label,
+    for label, doc, compare in docs:
+        validate_floor_document(doc, harness_label=label, compare=compare)
+        if mode != "stable":
+            continue
+        if is_development_version(installed) or is_development_version(doc.adapter_version):
+            raise DomainError(
+                ErrorCode.PROVIDER_INCOMPATIBLE,
+                "stable validation rejects development versions",
+                details={
+                    "harness": label,
+                    "package_version": installed,
+                    "adapter_version": doc.adapter_version,
+                },
+            )
+        if doc.adapter_version != installed:
+            raise DomainError(
+                ErrorCode.PROVIDER_INCOMPATIBLE,
+                "adapter version must equal installed package version",
+                details={
+                    "harness": label,
+                    "adapter_version": doc.adapter_version,
+                    "package_version": installed,
+                },
             )
 
 
-class EmptyExtraNotes(BaseModel):
-    """Mixin helper for sections with no trailing notes."""
-
-    model_config = _COMPAT
-
-    def render_extra_notes(self) -> list[str]:
-        return []
-
-
-def yes_no(value: bool) -> str:
-    return "yes" if value else "no"
+def _dotted_parts(version: str) -> tuple[int, ...] | None:
+    if not version or any(char.isspace() for char in version):
+        return None
+    parts = version.split(".")
+    if not parts or any(not part.isdigit() for part in parts):
+        return None
+    return tuple(int(part) for part in parts)
 
 
-def capability_cells(caps: ReleaseCapabilities) -> str:
-    """Markdown cells for the shared capability columns."""
-    return " | ".join(
-        (
-            yes_no(caps.supports_resume),
-            yes_no(caps.supports_interrupt),
-            yes_no(caps.supports_steer),
-            yes_no(caps.supports_multi_interaction),
-            yes_no(caps.supports_nested_activity),
-        )
-    )
+def _cursor_date_parts(value: str) -> tuple[int, int, int] | None:
+    date = value.split("-", 1)[0]
+    parts = _dotted_parts(date)
+    if parts is None or len(parts) != 3:
+        return None
+    year, month, day = parts
+    if year < 2000 or not (1 <= month <= 12) or not (1 <= day <= 31):
+        return None
+    return year, month, day
 
 
-def enforce_doc_operation(
-    doc: SharedMatrices,
-    release_id: str,
-    *,
-    mode: MatrixMode,
-    harness_label: str,
-    platform: str | None = None,
-    enforce_published: bool = True,
-) -> None:
-    """Validate a probed release against one published matrix on ``doc``."""
-    assert_matrix_membership(
-        release_id=release_id,
-        platform=platform or sys.platform,
-        matrix=getattr(doc, f"{mode}_matrix"),
-        mode=mode,
-        harness_label=harness_label,
-        enforce_published=enforce_published,
-    )
+def _floor_compare_for_kind(
+    kind: HarnessKind,
+) -> tuple[str, str | None, VersionCompare]:
+    from talktoharnesses.providers.claude.compatibility import load_claude_compatibility
+    from talktoharnesses.providers.codex.compatibility import load_codex_compatibility
+    from talktoharnesses.providers.cursor.compatibility import load_cursor_compatibility
+    from talktoharnesses.providers.grok.compatibility import load_grok_compatibility
+    from talktoharnesses.providers.opencode.compatibility import load_opencode_compatibility
+    from talktoharnesses.providers.prime_agent.compatibility import load_prime_agent_compatibility
 
-
-class SharedMatrices(BaseModel):
-    """Shared published-matrix containers for every harness document."""
-
-    model_config = _COMPAT
-
-    create_matrix: list[CompatibilityMatrixEntry] = Field(
-        default_factory=list[CompatibilityMatrixEntry]
-    )
-    resume_matrix: list[CompatibilityMatrixEntry] = Field(
-        default_factory=list[CompatibilityMatrixEntry]
-    )
-    steer_matrix: list[CompatibilityMatrixEntry] = Field(
-        default_factory=list[CompatibilityMatrixEntry]
-    )
-    interrupt_matrix: list[CompatibilityMatrixEntry] = Field(
-        default_factory=list[CompatibilityMatrixEntry]
-    )
-    multi_interaction_matrix: list[CompatibilityMatrixEntry] = Field(
-        default_factory=list[CompatibilityMatrixEntry]
-    )
-    nested_activity_matrix: list[CompatibilityMatrixEntry] = Field(
-        default_factory=list[CompatibilityMatrixEntry]
-    )
-
-    def as_mapping(self) -> dict[MatrixMode, list[CompatibilityMatrixEntry]]:
-        return {mode: list(getattr(self, f"{mode}_matrix")) for mode in MATRIX_MODES}
+    loaders: dict[HarnessKind, tuple[Callable[[], FloorDocument], VersionCompare]] = {
+        HarnessKind.GROK: (load_grok_compatibility, compare_dotted),
+        HarnessKind.CURSOR: (load_cursor_compatibility, compare_cursor_date),
+        HarnessKind.CODEX: (load_codex_compatibility, compare_dotted),
+        HarnessKind.CLAUDE: (load_claude_compatibility, compare_dotted),
+        HarnessKind.OPENCODE: (load_opencode_compatibility, compare_dotted),
+        HarnessKind.PRIME_AGENT: (load_prime_agent_compatibility, compare_dotted),
+    }
+    loader, compare = loaders[kind]
+    doc = loader()
+    latest = doc.latest_verified.version if doc.latest_verified is not None else None
+    return doc.floor.version, latest, compare

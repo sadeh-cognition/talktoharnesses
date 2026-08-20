@@ -1,47 +1,20 @@
 {
   "adapter_version": "2026.8.5",
-  "releases": [
-    {
-      "id": "prime-agent-0.7.1",
-      "cli_version": "0.7.1",
-      "platforms": [
-        "linux",
-        "darwin"
-      ],
-      "capabilities": {
-        "supports_resume": true,
-        "supports_interrupt": true,
-        "supports_steer": true,
-        "supports_multi_interaction": false,
-        "supports_nested_activity": false
-      },
-      "notes": "Uses Prime Agent's official JSONL RPC mode. Create, resume, steer, and interrupt are published for the linux live gate."
-    }
-  ],
-  "create_matrix": [
-    {
-      "release_id": "prime-agent-0.7.1",
-      "platform": "linux"
-    }
-  ],
-  "resume_matrix": [
-    {
-      "release_id": "prime-agent-0.7.1",
-      "platform": "linux"
-    }
-  ],
-  "steer_matrix": [
-    {
-      "release_id": "prime-agent-0.7.1",
-      "platform": "linux"
-    }
-  ],
-  "interrupt_matrix": [
-    {
-      "release_id": "prime-agent-0.7.1",
-      "platform": "linux"
-    }
-  ],
-  "multi_interaction_matrix": [],
-  "nested_activity_matrix": []
+  "floor": {
+    "version": "0.7.1",
+    "platforms": ["linux"],
+    "capabilities": {
+      "supports_resume": true,
+      "supports_interrupt": true,
+      "supports_steer": true,
+      "supports_multi_interaction": false,
+      "supports_nested_activity": false
+    },
+    "notes": "Uses Prime Agent's official JSONL RPC mode. Create, resume, steer, and interrupt are published for the linux live gate."
+  },
+  "latest_verified": {
+    "version": "0.7.1",
+    "identity": "prime-agent-0.7.1",
+    "platform": "linux"
+  }
 }

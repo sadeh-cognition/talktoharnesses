@@ -1,4 +1,4 @@
-"""Strict Grok compatibility source."""
+"""Grok compatibility floor and probed-identity matching."""
 
 from __future__ import annotations
 
@@ -14,21 +14,34 @@ from talktoharnesses.domain.enums import ErrorCode, HarnessKind
 from talktoharnesses.domain.errors import DomainError
 from talktoharnesses.domain.models import HarnessCapabilities, HarnessEffortInfo
 from talktoharnesses.providers.compatibility import (
-    CAPABILITY_TABLE_DIVIDER,
-    CAPABILITY_TABLE_HEADER,
-    CompatibilityMatrixEntry,
+    CompatibilityFloor,
+    LatestVerified,
     MatrixMode,
     ReleaseCapabilities,
-    SharedMatrices,
-    capability_cells,
-    enforce_doc_operation,
-    validate_matrices,
+    assert_supported_platform,
+    compare_dotted,
+    enforce_operation,
+    reject_below_floor,
+    validate_floor_document,
 )
 
 _COMPAT = ConfigDict(extra="forbid", frozen=True)
 
-# Backward-compatible alias used by existing imports/tests.
 GrokReleaseCapabilities = ReleaseCapabilities
+
+_VERSION_RE = re.compile(
+    r"^grok\s+(?P<version>\d+\.\d+\.\d+)\s+\((?P<build>[0-9a-fA-F]+)\)"
+    r"(?:\s+\[(?P<channel>[^\]]+)\])?$",
+)
+
+
+class GrokFloor(CompatibilityFloor):
+    agent_name: str
+    acp_protocol_version: int = 1
+    required_agent_methods: list[str] = Field(default_factory=list)
+    allowlisted_extensions: list[str] = Field(default_factory=list)
+    effort_levels: list[str] = Field(default_factory=list)
+    notes: str | None = None
 
 
 class GrokReleaseRecord(BaseModel):
@@ -58,29 +71,17 @@ class GrokReleaseRecord(BaseModel):
             supports_multi_interaction=self.capabilities.supports_multi_interaction,
             supports_nested_activity=self.capabilities.supports_nested_activity,
             efforts=tuple(
-                HarnessEffortInfo(id=level, label=level.title())
-                for level in self.effort_levels
+                HarnessEffortInfo(id=level, label=level.title()) for level in self.effort_levels
             ),
         )
 
 
-class GrokCompatibilityDoc(SharedMatrices):
+class GrokCompatibilityDoc(BaseModel):
     model_config = _COMPAT
 
     adapter_version: str
-    releases: list[GrokReleaseRecord] = Field(default_factory=list[GrokReleaseRecord])
-
-    def release_by_id(self, release_id: str) -> GrokReleaseRecord | None:
-        for release in self.releases:
-            if release.id == release_id:
-                return release
-        return None
-
-
-_VERSION_RE = re.compile(
-    r"^grok\s+(?P<version>\d+\.\d+\.\d+)\s+\((?P<build>[0-9a-fA-F]+)\)"
-    r"(?:\s+\[(?P<channel>[^\]]+)\])?$",
-)
+    floor: GrokFloor
+    latest_verified: LatestVerified | None = None
 
 
 @lru_cache(maxsize=1)
@@ -89,11 +90,7 @@ def load_grok_compatibility() -> GrokCompatibilityDoc:
     root = resources.files("talktoharnesses.data.compatibility")
     data = (root / "grok.json").read_text(encoding="utf-8")
     doc = GrokCompatibilityDoc.model_validate(json.loads(data))
-    validate_matrices(
-        releases=doc.releases,
-        matrices=doc.as_mapping(),
-        harness_label="grok",
-    )
+    validate_floor_document(doc, harness_label="grok", compare=compare_dotted)
     return doc
 
 
@@ -116,53 +113,39 @@ def match_release(
     *,
     platform: str | None = None,
 ) -> GrokReleaseRecord:
-    """Match version stdout to a known release; fail hard if unknown."""
+    """Match version stdout against the Grok floor; accept identities at or above it."""
     version, build, channel = parse_version_stdout(version_stdout)
     plat = platform or sys.platform
     doc = load_grok_compatibility()
-    for release in doc.releases:
-        if (
-            release.cli_version == version
-            and release.cli_build == build
-            and release.cli_channel == channel
-        ):
-            if release.platforms and plat not in release.platforms:
-                raise DomainError(
-                    ErrorCode.PROVIDER_INCOMPATIBLE,
-                    "grok release not supported on this platform",
-                    details={
-                        "release_id": release.id,
-                        "platform": plat,
-                        "supported_platforms": list(release.platforms),
-                    },
-                )
-            accepted_outputs = {
-                release.version_stdout_prefix,
-                f"{release.version_stdout_prefix} [{release.cli_channel}]",
-            }
-            if version_stdout.strip() not in accepted_outputs:
-                raise DomainError(
-                    ErrorCode.PROVIDER_INCOMPATIBLE,
-                    "grok version output does not match compatibility record",
-                    details={"version_stdout": version_stdout.strip(), "release_id": release.id},
-                )
-            return release
-    raise DomainError(
-        ErrorCode.PROVIDER_INCOMPATIBLE,
-        "unknown grok release",
+    floor = doc.floor
+    assert_supported_platform(plat, floor.platforms, harness_label="grok")
+    reject_below_floor(
+        probed=version,
+        floor=floor.version,
+        compare=compare_dotted,
+        harness_label="grok",
         details={
             "provider": "Grok",
             "installed_version": f"{version} ({build}) [{channel}]",
-            "supported_versions": [
-                f"{release.cli_version} ({release.cli_build}) [{release.cli_channel}]"
-                for release in doc.releases
-                if not release.platforms or plat in release.platforms
-            ],
             "cli_version": version,
             "cli_build": build,
             "cli_channel": channel,
-            "known_releases": [r.id for r in doc.releases],
         },
+    )
+    return GrokReleaseRecord(
+        id=f"grok-{version}-{build}",
+        cli_version=version,
+        cli_build=build,
+        cli_channel=channel,
+        version_stdout_prefix=f"grok {version} ({build})",
+        agent_name=floor.agent_name,
+        acp_protocol_version=floor.acp_protocol_version,
+        platforms=list(floor.platforms),
+        capabilities=floor.capabilities,
+        required_agent_methods=list(floor.required_agent_methods),
+        allowlisted_extensions=list(floor.allowlisted_extensions),
+        effort_levels=list(floor.effort_levels),
+        notes=floor.notes,
     )
 
 
@@ -173,14 +156,14 @@ def enforce_published_operation(
     platform: str | None = None,
     enforce_published: bool = True,
 ) -> None:
-    """Validate the probed release against the published operation matrix."""
-    enforce_doc_operation(
-        load_grok_compatibility(),
-        release.id,
+    """Validate the probed identity against the floor platform and capability flags."""
+    enforce_operation(
+        release.capabilities,
         mode=mode,
+        platforms=release.platforms,
         harness_label="grok",
         platform=platform,
-        enforce_published=enforce_published,
+        enforce=enforce_published,
     )
 
 
@@ -198,29 +181,31 @@ class GrokCompatibilitySection:
     def adapter_version(self) -> str:
         return self._doc.adapter_version
 
-    def matrix(self, mode: MatrixMode) -> list[CompatibilityMatrixEntry]:
-        return list(getattr(self._doc, f"{mode}_matrix"))
+    @property
+    def floor_label(self) -> str:
+        return f"CLI `>= {self._doc.floor.version}`"
 
-    def render_release_rows(self) -> list[str]:
-        doc = self._doc
-        if not doc.releases:
-            return []
-        lines = [
-            f"| Release ID | CLI version | Build | ACP | Platforms | {CAPABILITY_TABLE_HEADER} |",
-            f"| --- | --- | --- | --- | --- | {CAPABILITY_TABLE_DIVIDER} |",
-        ]
-        for release in doc.releases:
-            platforms = ", ".join(release.platforms) if release.platforms else "—"
-            caps = release.capabilities
-            lines.append(
-                f"| `{release.id}` | {release.cli_version} | `{release.cli_build}` | "
-                f"v{release.acp_protocol_version} | {platforms} | "
-                f"{capability_cells(caps)} |"
-            )
-        return lines
+    @property
+    def platforms(self) -> list[str]:
+        return list(self._doc.floor.platforms)
+
+    @property
+    def capabilities(self) -> ReleaseCapabilities:
+        return self._doc.floor.capabilities
+
+    @property
+    def latest_verified(self) -> LatestVerified | None:
+        return self._doc.latest_verified
+
+    def render_extra_floor_lines(self) -> list[str]:
+        floor = self._doc.floor
+        return [f"- ACP: v{floor.acp_protocol_version}"]
 
     def render_extra_notes(self) -> list[str]:
-        return []
+        notes = self._doc.floor.notes
+        if not notes:
+            return []
+        return ["### Notes", "", f"- {notes}"]
 
 
 def grok_compatibility_section() -> GrokCompatibilitySection:

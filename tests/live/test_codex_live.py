@@ -17,7 +17,6 @@ from tests.live.helpers import LiveHttp, run_live_gate
 
 from talktoharnesses.domain.enums import HarnessKind
 from talktoharnesses.domain.models import HarnessConfiguration
-from talktoharnesses.providers.codex.compatibility import load_codex_compatibility
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("TALKTOHARNESSES_LIVE_CODEX") != "1",
@@ -33,5 +32,4 @@ async def test_live_codex_create_resume_interaction(live_http: LiveHttp) -> None
             working_directory=str(live_http.workspace),
             mode="workspace_write",
         ),
-        releases=load_codex_compatibility().releases,
     )

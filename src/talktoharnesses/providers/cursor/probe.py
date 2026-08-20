@@ -41,7 +41,7 @@ from talktoharnesses.runtime.supervisor import ProcessSupervisor
 
 _EFFORT_CACHE: dict[
     tuple[str, str, str, bool, str],
-    tuple[tuple[HarnessEffortInfo, ...], tuple[HarnessModelInfo, ...]],
+    tuple[tuple[HarnessEffortInfo, ...], tuple[HarnessModelInfo, ...], bool],
 ] = {}
 
 
@@ -102,8 +102,14 @@ async def probe_cursor(
             models,
         )
         _EFFORT_CACHE[cache_key] = cached
-    default_efforts, models = cached
-    capabilities = capabilities.model_copy(update={"models": models, "efforts": default_efforts})
+    default_efforts, models, load_session = cached
+    capabilities = capabilities.model_copy(
+        update={
+            "models": models,
+            "efforts": default_efforts,
+            "supports_resume": load_session,
+        }
+    )
     validate_effort(config, capabilities)
     return capabilities, release
 
@@ -114,7 +120,7 @@ async def _discover_model_efforts(
     release: CursorReleaseRecord,
     capabilities: HarnessCapabilities,
     models: tuple[HarnessModelInfo, ...],
-) -> tuple[tuple[HarnessEffortInfo, ...], tuple[HarnessModelInfo, ...]]:
+) -> tuple[tuple[HarnessEffortInfo, ...], tuple[HarnessModelInfo, ...], bool]:
     supervisor = ProcessSupervisor()
     launch = supervisor.build_launch_snapshot(
         executable_path=str(executable),
@@ -142,7 +148,12 @@ async def _discover_model_efforts(
     connection.set_notification_handler("session/update", ignore_session_update)
     try:
         await connection.start()
-        await initialize_cursor(connection, release)
+        init_result = await initialize_cursor(connection, release)
+        load_session = (
+            isinstance(init_result.get("agentCapabilities"), dict)
+            and cast(dict[object, object], init_result["agentCapabilities"]).get("loadSession")
+            is True
+        )
         future, _ = await connection.request(
             "session/new",
             {"cwd": launch.working_directory, "mcpServers": []},
@@ -197,7 +208,7 @@ async def _discover_model_efforts(
                     options=options,
                 )
             discovered.append(model.model_copy(update={"efforts": _efforts_from_options(options)}))
-        return default_efforts, tuple(discovered)
+        return default_efforts, tuple(discovered), load_session
     finally:
         with contextlib.suppress(Exception):
             await connection.close()

@@ -1,50 +1,23 @@
 {
   "adapter_version": "2026.8.5",
-  "releases": [
-    {
-      "id": "codex-openai-codex-0.144.4",
-      "sdk_version": "0.144.4",
-      "runtime_package": "openai-codex-cli-bin",
-      "runtime_version": "0.144.4",
-      "platforms": [
-        "linux",
-        "darwin",
-        "win32"
-      ],
-      "capabilities": {
-        "supports_resume": true,
-        "supports_interrupt": true,
-        "supports_steer": true,
-        "supports_multi_interaction": false,
-        "supports_nested_activity": false
-      },
-      "notes": "Broker-compatible approvals use public CodexClient(approval_handler=...) with ApprovalsReviewer.user. Live create/resume/interaction proven on linux. Steer and interrupt are published for the same linux gate."
-    }
-  ],
-  "create_matrix": [
-    {
-      "release_id": "codex-openai-codex-0.144.4",
-      "platform": "linux"
-    }
-  ],
-  "resume_matrix": [
-    {
-      "release_id": "codex-openai-codex-0.144.4",
-      "platform": "linux"
-    }
-  ],
-  "steer_matrix": [
-    {
-      "release_id": "codex-openai-codex-0.144.4",
-      "platform": "linux"
-    }
-  ],
-  "interrupt_matrix": [
-    {
-      "release_id": "codex-openai-codex-0.144.4",
-      "platform": "linux"
-    }
-  ],
-  "multi_interaction_matrix": [],
-  "nested_activity_matrix": []
+  "floor": {
+    "version": "0.144.4",
+    "sdk_version": "0.144.4",
+    "runtime_package": "openai-codex-cli-bin",
+    "runtime_version": "0.144.4",
+    "platforms": ["linux"],
+    "capabilities": {
+      "supports_resume": true,
+      "supports_interrupt": true,
+      "supports_steer": true,
+      "supports_multi_interaction": false,
+      "supports_nested_activity": false
+    },
+    "notes": "Broker-compatible approvals use public CodexClient(approval_handler=...) with ApprovalsReviewer.user. Live create/resume/interaction proven on linux. Steer and interrupt are published for the same linux gate. SDK and runtime remain the extra pin."
+  },
+  "latest_verified": {
+    "version": "0.144.4",
+    "identity": "codex-openai-codex-0.144.4",
+    "platform": "linux"
+  }
 }

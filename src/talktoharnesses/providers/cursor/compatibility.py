@@ -1,4 +1,4 @@
-"""Strict Cursor compatibility source."""
+"""Cursor compatibility floor and probed-identity matching."""
 
 from __future__ import annotations
 
@@ -13,18 +13,26 @@ from talktoharnesses.domain.enums import ErrorCode, HarnessKind
 from talktoharnesses.domain.errors import DomainError
 from talktoharnesses.domain.models import HarnessCapabilities
 from talktoharnesses.providers.compatibility import (
-    CAPABILITY_TABLE_DIVIDER,
-    CAPABILITY_TABLE_HEADER,
-    CompatibilityMatrixEntry,
+    CompatibilityFloor,
+    LatestVerified,
     MatrixMode,
     ReleaseCapabilities,
-    SharedMatrices,
-    capability_cells,
-    enforce_doc_operation,
-    validate_matrices,
+    assert_supported_platform,
+    compare_cursor_date,
+    enforce_operation,
+    reject_below_floor,
+    validate_floor_document,
 )
 
 _COMPAT = ConfigDict(extra="forbid", frozen=True)
+
+
+class CursorFloor(CompatibilityFloor):
+    agent_name: str
+    acp_protocol_version: int = 1
+    required_agent_methods: list[str] = Field(default_factory=list)
+    allowlisted_extensions: list[str] = Field(default_factory=list)
+    notes: str | None = None
 
 
 class CursorReleaseRecord(BaseModel):
@@ -53,17 +61,12 @@ class CursorReleaseRecord(BaseModel):
         )
 
 
-class CursorCompatibilityDoc(SharedMatrices):
+class CursorCompatibilityDoc(BaseModel):
     model_config = _COMPAT
 
     adapter_version: str
-    releases: list[CursorReleaseRecord] = Field(default_factory=list[CursorReleaseRecord])
-
-    def release_by_id(self, release_id: str) -> CursorReleaseRecord | None:
-        for release in self.releases:
-            if release.id == release_id:
-                return release
-        return None
+    floor: CursorFloor
+    latest_verified: LatestVerified | None = None
 
 
 @lru_cache(maxsize=1)
@@ -71,11 +74,7 @@ def load_cursor_compatibility() -> CursorCompatibilityDoc:
     root = resources.files("talktoharnesses.data.compatibility")
     data = (root / "cursor.json").read_text(encoding="utf-8")
     doc = CursorCompatibilityDoc.model_validate(json.loads(data))
-    validate_matrices(
-        releases=doc.releases,
-        matrices=doc.as_mapping(),
-        harness_label="cursor",
-    )
+    validate_floor_document(doc, harness_label="cursor", compare=compare_cursor_date)
     return doc
 
 
@@ -98,32 +97,26 @@ def match_release(
     version = parse_version_stdout(version_stdout)
     plat = platform or sys.platform
     doc = load_cursor_compatibility()
-    for release in doc.releases:
-        if release.cli_version == version or release.version_stdout_prefix == version:
-            if release.platforms and plat not in release.platforms:
-                raise DomainError(
-                    ErrorCode.PROVIDER_INCOMPATIBLE,
-                    "cursor release not supported on this platform",
-                    details={
-                        "release_id": release.id,
-                        "platform": plat,
-                        "supported_platforms": list(release.platforms),
-                    },
-                )
-            if version_stdout.strip() != release.version_stdout_prefix:
-                raise DomainError(
-                    ErrorCode.PROVIDER_INCOMPATIBLE,
-                    "cursor version output does not match compatibility record",
-                    details={"version_stdout": version_stdout.strip(), "release_id": release.id},
-                )
-            return release
-    raise DomainError(
-        ErrorCode.PROVIDER_INCOMPATIBLE,
-        "unknown cursor release",
-        details={
-            "cli_version": version,
-            "known_releases": [r.id for r in doc.releases],
-        },
+    floor = doc.floor
+    assert_supported_platform(plat, floor.platforms, harness_label="cursor")
+    reject_below_floor(
+        probed=version,
+        floor=floor.version,
+        compare=compare_cursor_date,
+        harness_label="cursor",
+        details={"cli_version": version},
+    )
+    return CursorReleaseRecord(
+        id=f"cursor-{version}",
+        cli_version=version,
+        version_stdout_prefix=version,
+        agent_name=floor.agent_name,
+        acp_protocol_version=floor.acp_protocol_version,
+        platforms=list(floor.platforms),
+        capabilities=floor.capabilities,
+        required_agent_methods=list(floor.required_agent_methods),
+        allowlisted_extensions=list(floor.allowlisted_extensions),
+        notes=floor.notes,
     )
 
 
@@ -134,13 +127,13 @@ def enforce_published_operation(
     platform: str | None = None,
     enforce_published: bool = True,
 ) -> None:
-    enforce_doc_operation(
-        load_cursor_compatibility(),
-        release.id,
+    enforce_operation(
+        release.capabilities,
         mode=mode,
+        platforms=release.platforms,
         harness_label="cursor",
         platform=platform,
-        enforce_published=enforce_published,
+        enforce=enforce_published,
     )
 
 
@@ -156,29 +149,30 @@ class CursorCompatibilitySection:
     def adapter_version(self) -> str:
         return self._doc.adapter_version
 
-    def matrix(self, mode: MatrixMode) -> list[CompatibilityMatrixEntry]:
-        return list(getattr(self._doc, f"{mode}_matrix"))
+    @property
+    def floor_label(self) -> str:
+        return f"CLI `>= {self._doc.floor.version}`"
 
-    def render_release_rows(self) -> list[str]:
-        doc = self._doc
-        if not doc.releases:
-            return []
-        lines = [
-            f"| Release ID | CLI version | ACP | Platforms | {CAPABILITY_TABLE_HEADER} |",
-            f"| --- | --- | --- | --- | {CAPABILITY_TABLE_DIVIDER} |",
-        ]
-        for release in doc.releases:
-            platforms = ", ".join(release.platforms) if release.platforms else "—"
-            caps = release.capabilities
-            lines.append(
-                f"| `{release.id}` | {release.cli_version} | "
-                f"v{release.acp_protocol_version} | {platforms} | "
-                f"{capability_cells(caps)} |"
-            )
-        return lines
+    @property
+    def platforms(self) -> list[str]:
+        return list(self._doc.floor.platforms)
+
+    @property
+    def capabilities(self) -> ReleaseCapabilities:
+        return self._doc.floor.capabilities
+
+    @property
+    def latest_verified(self) -> LatestVerified | None:
+        return self._doc.latest_verified
+
+    def render_extra_floor_lines(self) -> list[str]:
+        return [f"- ACP: v{self._doc.floor.acp_protocol_version}"]
 
     def render_extra_notes(self) -> list[str]:
-        return []
+        notes = self._doc.floor.notes
+        if not notes:
+            return []
+        return ["### Notes", "", f"- {notes}"]
 
 
 def cursor_compatibility_section() -> CursorCompatibilitySection:

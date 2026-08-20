@@ -7,7 +7,6 @@ import os
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
 from uuid import UUID, uuid4
 
 import pytest
@@ -37,12 +36,6 @@ class LiveHttp:
     client: AsyncTalkToHarnessesClient
     workspace: Path
     close_runtime: Callable[[UUID], Awaitable[None]]
-
-
-class CompatibilityRelease(Protocol):
-    id: str
-
-    def to_harness_capabilities(self) -> HarnessCapabilities: ...
 
 
 class LiveStream:
@@ -205,12 +198,6 @@ def require_executable(env_name: str) -> str:
     return path
 
 
-def release_id_for_version(releases: Sequence[CompatibilityRelease], version: str) -> str:
-    matched = [item.id for item in releases if item.to_harness_capabilities().version == version]
-    assert matched, "probed version is not a packaged compatibility release"
-    return matched[0]
-
-
 def _idempotency_key(prefix: str) -> str:
     return f"{prefix}-{uuid4().hex}"
 
@@ -347,8 +334,6 @@ async def run_live_gate(
     live: LiveHttp,
     *,
     configuration: HarnessConfiguration,
-    releases: Sequence[CompatibilityRelease],
-    expected_release_id: str | None = None,
     min_create_interactions: int = 1,
     min_resume_interactions: int = 1,
     use_shell: bool = True,
@@ -365,10 +350,9 @@ async def run_live_gate(
     probe = await client.probe_harness(harness.id, timeout=120.0)
     caps = probe.capabilities
     assert caps.supports_resume is True
-    release_id = release_id_for_version(releases, caps.version)
-    if expected_release_id is not None:
-        assert release_id == expected_release_id
-    print(f"detected_release_id={release_id}")
+    print(f"probed_version={caps.version}")
+    if probe.version_advisory is not None:
+        print(f"version_advisory={probe.version_advisory.status}")
 
     snapshot = await client.create_conversation(harness.id, title="live-gate")
     conversation_id = snapshot.detail.conversation.id
@@ -441,5 +425,5 @@ async def run_live_gate(
         if closer is not None:
             await closer()
 
-    print(f"live_gate_passed release_id={release_id}")
+    print(f"live_gate_passed probed_version={caps.version}")
     return harness

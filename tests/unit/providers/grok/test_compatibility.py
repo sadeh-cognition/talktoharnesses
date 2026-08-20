@@ -1,4 +1,4 @@
-"""Grok compatibility source tests."""
+"""Grok compatibility floor tests."""
 
 from __future__ import annotations
 
@@ -20,6 +20,7 @@ from talktoharnesses.providers.grok.compatibility import (
 def test_load_and_match_release() -> None:
     doc = load_grok_compatibility()
     assert doc.adapter_version == "2026.8.5"
+    assert doc.floor.version == "1.0.0"
     release = match_release("grok 1.0.0 (3cd0d0cbce) [stable]", platform="linux")
     assert release.id == "grok-1.0.0-3cd0d0cbce"
     caps = release.to_harness_capabilities()
@@ -28,42 +29,29 @@ def test_load_and_match_release() -> None:
     assert [effort.id for effort in caps.efforts] == ["low", "medium", "high"]
 
 
-def test_match_1_0_3_release() -> None:
-    release = match_release("grok 1.0.3 (1a29d5bc12) [stable]", platform="linux")
-
-    assert release.id == "grok-1.0.3-1a29d5bc12"
-
-
-def test_match_1_0_4_release() -> None:
-    release = match_release("grok 1.0.4 (d846eb93d9) [stable]", platform="linux")
-
-    assert release.id == "grok-1.0.4-d846eb93d9"
-    assert [effort.id for effort in release.to_harness_capabilities().efforts] == [
-        "low",
-        "medium",
-        "high",
-    ]
+def test_match_newer_patch_above_floor() -> None:
+    release = match_release("grok 1.0.6 (deadbeef) [stable]", platform="linux")
+    assert release.id == "grok-1.0.6-deadbeef"
+    assert release.cli_version == "1.0.6"
 
 
 def test_match_1_0_5_release() -> None:
     release = match_release("grok 1.0.5 (5115b46bc9) [stable]", platform="linux")
-
     assert release.id == "grok-1.0.5-5115b46bc9"
 
 
-def test_unknown_version_fails() -> None:
+def test_below_floor_fails() -> None:
     with pytest.raises(DomainError) as exc:
-        match_release("grok 9.9.9 (deadbeef) [stable]")
+        match_release("grok 0.9.0 (deadbeef) [stable]")
     assert exc.value.code is ErrorCode.PROVIDER_INCOMPATIBLE
+    assert "floor" in str(exc.value).lower()
 
 
-def test_unknown_version_suggestions_match_platform() -> None:
+def test_unpublished_platform_fails() -> None:
     with pytest.raises(DomainError) as exc:
-        match_release("grok 9.9.9 (deadbeef) [stable]", platform="darwin")
-
-    assert exc.value.details["supported_versions"] == [
-        "1.0.0 (3cd0d0cbce) [stable]",
-    ]
+        match_release("grok 1.0.5 (5115b46bc9) [stable]", platform="darwin")
+    assert exc.value.code is ErrorCode.PROVIDER_INCOMPATIBLE
+    assert exc.value.details["supported_platforms"] == ["linux"]
 
 
 def test_malformed_version_fails() -> None:
@@ -85,10 +73,10 @@ def test_version_output_must_match_completely(output: str) -> None:
     assert exc.value.code is ErrorCode.PROVIDER_INCOMPATIBLE
 
 
-def test_markdown_render_published_matrices() -> None:
+def test_markdown_render_floor() -> None:
     md = render_supported_harnesses_markdown()
     assert "Supported Harnesses" in md
-    assert "grok-1.0.0-3cd0d0cbce" in md
+    assert "1.0.0" in md
     assert "linux" in md
     assert "No published create combinations" not in md
 
@@ -143,7 +131,5 @@ def test_adapter_build_argv_maps_yolo_on_create_and_resume() -> None:
         model="grok-build",
         yolo=True,
     )
-    assert adapter.build_argv(default) == build_grok_argv(
-        model="grok-build", effort="high"
-    )
+    assert adapter.build_argv(default) == build_grok_argv(model="grok-build", effort="high")
     assert adapter.build_argv(yolo) == build_grok_argv(model="grok-build", yolo=True)

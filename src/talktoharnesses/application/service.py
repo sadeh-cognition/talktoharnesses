@@ -126,6 +126,16 @@ def _turn_projection(turn: Turn) -> TurnProjection:
     )
 
 
+def _with_version_advisory(projection: HarnessProbeProjection) -> HarnessProbeProjection:
+    if projection.version_advisory is not None:
+        return projection
+    from talktoharnesses.providers.compatibility import advisory_for_capabilities
+
+    return projection.model_copy(
+        update={"version_advisory": advisory_for_capabilities(projection.capabilities)}
+    )
+
+
 class TalkToHarnessesService:
     """Single async facade for owner-scoped harness and conversation operations.
 
@@ -338,12 +348,14 @@ class TalkToHarnessesService:
             probed_at=probed_at,
         )
         self._readiness.notify_success(probed_at, harness_id)
-        return projection
+        return _with_version_advisory(projection)
 
     async def get_harness_capabilities(
         self, owner_id: str, harness_id: UUID
     ) -> HarnessProbeProjection:
-        return await self._persistence.get_harness_probe(harness_id, owner_id)
+        return _with_version_advisory(
+            await self._persistence.get_harness_probe(harness_id, owner_id)
+        )
 
     async def get_harness_models(
         self, owner_id: str, harness_id: UUID

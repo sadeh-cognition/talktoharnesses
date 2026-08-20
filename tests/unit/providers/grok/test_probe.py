@@ -5,11 +5,17 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from tests.contract.fakes import _FakeAcpProcess  # pyright: ignore[reportPrivateUsage]
 
 from talktoharnesses.domain.enums import ErrorCode, HarnessKind
 from talktoharnesses.domain.errors import DomainError
-from talktoharnesses.domain.models import HarnessConfiguration
+from talktoharnesses.domain.models import (
+    HarnessCapabilities,
+    HarnessConfiguration,
+    LaunchSnapshot,
+)
 from talktoharnesses.providers.grok import probe as probe_mod
+from talktoharnesses.providers.grok.compatibility import match_release
 
 
 class _Proc:
@@ -49,13 +55,18 @@ async def test_probe_grok_success_and_error_paths(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(probe_mod, "resolve_executable", _resolve_executable)
 
     async def ok_exec(*_a: object, **_k: object) -> _Proc:
-        return _Proc(b"grok 1.0.0 (3cd0d0cbce)")
+        return _Proc(b"grok 1.0.1 (3cd0d0cbce)")
 
     async def models(*_a: object, **_k: object) -> str:
         return "Default model: grok-4.5\n\nAvailable models:\n  * grok-4.5 (default)\n"
 
     monkeypatch.setattr(probe_mod.asyncio, "create_subprocess_exec", ok_exec)
     monkeypatch.setattr(probe_mod, "run_model_command", models)
+
+    async def no_resume(*_args: object) -> bool:
+        return False
+
+    monkeypatch.setattr(probe_mod, "_probe_load_session", no_resume)
     caps, release = await probe_mod.probe_grok(
         HarnessConfiguration(
             kind=HarnessKind.GROK,
@@ -63,9 +74,10 @@ async def test_probe_grok_success_and_error_paths(monkeypatch: pytest.MonkeyPatc
             working_directory="/tmp",
         )
     )
-    assert release.cli_version == "1.0.0"
+    assert release.cli_version == "1.0.1"
     assert caps.kind is HarnessKind.GROK
     assert [model.id for model in caps.models] == ["grok-4.5"]
+    assert caps.supports_resume is False
 
     with pytest.raises(DomainError) as no_path:
         await probe_mod.probe_grok(
@@ -100,3 +112,42 @@ async def test_probe_grok_success_and_error_paths(monkeypatch: pytest.MonkeyPatc
             )
         )
     assert rc_exc.value.code is ErrorCode.PROVIDER_INCOMPATIBLE
+
+
+@pytest.mark.asyncio
+async def test_grok_resume_probe_reads_initialize_capability(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    process = _FakeAcpProcess(load_session=False)
+    capabilities = HarnessCapabilities(
+        kind=HarnessKind.GROK,
+        version="1.0.0 (3cd0d0cbce) [stable]",
+    )
+
+    class _Supervisor:
+        def build_launch_snapshot(self, **_kwargs: object) -> LaunchSnapshot:
+            return LaunchSnapshot(
+                resolved_executable="/tmp/grok",
+                harness_version=capabilities.version,
+                working_directory="/tmp",
+                adapter_version="grok-capability-probe",
+                capabilities=capabilities,
+            )
+
+        async def spawn(self, _spec: object) -> _FakeAcpProcess:
+            return process
+
+    monkeypatch.setattr(probe_mod, "ProcessSupervisor", _Supervisor)
+    supports_resume = await probe_mod._probe_load_session(  # pyright: ignore[reportPrivateUsage]
+        Path("/tmp/grok"),
+        HarnessConfiguration(
+            kind=HarnessKind.GROK,
+            executable_path="/tmp/grok",
+            working_directory="/tmp",
+        ),
+        match_release("grok 1.0.0 (3cd0d0cbce)", platform="linux"),
+        capabilities,
+    )
+
+    assert supports_resume is False
+    assert process.returncode == 0

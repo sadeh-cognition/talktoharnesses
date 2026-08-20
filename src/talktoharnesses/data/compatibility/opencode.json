@@ -1,49 +1,20 @@
 {
   "adapter_version": "2026.8.5",
-  "releases": [
-    {
-      "id": "opencode-1.2.27",
-      "cli_version": "1.2.27",
-      "version_stdout_prefix": "1.2.27",
-      "platforms": [
-        "linux",
-        "darwin",
-        "win32"
-      ],
-      "capabilities": {
-        "supports_resume": true,
-        "supports_interrupt": true,
-        "supports_steer": false,
-        "supports_multi_interaction": true,
-        "supports_nested_activity": false
-      },
-      "notes": "Live create/resume/interaction proven on linux for opencode serve loopback HTTP/SSE. Interrupt and multi-interaction are published for the same linux gate. Child sessions fold into the parent turn; nested activity is not published."
-    }
-  ],
-  "create_matrix": [
-    {
-      "release_id": "opencode-1.2.27",
-      "platform": "linux"
-    }
-  ],
-  "resume_matrix": [
-    {
-      "release_id": "opencode-1.2.27",
-      "platform": "linux"
-    }
-  ],
-  "steer_matrix": [],
-  "interrupt_matrix": [
-    {
-      "release_id": "opencode-1.2.27",
-      "platform": "linux"
-    }
-  ],
-  "multi_interaction_matrix": [
-    {
-      "release_id": "opencode-1.2.27",
-      "platform": "linux"
-    }
-  ],
-  "nested_activity_matrix": []
+  "floor": {
+    "version": "1.2.27",
+    "platforms": ["linux"],
+    "capabilities": {
+      "supports_resume": true,
+      "supports_interrupt": true,
+      "supports_steer": false,
+      "supports_multi_interaction": true,
+      "supports_nested_activity": false
+    },
+    "notes": "Live create/resume/interaction proven on linux for opencode serve loopback HTTP/SSE. Interrupt and multi-interaction are published for the same linux gate. Child sessions fold into the parent turn; nested activity is not published."
+  },
+  "latest_verified": {
+    "version": "1.2.27",
+    "identity": "opencode-1.2.27",
+    "platform": "linux"
+  }
 }

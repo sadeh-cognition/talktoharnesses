@@ -16,8 +16,7 @@ from talktoharnesses.providers.compatibility import render_supported_harnesses_m
 def test_load_and_match_release() -> None:
     doc = load_codex_compatibility()
     assert doc.adapter_version == "2026.8.5"
-    assert doc.create_matrix
-    assert doc.resume_matrix
+    assert doc.floor.version == "0.144.4"
     release = match_release(sdk_version="0.144.4", runtime_version="0.144.4", platform="linux")
     assert release.id == "codex-openai-codex-0.144.4"
     assert release.capabilities.supports_steer is True

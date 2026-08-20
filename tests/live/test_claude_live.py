@@ -13,7 +13,6 @@ from tests.live.helpers import LiveHttp, run_live_gate, unique_prompt
 
 from talktoharnesses.domain.enums import HarnessKind
 from talktoharnesses.domain.models import HarnessConfiguration
-from talktoharnesses.providers.claude.compatibility import load_claude_compatibility
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("TALKTOHARNESSES_LIVE_CLAUDE") != "1",
@@ -33,7 +32,6 @@ async def test_live_claude_create_resume_interaction(live_http: LiveHttp) -> Non
             executable_path=os.environ.get("TALKTOHARNESSES_CLAUDE_EXECUTABLE"),
             working_directory=str(live_http.workspace),
         ),
-        releases=load_claude_compatibility().releases,
         mention_permission=False,
         prompt_fn=_claude_prompt,
     )

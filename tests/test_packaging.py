@@ -251,12 +251,12 @@ django.setup()
 assert all(
     (ClaudeAdapter, CodexAdapter, CursorAdapter, GrokAdapter, OpenCodeAdapter, PrimeAgentAdapter)
 )
-assert load_grok_compatibility().releases
-assert load_cursor_compatibility().releases
-assert load_codex_compatibility().releases
-assert load_claude_compatibility().releases
-assert load_opencode_compatibility().releases
-assert load_prime_agent_compatibility().releases
+assert load_grok_compatibility().floor.version
+assert load_cursor_compatibility().floor.version
+assert load_codex_compatibility().floor.version
+assert load_claude_compatibility().floor.version
+assert load_opencode_compatibility().floor.version
+assert load_prime_agent_compatibility().floor.version
 assert find_spec("psycopg") is not None
 """,
     )

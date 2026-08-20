@@ -1,50 +1,21 @@
 {
   "adapter_version": "2026.8.5",
-  "releases": [
-    {
-      "id": "claude-agent-sdk-0.1.53-bundled-2.1.88",
-      "sdk_version": "0.1.53",
-      "cli_version": "2.1.88",
-      "cli_source": "bundled",
-      "platforms": [
-        "linux",
-        "darwin",
-        "win32"
-      ],
-      "capabilities": {
-        "supports_resume": true,
-        "supports_interrupt": true,
-        "supports_steer": false,
-        "supports_multi_interaction": true,
-        "supports_nested_activity": false
-      },
-      "notes": "Live create/resume/interaction proven on linux with SDK-bundled Claude Code CLI. Interrupt and multi-interaction are published for the same linux gate. Nested activity is not published: adapters do not emit activity_started."
-    }
-  ],
-  "create_matrix": [
-    {
-      "release_id": "claude-agent-sdk-0.1.53-bundled-2.1.88",
-      "platform": "linux"
-    }
-  ],
-  "resume_matrix": [
-    {
-      "release_id": "claude-agent-sdk-0.1.53-bundled-2.1.88",
-      "platform": "linux"
-    }
-  ],
-  "steer_matrix": [],
-  "interrupt_matrix": [
-    {
-      "release_id": "claude-agent-sdk-0.1.53-bundled-2.1.88",
-      "platform": "linux"
-    }
-  ],
-  "multi_interaction_matrix": [
-    {
-      "release_id": "claude-agent-sdk-0.1.53-bundled-2.1.88",
-      "platform": "linux"
-    }
-  ],
-  "nested_activity_matrix": []
+  "floor": {
+    "version": "2.1.88",
+    "sdk_version": "0.1.53",
+    "platforms": ["linux"],
+    "capabilities": {
+      "supports_resume": true,
+      "supports_interrupt": true,
+      "supports_steer": false,
+      "supports_multi_interaction": true,
+      "supports_nested_activity": false
+    },
+    "notes": "Live create/resume/interaction proven on linux with SDK-bundled Claude Code CLI. Interrupt and multi-interaction are published for the same linux gate. Nested activity is not published: adapters do not emit activity_started. SDK identity remains the extra pin; explicit CLI paths at or above the floor are accepted."
+  },
+  "latest_verified": {
+    "version": "2.1.88",
+    "identity": "claude-agent-sdk-0.1.53-bundled-2.1.88",
+    "platform": "linux"
+  }
 }

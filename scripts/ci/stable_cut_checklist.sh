@@ -13,7 +13,7 @@ VERSION="$(uv version --short)"
 echo "package_version=${VERSION}"
 
 if [[ "${VERSION}" == *dev* ]]; then
-  echo "still on development version; populate live matrix rows, then uv version 2026.8.1" >&2
+  echo "still on development version; confirm floors, then uv version 2026.8.1" >&2
 fi
 
 uv run python - <<'PY'
@@ -34,20 +34,17 @@ docs = {
 }
 ready = True
 for name, doc in docs.items():
-    mapping = doc.as_mapping()
+    latest = doc.latest_verified.identity if doc.latest_verified is not None else None
     print(
-        f"{name}: create={len(mapping['create'])} resume={len(mapping['resume'])} "
-        f"steer={len(mapping['steer'])} interrupt={len(mapping['interrupt'])} "
-        f"multi={len(mapping['multi_interaction'])} nested={len(mapping['nested_activity'])} "
-        f"adapter_version={doc.adapter_version}"
+        f"{name}: floor={doc.floor.version} platforms={list(doc.floor.platforms)} "
+        f"latest_verified={latest} adapter_version={doc.adapter_version}"
     )
-    if len(mapping["create"]) == 0 or len(mapping["resume"]) == 0:
+    if not doc.floor.version or not doc.floor.platforms:
         ready = False
 if not ready:
     raise SystemExit(
-        "stable cut blocked: every adapter needs at least one live-proven "
-        "create and resume matrix row"
+        "stable cut blocked: every adapter needs a compatibility floor and platform"
     )
 PY
 
-echo "matrix rows present; run: bash scripts/ci/run.sh stable-gate"
+echo "floors present; run: bash scripts/ci/run.sh stable-gate"

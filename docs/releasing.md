@@ -2,8 +2,9 @@
 
 Ordered checklist for publishing `talktoharnesses`. Owned by
 [Phase 12](phase12.md) after Phase 10 lands the release-readiness machinery.
-Contains no credentials and no mutable supported-version list — those live in
-packaged compatibility JSON and [`SUPPORTED_HARNESSES.md`](../SUPPORTED_HARNESSES.md).
+Contains no credentials and no mutable patch allowlist — floors and last-verified
+identities live in packaged compatibility JSON and
+[`SUPPORTED_HARNESSES.md`](../SUPPORTED_HARNESSES.md).
 
 Phase 11 product work already landed on `2026.8.1.dev1`. The first stable
 publication from this tree is therefore **`2026.8.1`** / tag **`v2026.8.1`**
@@ -13,14 +14,14 @@ publication from this tree is therefore **`2026.8.1`** / tag **`v2026.8.1`**
 
 1. Phase 10 release-readiness machinery is merged; Phase 9 recovery/fencing/
    secret-sink/readiness/shutdown gates remain green.
-2. Links to passing live create/resume/interaction workflow runs exist for every
-   published matrix row on the candidate commit.
+2. Links to passing live create/resume/interaction workflow runs exist for the
+   packaged floor (and optional `latest_verified`) on the candidate commit.
 3. Package version is still `2026.8.1.dev1` until the Phase 12 stable cut commit.
 4. Aggregate statement coverage for `talktoharnesses` is at least 91% on the
    non-live suite (migrations omitted only). Raise coverage with meaningful
    path tests — do not add trivial assertions solely to move the percentage.
-5. `bash scripts/ci/stable_cut_checklist.sh` reports non-empty create/resume
-   matrices for all five adapters.
+5. `bash scripts/ci/stable_cut_checklist.sh` reports a floor and platform for
+   every adapter.
 
 ## Candidate commit gate
 
@@ -36,8 +37,8 @@ publication from this tree is therefore **`2026.8.1`** / tag **`v2026.8.1`**
 
 ## Stable version cut
 
-1. Populate only proven create/resume matrix rows; regenerate
-   `SUPPORTED_HARNESSES.md`.
+1. Confirm floors, platforms, and optional `latest_verified` identities;
+   regenerate `SUPPORTED_HARNESSES.md`.
 2. `uv version 2026.8.1` and set each compatibility document's `adapter_version`
    to `2026.8.1`.
 3. Remove provisional “implementation target only” notes that no longer describe

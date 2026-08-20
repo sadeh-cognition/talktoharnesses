@@ -83,6 +83,17 @@ class HarnessCapabilities(BaseModel):
     efforts: tuple[HarnessEffortInfo, ...] = ()
 
 
+class VersionAdvisory(BaseModel):
+    """How the probed identity compares to the packaged floor and last live proof."""
+
+    model_config = FROZEN
+
+    status: Literal["verified", "behind_verified", "ahead_of_verified", "unknown"]
+    probed_version: str
+    floor_version: str
+    latest_verified: str | None = None
+
+
 class HarnessInstance(BaseModel):
     model_config = FROZEN
 
@@ -778,6 +789,7 @@ class HarnessProbeProjection(BaseModel):
     harness_id: UUID
     capabilities: HarnessCapabilities
     probed_at: UtcDateTime
+    version_advisory: VersionAdvisory | None = None
 
 
 class TurnProjection(BaseModel):

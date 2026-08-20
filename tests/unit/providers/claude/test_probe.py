@@ -51,9 +51,11 @@ def _sdk(version: str = "0.1.53") -> SimpleNamespace:
 
 
 @pytest.mark.asyncio
-async def test_explicit_executable_requires_explicit_compatibility_row(
+async def test_explicit_executable_above_floor_is_accepted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from talktoharnesses.providers.claude import probe as probe_mod
+
     executable = Path("/tmp/claude-explicit")
     called: list[tuple[object, ...]] = []
 
@@ -62,32 +64,23 @@ async def test_explicit_executable_requires_explicit_compatibility_row(
         called.append(argv)
         return _VersionProcess()
 
-    monkeypatch.setattr(
-        "talktoharnesses.providers.claude.probe._import_claude_sdk",
-        lambda: SimpleNamespace(__version__="0.1.53"),
-    )
-
     def resolve_executable(path: str) -> Path:
         del path
         return executable
 
-    monkeypatch.setattr(
-        "talktoharnesses.providers.claude.probe.resolve_executable",
-        resolve_executable,
+    monkeypatch.setattr(probe_mod, "_import_claude_sdk", _sdk)
+    monkeypatch.setattr(probe_mod, "resolve_executable", resolve_executable)
+    monkeypatch.setattr(probe_mod.asyncio, "create_subprocess_exec", create_subprocess_exec)
+    caps, release = await probe_claude(
+        HarnessConfiguration(
+            kind=HarnessKind.CLAUDE,
+            executable_path=str(executable),
+            working_directory="/tmp",
+        )
     )
-    monkeypatch.setattr(
-        "talktoharnesses.providers.claude.probe.asyncio.create_subprocess_exec",
-        create_subprocess_exec,
-    )
-    config = HarnessConfiguration(
-        kind=HarnessKind.CLAUDE,
-        executable_path=str(executable),
-        working_directory="/tmp",
-    )
-    with pytest.raises(DomainError) as exc_info:
-        await probe_claude(config)
-    assert exc_info.value.code is ErrorCode.PROVIDER_INCOMPATIBLE
-    assert exc_info.value.details["cli_source"] == "explicit"
+    assert release.cli_source == "explicit"
+    assert release.cli_version == "2.1.88"
+    assert caps.kind is HarnessKind.CLAUDE
     assert called == [(str(executable), "--version")]
 
 

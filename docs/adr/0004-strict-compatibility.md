@@ -1,6 +1,6 @@
 # ADR 0004: Strict Compatibility
 
-- **Status:** Accepted
+- **Status:** Superseded by [ADR 0007](0007-floor-and-probe-compatibility.md)
 - **Date:** 2026-08-07
 
 ## Context

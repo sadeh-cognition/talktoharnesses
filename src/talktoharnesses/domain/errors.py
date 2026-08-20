@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
-from typing import Any, Final
+from typing import Any, Final, cast
 
 from talktoharnesses.domain.enums import ErrorCode
 
@@ -61,19 +61,24 @@ def _version_mismatch_message(details: Mapping[str, Any] | None) -> str | None:
     provider = details.get("provider")
     installed = details.get("installed_version")
     supported = details.get("supported_versions")
-    if (
-        not isinstance(provider, str)
-        or not isinstance(installed, str)
-        or not isinstance(supported, list)
-        or not all(isinstance(version, str) for version in supported)
-        or not _SAFE_VERSION_VALUE.fullmatch(provider)
-        or not _SAFE_VERSION_VALUE.fullmatch(installed)
-        or not all(_SAFE_VERSION_VALUE.fullmatch(version) for version in supported)
+    if not isinstance(provider, str) or not isinstance(installed, str):
+        return None
+    if not isinstance(supported, list):
+        return None
+    versions: list[str] = []
+    for raw_item in cast(list[object], supported):
+        if not isinstance(raw_item, str):
+            return None
+        if not _SAFE_VERSION_VALUE.fullmatch(raw_item):
+            return None
+        versions.append(raw_item)
+    if not _SAFE_VERSION_VALUE.fullmatch(provider) or not _SAFE_VERSION_VALUE.fullmatch(
+        installed
     ):
         return None
     return (
         f"{provider} version {installed} is incompatible; supported versions: "
-        f"{', '.join(supported)}"
+        f"{', '.join(versions)}"
     )
 
 

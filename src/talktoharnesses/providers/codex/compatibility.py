@@ -1,4 +1,4 @@
-"""Strict Codex compatibility source."""
+"""Codex compatibility floor and probed-identity matching."""
 
 from __future__ import annotations
 
@@ -13,18 +13,24 @@ from talktoharnesses.domain.enums import ErrorCode, HarnessKind
 from talktoharnesses.domain.errors import DomainError
 from talktoharnesses.domain.models import HarnessCapabilities
 from talktoharnesses.providers.compatibility import (
-    CAPABILITY_TABLE_DIVIDER,
-    CAPABILITY_TABLE_HEADER,
-    CompatibilityMatrixEntry,
+    CompatibilityFloor,
+    LatestVerified,
     MatrixMode,
     ReleaseCapabilities,
-    SharedMatrices,
-    capability_cells,
-    enforce_doc_operation,
-    validate_matrices,
+    assert_supported_platform,
+    compare_dotted,
+    enforce_operation,
+    validate_floor_document,
 )
 
 _COMPAT = ConfigDict(extra="forbid", frozen=True)
+
+
+class CodexFloor(CompatibilityFloor):
+    sdk_version: str
+    runtime_package: str
+    runtime_version: str
+    notes: str | None = None
 
 
 class CodexReleaseRecord(BaseModel):
@@ -50,11 +56,12 @@ class CodexReleaseRecord(BaseModel):
         )
 
 
-class CodexCompatibilityDoc(SharedMatrices):
+class CodexCompatibilityDoc(BaseModel):
     model_config = _COMPAT
 
     adapter_version: str
-    releases: list[CodexReleaseRecord] = Field(default_factory=list[CodexReleaseRecord])
+    floor: CodexFloor
+    latest_verified: LatestVerified | None = None
 
 
 @lru_cache(maxsize=1)
@@ -62,11 +69,7 @@ def load_codex_compatibility() -> CodexCompatibilityDoc:
     root = resources.files("talktoharnesses.data.compatibility")
     data = (root / "codex.json").read_text(encoding="utf-8")
     doc = CodexCompatibilityDoc.model_validate(json.loads(data))
-    validate_matrices(
-        releases=doc.releases,
-        matrices=doc.as_mapping(),
-        harness_label="codex",
-    )
+    validate_floor_document(doc, harness_label="codex", compare=compare_dotted)
     return doc
 
 
@@ -78,27 +81,27 @@ def match_release(
 ) -> CodexReleaseRecord:
     plat = platform or sys.platform
     doc = load_codex_compatibility()
-    for release in doc.releases:
-        if release.sdk_version == sdk_version and release.runtime_version == runtime_version:
-            if release.platforms and plat not in release.platforms:
-                raise DomainError(
-                    ErrorCode.PROVIDER_INCOMPATIBLE,
-                    "codex release not supported on this platform",
-                    details={
-                        "release_id": release.id,
-                        "platform": plat,
-                        "supported_platforms": list(release.platforms),
-                    },
-                )
-            return release
-    raise DomainError(
-        ErrorCode.PROVIDER_INCOMPATIBLE,
-        "unknown codex release",
-        details={
-            "sdk_version": sdk_version,
-            "runtime_version": runtime_version,
-            "known_releases": [r.id for r in doc.releases],
-        },
+    floor = doc.floor
+    assert_supported_platform(plat, floor.platforms, harness_label="codex")
+    if sdk_version != floor.sdk_version or runtime_version != floor.runtime_version:
+        raise DomainError(
+            ErrorCode.PROVIDER_INCOMPATIBLE,
+            "unknown codex release",
+            details={
+                "sdk_version": sdk_version,
+                "runtime_version": runtime_version,
+                "floor_sdk_version": floor.sdk_version,
+                "floor_runtime_version": floor.runtime_version,
+            },
+        )
+    return CodexReleaseRecord(
+        id=f"codex-openai-codex-{sdk_version}",
+        sdk_version=sdk_version,
+        runtime_package=floor.runtime_package,
+        runtime_version=runtime_version,
+        platforms=list(floor.platforms),
+        capabilities=floor.capabilities,
+        notes=floor.notes,
     )
 
 
@@ -109,13 +112,13 @@ def enforce_published_operation(
     platform: str | None = None,
     enforce_published: bool = True,
 ) -> None:
-    enforce_doc_operation(
-        load_codex_compatibility(),
-        release.id,
+    enforce_operation(
+        release.capabilities,
         mode=mode,
+        platforms=release.platforms,
         harness_label="codex",
         platform=platform,
-        enforce_published=enforce_published,
+        enforce=enforce_published,
     )
 
 
@@ -131,35 +134,34 @@ class CodexCompatibilitySection:
     def adapter_version(self) -> str:
         return self._doc.adapter_version
 
-    def matrix(self, mode: MatrixMode) -> list[CompatibilityMatrixEntry]:
-        return list(getattr(self._doc, f"{mode}_matrix"))
+    @property
+    def floor_label(self) -> str:
+        floor = self._doc.floor
+        return (
+            f"SDK `{floor.sdk_version}` + `{floor.runtime_package}` "
+            f"`{floor.runtime_version}` (exact)"
+        )
 
-    def render_release_rows(self) -> list[str]:
-        doc = self._doc
-        if not doc.releases:
-            return []
-        lines = [
-            f"| Release ID | SDK | Runtime | Platforms | {CAPABILITY_TABLE_HEADER} |",
-            f"| --- | --- | --- | --- | {CAPABILITY_TABLE_DIVIDER} |",
-        ]
-        for release in doc.releases:
-            platforms = ", ".join(release.platforms) if release.platforms else "—"
-            caps = release.capabilities
-            lines.append(
-                f"| `{release.id}` | {release.sdk_version} | "
-                f"{release.runtime_package} {release.runtime_version} | {platforms} | "
-                f"{capability_cells(caps)} |"
-            )
-        return lines
+    @property
+    def platforms(self) -> list[str]:
+        return list(self._doc.floor.platforms)
+
+    @property
+    def capabilities(self) -> ReleaseCapabilities:
+        return self._doc.floor.capabilities
+
+    @property
+    def latest_verified(self) -> LatestVerified | None:
+        return self._doc.latest_verified
+
+    def render_extra_floor_lines(self) -> list[str]:
+        return []
 
     def render_extra_notes(self) -> list[str]:
-        notes: list[str] = []
-        for release in self._doc.releases:
-            if release.notes:
-                notes.append(f"- `{release.id}`: {release.notes}")
-        if notes:
-            return ["### Notes", ""] + notes
-        return []
+        notes = self._doc.floor.notes
+        if not notes:
+            return []
+        return ["### Notes", "", f"- {notes}"]
 
 
 def codex_compatibility_section() -> CodexCompatibilitySection:

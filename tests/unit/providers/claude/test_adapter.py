@@ -6,6 +6,7 @@ import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from types import SimpleNamespace
+from typing import cast
 from uuid import uuid4
 
 import pytest
@@ -501,7 +502,7 @@ async def test_yolo_routes_ask_user_question_and_auto_allows_other_tools() -> No
         SimpleNamespace(tool_use_id="tool-1"),
     )
     allowed_input = (
-        allowed.get("updatedInput")
+        cast(dict[str, object], allowed).get("updatedInput")
         if isinstance(allowed, dict)
         else getattr(allowed, "updated_input", None)
     )
@@ -536,7 +537,7 @@ async def test_yolo_routes_ask_user_question_and_auto_allows_other_tools() -> No
     )
     result = await asyncio.wait_for(task, timeout=1.0)
     updated_input = (
-        result.get("updatedInput")
+        cast(dict[str, object], result).get("updatedInput")
         if isinstance(result, dict)
         else getattr(result, "updated_input", None)
     )

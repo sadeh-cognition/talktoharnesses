@@ -29,7 +29,7 @@ def _map_dict(value: object) -> dict[str, Any]:
 async def initialize_cursor(
     connection: AcpConnection,
     release: CursorReleaseRecord,
-) -> None:
+) -> dict[str, Any]:
     future, _ = await connection.request(
         "initialize",
         {
@@ -72,13 +72,6 @@ async def initialize_cursor(
             "initialize agent identity does not match compatibility record",
             details={"agentInfo": agent_info, "release_id": release.id},
         )
-    capabilities = _map_dict(result_map.get("agentCapabilities"))
-    if release.capabilities.supports_resume and capabilities.get("loadSession") is not True:
-        raise DomainError(
-            ErrorCode.PROVIDER_INCOMPATIBLE,
-            "initialize result does not advertise session loading",
-            details={"release_id": release.id},
-        )
     missing_methods = set(release.required_agent_methods) - CURSOR_ALLOWED_OUTBOUND_METHODS
     if missing_methods:
         raise DomainError(
@@ -86,6 +79,7 @@ async def initialize_cursor(
             "adapter does not implement required agent methods",
             details={"missing_methods": sorted(missing_methods)},
         )
+    return result_map
 
 
 def find_cursor_config_option(

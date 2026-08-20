@@ -27,9 +27,9 @@ def test_load_and_match_release() -> None:
     assert "clientCapabilities._meta.parameterizedModelPicker" in release.allowlisted_extensions
 
 
-def test_unknown_version_fails() -> None:
+def test_below_floor_fails() -> None:
     with pytest.raises(DomainError) as exc:
-        match_release("2099.01.01-deadbeef")
+        match_release("2026.08.03-deadbeef")
     assert exc.value.code is ErrorCode.PROVIDER_INCOMPATIBLE
 
 
@@ -42,7 +42,8 @@ def test_malformed_version_fails() -> None:
 def test_markdown_includes_cursor() -> None:
     md = render_supported_harnesses_markdown()
     assert "## Cursor" in md
-    assert "cursor-2026.08.11-e8db854" in md
+    assert "2026.08.04" in md
+    assert "2026.08.11-e8db854" in md
 
 
 def test_build_argv_accepts_no_model_mode_flags() -> None:

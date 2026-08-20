@@ -1,12 +1,13 @@
 # Live harness testing
 
-Opt-in live gates prove exact create, resume, and advertised-capability support
-claims through the official HTTP client against an in-process Django ASGI
-worker. They use disposable workspaces, may incur provider cost, and must never
-run against an untrusted repository change with production credentials.
+Opt-in live gates prove create, resume, and advertised-capability support
+against the packaged compatibility floor through the official HTTP client
+against an in-process Django ASGI worker. They use disposable workspaces, may
+incur provider cost, and must never run against an untrusted repository change
+with production credentials.
 
-When a live flag is enabled, missing credentials, SDKs, executables, exact
-versions, or capabilities are **failures**, not skips.
+When a live flag is enabled, missing credentials, SDKs, executables, a CLI
+below the floor, or missing advertised capabilities are **failures**, not skips.
 
 The manual GitHub workflow targets provider-specific self-hosted runner labels:
 `self-hosted`, `talktoharnesses-live`, and the provider name. Each protected
@@ -45,9 +46,9 @@ composition (Django persistence, default adapter registry, runtime manager)
 over ASGI. It does not construct provider adapters or spawn processes in the
 test.
 
-1. Create a harness and probe it. Assert `supports_resume` and match
-   `capabilities.version` to the exact packaged release identity represented by
-   a proposed matrix row.
+1. Create a harness and probe it. Assert `supports_resume`. The probed identity
+   must meet the packaged floor; it need not match a specific patch. Print the
+   probed version and `version_advisory` status.
 2. Create a conversation and submit a unique deterministic prompt.
 3. Consume canonical SSE `ConversationEvent`s through the authoritative
    terminal event. Answer `interaction_requested` events with
@@ -67,17 +68,18 @@ test.
 7. Shut the worker down so no owned task, client, responder, process, or
    descendant remains.
 
-Live tests may print fixed release IDs and pass/fail state. They must not print
-prompts, credentials, environment values, native payloads, or executable paths
-beyond the configured path already known to the operator.
+Live tests may print probed versions, advisory status, and pass/fail state. They
+must not print prompts, credentials, environment values, native payloads, or
+executable paths beyond the configured path already known to the operator.
 
-## Publishing matrix rows
+## After a live gate
 
-After a live gate passes on a platform, add only that exact
-`{release_id, platform}` row to the matching packaged matrix (`create_matrix`,
-`resume_matrix`, `steer_matrix`, `interrupt_matrix`,
-`multi_interaction_matrix`, or `nested_activity_matrix`) and regenerate
-`SUPPORTED_HARNESSES.md`. Do not list untested platforms. A capability flag on
-the release record is an implementation target; only a matrix row is a published
-support claim. Stable validation rejects an advertised capability with no matrix
-row.
+A passing live gate on a platform already covered by the floor does **not**
+require a JSON edit for the CLI to be accepted at runtime. Optionally bump
+`latest_verified` in that harness's packaged compatibility document and
+regenerate `SUPPORTED_HARNESSES.md` so the advisory tracks the last live proof.
+
+Raise the floor only when the adapter can no longer drive older identities.
+Add a platform to `floor.platforms` only after a live gate passes on that
+platform. Adapter-owned capability flags change only when the adapter itself
+gains or loses an operation.

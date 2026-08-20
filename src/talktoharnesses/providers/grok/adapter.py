@@ -9,7 +9,6 @@ from collections.abc import AsyncIterator
 from typing import Any, Literal, cast
 from uuid import UUID, uuid4
 
-from talktoharnesses import __version__
 from talktoharnesses.domain.enums import ErrorCode, HarnessKind
 from talktoharnesses.domain.errors import DomainError
 from talktoharnesses.domain.events import HarnessEvent, InteractionRequestedPayload
@@ -27,7 +26,6 @@ from talktoharnesses.providers.acp.pending import (
     PendingAcpQuestion,
 )
 from talktoharnesses.providers.acp.protocol import grok_acp_protocol
-from talktoharnesses.providers.acp.schemas.base import ALLOWED_OUTBOUND_METHODS
 from talktoharnesses.providers.adapter import (
     HarnessInteractionRequest,
     HarnessSession,
@@ -41,14 +39,12 @@ from talktoharnesses.providers.grok.compatibility import (
     GrokReleaseRecord,
     enforce_published_operation,
 )
+from talktoharnesses.providers.grok.control import initialize_grok, validate_grok_initialize
 from talktoharnesses.providers.grok.normalizer import GrokNormalizer
 from talktoharnesses.providers.grok.probe import probe_grok
 from talktoharnesses.runtime.handle import ProcessHandle
 
 logger = logging.getLogger(__name__)
-
-CLIENT_INFO = {"name": "talktoharnesses", "version": __version__}
-
 
 def _map_dict(value: object) -> dict[str, Any]:
     # Accept partially-unknown JSON dicts under strict Pyright.
@@ -112,7 +108,7 @@ class GrokAdapter:
         self.preflight_operation("create")
         await self._ensure_connection()
         assert self._connection is not None
-        await self._initialize()
+        await self._initialize(require_load_session=False)
         cwd = request.launch.working_directory or request.configuration.working_directory
         future, _delivered = await self._connection.request(
             "session/new",
@@ -137,7 +133,7 @@ class GrokAdapter:
         self.preflight_operation("resume")
         await self._ensure_connection()
         assert self._connection is not None
-        await self._initialize()
+        await self._initialize(require_load_session=True)
         cwd = request.launch.working_directory or request.configuration.working_directory
         self._normalizer.set_session(request.native_session_id, resync=True)
         future, _delivered = await self._connection.request(
@@ -318,79 +314,24 @@ class GrokAdapter:
             await conn.start()
             self._connection = conn
 
-    async def _initialize(self) -> None:
+    async def _initialize(self, *, require_load_session: bool = False) -> None:
         assert self._connection is not None
-        future, _ = await self._connection.request(
-            "initialize",
-            {
-                "protocolVersion": 1,
-                "clientInfo": CLIENT_INFO,
-                # No client fs/terminal capabilities unless fixtures prove reverse handlers.
-                "clientCapabilities": {},
-            },
-        )
-        result = await future
-        if not isinstance(result, dict):
-            raise DomainError(ErrorCode.PROTOCOL_ERROR, "initialize result must be an object")
-        result_map = _map_dict(cast(object, result))
-        protocol = result_map.get("protocolVersion")
-        if protocol != 1:
-            raise DomainError(
-                ErrorCode.PROVIDER_INCOMPATIBLE,
-                "ACP protocol version mismatch",
-                details={"protocolVersion": protocol},
-            )
-        if self._release is not None and protocol != self._release.acp_protocol_version:
-            raise DomainError(
-                ErrorCode.PROVIDER_INCOMPATIBLE,
-                "ACP protocol version does not match compatibility record",
-                details={
-                    "protocolVersion": protocol,
-                    "expected": self._release.acp_protocol_version,
-                },
-            )
-        if self._release is not None:
-            self._validate_initialize_identity(result_map)
-
-    def _validate_initialize_identity(self, result: dict[str, Any]) -> None:
         assert self._release is not None
-        agent_info = _map_dict(result.get("agentInfo"))
-        meta = _map_dict(result.get("_meta"))
-        # Grok 1.0.0 may omit agentInfo; identity then lives in _meta.agentVersion.
-        version = agent_info.get("version") or meta.get("agentVersion")
-        name = agent_info.get("name")
-        name_ok = (
-            name == self._release.agent_name
-            if name is not None
-            else version == self._release.cli_version
+        await initialize_grok(
+            self._connection,
+            self._release,
+            require_load_session=require_load_session,
         )
-        if not name_ok or version != self._release.cli_version:
-            raise DomainError(
-                ErrorCode.PROVIDER_INCOMPATIBLE,
-                "initialize agent identity does not match compatibility record",
-                details={
-                    "agentInfo": agent_info,
-                    "agentVersion": meta.get("agentVersion"),
-                    "release_id": self._release.id,
-                },
-            )
-        capabilities = _map_dict(result.get("agentCapabilities"))
-        if (
-            self._release.capabilities.supports_resume
-            and capabilities.get("loadSession") is not True
-        ):
-            raise DomainError(
-                ErrorCode.PROVIDER_INCOMPATIBLE,
-                "initialize result does not advertise session loading",
-                details={"release_id": self._release.id},
-            )
-        missing_methods = set(self._release.required_agent_methods) - ALLOWED_OUTBOUND_METHODS
-        if missing_methods:
-            raise DomainError(
-                ErrorCode.PROVIDER_INCOMPATIBLE,
-                "adapter does not implement required agent methods",
-                details={"missing_methods": sorted(missing_methods)},
-            )
+
+    def _validate_initialize_identity(
+        self, result: dict[str, Any], *, require_load_session: bool = False
+    ) -> None:
+        assert self._release is not None
+        validate_grok_initialize(
+            result,
+            self._release,
+            require_load_session=require_load_session,
+        )
 
     async def _watch_prompt(self, future: asyncio.Future[Any]) -> None:
         try:

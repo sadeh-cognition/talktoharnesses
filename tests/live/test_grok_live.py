@@ -13,7 +13,6 @@ from tests.live.helpers import LiveHttp, require_executable, run_live_gate
 
 from talktoharnesses.domain.enums import HarnessKind
 from talktoharnesses.domain.models import HarnessConfiguration
-from talktoharnesses.providers.grok.compatibility import load_grok_compatibility
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("TALKTOHARNESSES_LIVE_GROK") != "1",
@@ -29,5 +28,4 @@ async def test_live_grok_create_resume_interaction(live_http: LiveHttp) -> None:
             executable_path=require_executable("TALKTOHARNESSES_GROK_EXECUTABLE"),
             working_directory=str(live_http.workspace),
         ),
-        releases=load_grok_compatibility().releases,
     )

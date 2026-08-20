@@ -1,4 +1,4 @@
-"""Strict OpenCode compatibility source."""
+"""OpenCode compatibility floor and probed-identity matching."""
 
 from __future__ import annotations
 
@@ -13,18 +13,22 @@ from talktoharnesses.domain.enums import ErrorCode, HarnessKind
 from talktoharnesses.domain.errors import DomainError
 from talktoharnesses.domain.models import HarnessCapabilities
 from talktoharnesses.providers.compatibility import (
-    CAPABILITY_TABLE_DIVIDER,
-    CAPABILITY_TABLE_HEADER,
-    CompatibilityMatrixEntry,
+    CompatibilityFloor,
+    LatestVerified,
     MatrixMode,
     ReleaseCapabilities,
-    SharedMatrices,
-    capability_cells,
-    enforce_doc_operation,
-    validate_matrices,
+    assert_supported_platform,
+    compare_dotted,
+    enforce_operation,
+    reject_below_floor,
+    validate_floor_document,
 )
 
 _COMPAT = ConfigDict(extra="forbid", frozen=True)
+
+
+class OpenCodeFloor(CompatibilityFloor):
+    notes: str | None = None
 
 
 class OpenCodeReleaseRecord(BaseModel):
@@ -49,11 +53,12 @@ class OpenCodeReleaseRecord(BaseModel):
         )
 
 
-class OpenCodeCompatibilityDoc(SharedMatrices):
+class OpenCodeCompatibilityDoc(BaseModel):
     model_config = _COMPAT
 
     adapter_version: str
-    releases: list[OpenCodeReleaseRecord] = Field(default_factory=list[OpenCodeReleaseRecord])
+    floor: OpenCodeFloor
+    latest_verified: LatestVerified | None = None
 
 
 @lru_cache(maxsize=1)
@@ -61,11 +66,7 @@ def load_opencode_compatibility() -> OpenCodeCompatibilityDoc:
     root = resources.files("talktoharnesses.data.compatibility")
     data = (root / "opencode.json").read_text(encoding="utf-8")
     doc = OpenCodeCompatibilityDoc.model_validate(json.loads(data))
-    validate_matrices(
-        releases=doc.releases,
-        matrices=doc.as_mapping(),
-        harness_label="opencode",
-    )
+    validate_floor_document(doc, harness_label="opencode", compare=compare_dotted)
     return doc
 
 
@@ -77,7 +78,6 @@ def parse_version_stdout(version_stdout: str) -> str:
             "malformed opencode version output",
             details={"version_stdout": complete},
         )
-    # Accept "1.2.27" or "opencode 1.2.27"
     if complete.startswith("opencode "):
         complete = complete.removeprefix("opencode ").strip()
     return complete
@@ -91,26 +91,22 @@ def match_release(
     version = parse_version_stdout(version_stdout)
     plat = platform or sys.platform
     doc = load_opencode_compatibility()
-    for release in doc.releases:
-        if release.cli_version == version or release.version_stdout_prefix == version:
-            if release.platforms and plat not in release.platforms:
-                raise DomainError(
-                    ErrorCode.PROVIDER_INCOMPATIBLE,
-                    "opencode release not supported on this platform",
-                    details={
-                        "release_id": release.id,
-                        "platform": plat,
-                        "supported_platforms": list(release.platforms),
-                    },
-                )
-            return release
-    raise DomainError(
-        ErrorCode.PROVIDER_INCOMPATIBLE,
-        "unknown opencode release",
-        details={
-            "cli_version": version,
-            "known_releases": [r.id for r in doc.releases],
-        },
+    floor = doc.floor
+    assert_supported_platform(plat, floor.platforms, harness_label="opencode")
+    reject_below_floor(
+        probed=version,
+        floor=floor.version,
+        compare=compare_dotted,
+        harness_label="opencode",
+        details={"cli_version": version},
+    )
+    return OpenCodeReleaseRecord(
+        id=f"opencode-{version}",
+        cli_version=version,
+        version_stdout_prefix=version,
+        platforms=list(floor.platforms),
+        capabilities=floor.capabilities,
+        notes=floor.notes,
     )
 
 
@@ -121,13 +117,13 @@ def enforce_published_operation(
     platform: str | None = None,
     enforce_published: bool = True,
 ) -> None:
-    enforce_doc_operation(
-        load_opencode_compatibility(),
-        release.id,
+    enforce_operation(
+        release.capabilities,
         mode=mode,
+        platforms=release.platforms,
         harness_label="opencode",
         platform=platform,
-        enforce_published=enforce_published,
+        enforce=enforce_published,
     )
 
 
@@ -143,34 +139,30 @@ class OpenCodeCompatibilitySection:
     def adapter_version(self) -> str:
         return self._doc.adapter_version
 
-    def matrix(self, mode: MatrixMode) -> list[CompatibilityMatrixEntry]:
-        return list(getattr(self._doc, f"{mode}_matrix"))
+    @property
+    def floor_label(self) -> str:
+        return f"CLI `>= {self._doc.floor.version}`"
 
-    def render_release_rows(self) -> list[str]:
-        doc = self._doc
-        if not doc.releases:
-            return []
-        lines = [
-            f"| Release ID | CLI version | Platforms | {CAPABILITY_TABLE_HEADER} |",
-            f"| --- | --- | --- | {CAPABILITY_TABLE_DIVIDER} |",
-        ]
-        for release in doc.releases:
-            platforms = ", ".join(release.platforms) if release.platforms else "—"
-            caps = release.capabilities
-            lines.append(
-                f"| `{release.id}` | {release.cli_version} | {platforms} | "
-                f"{capability_cells(caps)} |"
-            )
-        return lines
+    @property
+    def platforms(self) -> list[str]:
+        return list(self._doc.floor.platforms)
+
+    @property
+    def capabilities(self) -> ReleaseCapabilities:
+        return self._doc.floor.capabilities
+
+    @property
+    def latest_verified(self) -> LatestVerified | None:
+        return self._doc.latest_verified
+
+    def render_extra_floor_lines(self) -> list[str]:
+        return []
 
     def render_extra_notes(self) -> list[str]:
-        notes: list[str] = []
-        for release in self._doc.releases:
-            if release.notes:
-                notes.append(f"- `{release.id}`: {release.notes}")
-        if notes:
-            return ["### Notes", ""] + notes
-        return []
+        notes = self._doc.floor.notes
+        if not notes:
+            return []
+        return ["### Notes", "", f"- {notes}"]
 
 
 def opencode_compatibility_section() -> OpenCodeCompatibilitySection:

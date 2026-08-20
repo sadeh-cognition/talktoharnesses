@@ -63,14 +63,14 @@ async def test_probe_cursor_success_and_error_paths(monkeypatch: pytest.MonkeyPa
         _release: object,
         _capabilities: HarnessCapabilities,
         catalog: tuple[HarnessModelInfo, ...],
-    ) -> tuple[tuple[HarnessEffortInfo, ...], tuple[HarnessModelInfo, ...]]:
+    ) -> tuple[tuple[HarnessEffortInfo, ...], tuple[HarnessModelInfo, ...], bool]:
         values = (
             HarnessEffortInfo(id="low", label="Low"),
             HarnessEffortInfo(id="medium", label="Medium"),
             HarnessEffortInfo(id="high", label="High"),
         )
         discovered = tuple(model.model_copy(update={"efforts": values}) for model in catalog)
-        return values, discovered
+        return values, discovered, True
 
     monkeypatch.setattr(probe_mod, "_discover_model_efforts", efforts)
     caps, release = await probe_mod.probe_cursor(
@@ -156,7 +156,7 @@ async def test_cursor_effort_discovery_is_prompt_free_and_closes_process(
         HarnessModelInfo(id="gpt-5.6-sol", label="GPT-5.6 Sol"),
     )
 
-    default_efforts, discovered = await probe_mod._discover_model_efforts(  # pyright: ignore[reportPrivateUsage]
+    default_efforts, discovered, load_session = await probe_mod._discover_model_efforts(  # pyright: ignore[reportPrivateUsage]
         Path("/tmp/cursor-agent"),
         HarnessConfiguration(
             kind=HarnessKind.CURSOR,
@@ -169,6 +169,7 @@ async def test_cursor_effort_discovery_is_prompt_free_and_closes_process(
     )
 
     assert default_efforts == ()
+    assert load_session is True
     assert discovered[0].efforts == ()
     assert discovered[1].efforts == ()
     assert [effort.id for effort in discovered[2].efforts or ()] == [

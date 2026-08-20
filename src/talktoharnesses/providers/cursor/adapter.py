@@ -164,7 +164,13 @@ class CursorAdapter:
         self.preflight_operation("resume")
         await self._ensure_connection()
         assert self._connection is not None
-        await self._initialize()
+        init_result = await self._initialize()
+        if _map_dict(init_result.get("agentCapabilities")).get("loadSession") is not True:
+            raise DomainError(
+                ErrorCode.PROVIDER_INCOMPATIBLE,
+                "initialize result does not advertise session loading",
+                details={"release_id": self._release.id if self._release is not None else None},
+            )
         cwd = request.launch.working_directory or request.configuration.working_directory
         self._normalizer.set_session(request.native_session_id, resync=True)
         future, _delivered = await self._connection.request(
@@ -351,10 +357,10 @@ class CursorAdapter:
             await conn.start()
             self._connection = conn
 
-    async def _initialize(self) -> None:
+    async def _initialize(self) -> dict[str, Any]:
         assert self._connection is not None
         assert self._release is not None
-        await initialize_cursor(self._connection, self._release)
+        return await initialize_cursor(self._connection, self._release)
 
     async def _apply_session_configuration(
         self,

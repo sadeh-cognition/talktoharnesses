@@ -166,6 +166,7 @@ APPROVED: dict[str, frozenset[str]] = {
             "TurnStatus",
             "UsageRecord",
             "UserRuleScope",
+            "VersionAdvisory",
             "append_events",
             "apply_native_title",
             "apply_steer",

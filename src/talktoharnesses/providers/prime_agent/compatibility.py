@@ -1,4 +1,4 @@
-"""Strict Prime Agent compatibility source."""
+"""Prime Agent compatibility floor and probed-identity matching."""
 
 from __future__ import annotations
 
@@ -13,19 +13,23 @@ from talktoharnesses.domain.enums import ErrorCode, HarnessKind
 from talktoharnesses.domain.errors import DomainError
 from talktoharnesses.domain.models import HarnessCapabilities, HarnessEffortInfo
 from talktoharnesses.providers.compatibility import (
-    CAPABILITY_TABLE_DIVIDER,
-    CAPABILITY_TABLE_HEADER,
-    CompatibilityMatrixEntry,
+    CompatibilityFloor,
+    LatestVerified,
     MatrixMode,
     ReleaseCapabilities,
-    SharedMatrices,
-    capability_cells,
-    enforce_doc_operation,
-    validate_matrices,
+    assert_supported_platform,
+    compare_dotted,
+    enforce_operation,
+    reject_below_floor,
+    validate_floor_document,
 )
 from talktoharnesses.providers.prime_agent.argv import THINKING_LEVELS
 
 _COMPAT = ConfigDict(extra="forbid", frozen=True)
+
+
+class PrimeAgentFloor(CompatibilityFloor):
+    notes: str | None = None
 
 
 class PrimeAgentReleaseRecord(BaseModel):
@@ -52,11 +56,12 @@ class PrimeAgentReleaseRecord(BaseModel):
         )
 
 
-class PrimeAgentCompatibilityDoc(SharedMatrices):
+class PrimeAgentCompatibilityDoc(BaseModel):
     model_config = _COMPAT
 
     adapter_version: str
-    releases: list[PrimeAgentReleaseRecord] = Field(default_factory=list[PrimeAgentReleaseRecord])
+    floor: PrimeAgentFloor
+    latest_verified: LatestVerified | None = None
 
 
 @lru_cache(maxsize=1)
@@ -64,11 +69,7 @@ def load_prime_agent_compatibility() -> PrimeAgentCompatibilityDoc:
     root = resources.files("talktoharnesses.data.compatibility")
     data = (root / "prime_agent.json").read_text(encoding="utf-8")
     doc = PrimeAgentCompatibilityDoc.model_validate(json.loads(data))
-    validate_matrices(
-        releases=doc.releases,
-        matrices=doc.as_mapping(),
-        harness_label="prime_agent",
-    )
+    validate_floor_document(doc, harness_label="prime_agent", compare=compare_dotted)
     return doc
 
 
@@ -93,26 +94,21 @@ def match_release(
     version = parse_version_stdout(version_stdout)
     selected_platform = platform or sys.platform
     doc = load_prime_agent_compatibility()
-    for release in doc.releases:
-        if release.cli_version == version:
-            if release.platforms and selected_platform not in release.platforms:
-                raise DomainError(
-                    ErrorCode.PROVIDER_INCOMPATIBLE,
-                    "prime-agent release not supported on this platform",
-                    details={
-                        "release_id": release.id,
-                        "platform": selected_platform,
-                        "supported_platforms": list(release.platforms),
-                    },
-                )
-            return release
-    raise DomainError(
-        ErrorCode.PROVIDER_INCOMPATIBLE,
-        "unknown prime-agent release",
-        details={
-            "cli_version": version,
-            "known_releases": [release.id for release in doc.releases],
-        },
+    floor = doc.floor
+    assert_supported_platform(selected_platform, floor.platforms, harness_label="prime_agent")
+    reject_below_floor(
+        probed=version,
+        floor=floor.version,
+        compare=compare_dotted,
+        harness_label="prime_agent",
+        details={"cli_version": version},
+    )
+    return PrimeAgentReleaseRecord(
+        id=f"prime-agent-{version}",
+        cli_version=version,
+        platforms=list(floor.platforms),
+        capabilities=floor.capabilities,
+        notes=floor.notes,
     )
 
 
@@ -123,13 +119,13 @@ def enforce_published_operation(
     platform: str | None = None,
     enforce_published: bool = True,
 ) -> None:
-    enforce_doc_operation(
-        load_prime_agent_compatibility(),
-        release.id,
+    enforce_operation(
+        release.capabilities,
         mode=mode,
+        platforms=release.platforms,
         harness_label="prime_agent",
         platform=platform,
-        enforce_published=enforce_published,
+        enforce=enforce_published,
     )
 
 
@@ -145,29 +141,30 @@ class PrimeAgentCompatibilitySection:
     def adapter_version(self) -> str:
         return self._doc.adapter_version
 
-    def matrix(self, mode: MatrixMode) -> list[CompatibilityMatrixEntry]:
-        return list(getattr(self._doc, f"{mode}_matrix"))
+    @property
+    def floor_label(self) -> str:
+        return f"CLI `>= {self._doc.floor.version}`"
 
-    def render_release_rows(self) -> list[str]:
-        if not self._doc.releases:
-            return []
-        lines = [
-            f"| Release ID | CLI version | Transport | Platforms | {CAPABILITY_TABLE_HEADER} |",
-            f"| --- | --- | --- | --- | {CAPABILITY_TABLE_DIVIDER} |",
-        ]
-        for release in self._doc.releases:
-            platforms = ", ".join(release.platforms) if release.platforms else "—"
-            lines.append(
-                f"| `{release.id}` | {release.cli_version} | JSONL RPC | {platforms} | "
-                f"{capability_cells(release.capabilities)} |"
-            )
-        return lines
+    @property
+    def platforms(self) -> list[str]:
+        return list(self._doc.floor.platforms)
+
+    @property
+    def capabilities(self) -> ReleaseCapabilities:
+        return self._doc.floor.capabilities
+
+    @property
+    def latest_verified(self) -> LatestVerified | None:
+        return self._doc.latest_verified
+
+    def render_extra_floor_lines(self) -> list[str]:
+        return ["- Transport: JSONL RPC"]
 
     def render_extra_notes(self) -> list[str]:
-        notes = [
-            f"- `{release.id}`: {release.notes}" for release in self._doc.releases if release.notes
-        ]
-        return ["### Notes", "", *notes] if notes else []
+        notes = self._doc.floor.notes
+        if not notes:
+            return []
+        return ["### Notes", "", f"- {notes}"]
 
 
 def prime_agent_compatibility_section() -> PrimeAgentCompatibilitySection:

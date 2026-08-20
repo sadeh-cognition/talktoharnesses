@@ -23,9 +23,14 @@ def test_load_and_match_release() -> None:
     assert release.id == "opencode-1.2.27"
 
 
-def test_unknown_version_fails() -> None:
+def test_newer_patch_above_floor_is_accepted() -> None:
+    release = match_release("1.2.30", platform="linux")
+    assert release.id == "opencode-1.2.30"
+
+
+def test_below_floor_fails() -> None:
     with pytest.raises(DomainError) as exc:
-        match_release("9.9.9")
+        match_release("1.2.0")
     assert exc.value.code is ErrorCode.PROVIDER_INCOMPATIBLE
 
 

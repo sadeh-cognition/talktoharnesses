@@ -1,233 +1,36 @@
 {
   "adapter_version": "2026.8.5",
-  "releases": [
-    {
-      "id": "grok-1.0.0-3cd0d0cbce",
-      "cli_version": "1.0.0",
-      "cli_build": "3cd0d0cbce",
-      "cli_channel": "stable",
-      "version_stdout_prefix": "grok 1.0.0 (3cd0d0cbce)",
-      "agent_name": "grok",
-      "acp_protocol_version": 1,
-      "platforms": [
-        "linux",
-        "darwin",
-        "win32"
-      ],
-      "capabilities": {
-        "supports_resume": true,
-        "supports_interrupt": true,
-        "supports_steer": false,
-        "supports_multi_interaction": true,
-        "supports_nested_activity": false
-      },
-      "required_agent_methods": [
-        "session/new",
-        "session/load",
-        "session/prompt",
-        "session/cancel"
-      ],
-      "allowlisted_extensions": [
-        "_x.ai/mcp/servers_updated",
-        "_x.ai/settings/update",
-        "_x.ai/announcements/update",
-        "_x.ai/models/update",
-        "_x.ai/mcp_initialized"
-      ],
-      "effort_levels": [
-        "low",
-        "medium",
-        "high"
-      ],
-      "notes": "Live create/resume/interaction proven on linux. Interrupt and multi-interaction are published for the same linux gate."
+  "floor": {
+    "version": "1.0.0",
+    "platforms": ["linux"],
+    "capabilities": {
+      "supports_resume": true,
+      "supports_interrupt": true,
+      "supports_steer": false,
+      "supports_multi_interaction": true,
+      "supports_nested_activity": false
     },
-    {
-      "id": "grok-1.0.3-1a29d5bc12",
-      "cli_version": "1.0.3",
-      "cli_build": "1a29d5bc12",
-      "cli_channel": "stable",
-      "version_stdout_prefix": "grok 1.0.3 (1a29d5bc12)",
-      "agent_name": "grok",
-      "acp_protocol_version": 1,
-      "platforms": [
-        "linux"
-      ],
-      "capabilities": {
-        "supports_resume": true,
-        "supports_interrupt": true,
-        "supports_steer": false,
-        "supports_multi_interaction": true,
-        "supports_nested_activity": false
-      },
-      "required_agent_methods": [
-        "session/new",
-        "session/load",
-        "session/prompt",
-        "session/cancel"
-      ],
-      "allowlisted_extensions": [
-        "_x.ai/mcp/servers_updated",
-        "_x.ai/settings/update",
-        "_x.ai/announcements/update",
-        "_x.ai/models/update",
-        "_x.ai/mcp_initialized"
-      ],
-      "effort_levels": [
-        "low",
-        "medium",
-        "high"
-      ],
-      "notes": "Live create/resume/interaction proven on linux. Interrupt and multi-interaction are published for the same linux gate."
-    },
-    {
-      "id": "grok-1.0.4-d846eb93d9",
-      "cli_version": "1.0.4",
-      "cli_build": "d846eb93d9",
-      "cli_channel": "stable",
-      "version_stdout_prefix": "grok 1.0.4 (d846eb93d9)",
-      "agent_name": "grok",
-      "acp_protocol_version": 1,
-      "platforms": [
-        "linux"
-      ],
-      "capabilities": {
-        "supports_resume": true,
-        "supports_interrupt": true,
-        "supports_steer": false,
-        "supports_multi_interaction": true,
-        "supports_nested_activity": false
-      },
-      "required_agent_methods": [
-        "session/new",
-        "session/load",
-        "session/prompt",
-        "session/cancel"
-      ],
-      "allowlisted_extensions": [
-        "_x.ai/mcp/servers_updated",
-        "_x.ai/settings/update",
-        "_x.ai/announcements/update",
-        "_x.ai/models/update",
-        "_x.ai/mcp_initialized"
-      ],
-      "effort_levels": [
-        "low",
-        "medium",
-        "high"
-      ],
-      "notes": "Live create/resume/interaction proven on linux. Interrupt and multi-interaction are published for the same linux gate."
-    },
-    {
-      "id": "grok-1.0.5-5115b46bc9",
-      "cli_version": "1.0.5",
-      "cli_build": "5115b46bc9",
-      "cli_channel": "stable",
-      "version_stdout_prefix": "grok 1.0.5 (5115b46bc9)",
-      "agent_name": "grok",
-      "acp_protocol_version": 1,
-      "platforms": [
-        "linux"
-      ],
-      "capabilities": {
-        "supports_resume": true,
-        "supports_interrupt": true,
-        "supports_steer": false,
-        "supports_multi_interaction": true,
-        "supports_nested_activity": false
-      },
-      "required_agent_methods": [
-        "session/new",
-        "session/load",
-        "session/prompt",
-        "session/cancel"
-      ],
-      "allowlisted_extensions": [
-        "_x.ai/mcp/servers_updated",
-        "_x.ai/settings/update",
-        "_x.ai/announcements/update",
-        "_x.ai/models/update",
-        "_x.ai/mcp_initialized"
-      ],
-      "effort_levels": [
-        "low",
-        "medium",
-        "high"
-      ],
-      "notes": "Live create/resume/interaction proven on linux. Interrupt and multi-interaction are published for the same linux gate."
-    }
-  ],
-  "create_matrix": [
-    {
-      "release_id": "grok-1.0.0-3cd0d0cbce",
-      "platform": "linux"
-    },
-    {
-      "release_id": "grok-1.0.3-1a29d5bc12",
-      "platform": "linux"
-    },
-    {
-      "release_id": "grok-1.0.4-d846eb93d9",
-      "platform": "linux"
-    },
-    {
-      "release_id": "grok-1.0.5-5115b46bc9",
-      "platform": "linux"
-    }
-  ],
-  "resume_matrix": [
-    {
-      "release_id": "grok-1.0.0-3cd0d0cbce",
-      "platform": "linux"
-    },
-    {
-      "release_id": "grok-1.0.3-1a29d5bc12",
-      "platform": "linux"
-    },
-    {
-      "release_id": "grok-1.0.4-d846eb93d9",
-      "platform": "linux"
-    },
-    {
-      "release_id": "grok-1.0.5-5115b46bc9",
-      "platform": "linux"
-    }
-  ],
-  "steer_matrix": [],
-  "interrupt_matrix": [
-    {
-      "release_id": "grok-1.0.0-3cd0d0cbce",
-      "platform": "linux"
-    },
-    {
-      "release_id": "grok-1.0.3-1a29d5bc12",
-      "platform": "linux"
-    },
-    {
-      "release_id": "grok-1.0.4-d846eb93d9",
-      "platform": "linux"
-    },
-    {
-      "release_id": "grok-1.0.5-5115b46bc9",
-      "platform": "linux"
-    }
-  ],
-  "multi_interaction_matrix": [
-    {
-      "release_id": "grok-1.0.0-3cd0d0cbce",
-      "platform": "linux"
-    },
-    {
-      "release_id": "grok-1.0.3-1a29d5bc12",
-      "platform": "linux"
-    },
-    {
-      "release_id": "grok-1.0.4-d846eb93d9",
-      "platform": "linux"
-    },
-    {
-      "release_id": "grok-1.0.5-5115b46bc9",
-      "platform": "linux"
-    }
-  ],
-  "nested_activity_matrix": []
+    "agent_name": "grok",
+    "acp_protocol_version": 1,
+    "required_agent_methods": [
+      "session/new",
+      "session/load",
+      "session/prompt",
+      "session/cancel"
+    ],
+    "allowlisted_extensions": [
+      "_x.ai/mcp/servers_updated",
+      "_x.ai/settings/update",
+      "_x.ai/announcements/update",
+      "_x.ai/models/update",
+      "_x.ai/mcp_initialized"
+    ],
+    "effort_levels": ["low", "medium", "high"],
+    "notes": "Live create/resume/interaction proven on linux. Interrupt and multi-interaction are published for the same linux gate."
+  },
+  "latest_verified": {
+    "version": "1.0.5",
+    "identity": "1.0.5 (5115b46bc9)",
+    "platform": "linux"
+  }
 }

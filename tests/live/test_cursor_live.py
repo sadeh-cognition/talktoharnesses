@@ -21,14 +21,12 @@ from tests.live.helpers import (
 from talktoharnesses.client import AsyncTalkToHarnessesClient
 from talktoharnesses.domain.enums import HarnessKind
 from talktoharnesses.domain.models import HarnessConfiguration
-from talktoharnesses.providers.cursor.compatibility import load_cursor_compatibility
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("TALKTOHARNESSES_LIVE_CURSOR") != "1",
     reason="set TALKTOHARNESSES_LIVE_CURSOR=1 to run live Cursor tests",
 )
 
-_PINNED_RELEASE = "cursor-2026.08.11-e8db854"
 _MODEL = "composer-2.5[fast=false]"
 _MODE = "ask"
 
@@ -72,7 +70,5 @@ async def test_live_cursor_create_resume_interaction(live_http: LiveHttp) -> Non
             model=_MODEL,
             mode=_MODE,
         ),
-        releases=load_cursor_compatibility().releases,
-        expected_release_id=_PINNED_RELEASE,
         after_create=_after_create,
     )

@@ -23,7 +23,7 @@ from talktoharnesses.providers.acp.pending import PendingAcpApproval
 from talktoharnesses.providers.acp.schemas.base import is_allowlisted_session_update
 from talktoharnesses.providers.adapter import HarnessInteractionRequest
 from talktoharnesses.providers.grok.adapter import GrokAdapter
-from talktoharnesses.providers.grok.compatibility import load_grok_compatibility
+from talktoharnesses.providers.grok.compatibility import match_release
 from talktoharnesses.providers.grok.normalizer import GrokNormalizer
 
 
@@ -210,8 +210,8 @@ def test_delivered_protocol_fault_is_outcome_unknown() -> None:
 
 def test_initialize_requires_pinned_identity_and_resume_capability() -> None:
     adapter = GrokAdapter()
-    adapter._release = (  # pyright: ignore[reportPrivateUsage]
-        load_grok_compatibility().releases[0]
+    adapter._release = match_release(  # pyright: ignore[reportPrivateUsage]
+        "grok 1.0.0 (3cd0d0cbce) [stable]", platform="linux"
     )
     with pytest.raises(DomainError) as exc:
         adapter._validate_initialize_identity({})  # pyright: ignore[reportPrivateUsage]

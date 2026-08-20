@@ -118,6 +118,7 @@ from talktoharnesses.domain.models import (
     TurnProjection,
     UsageRecord,
     UserRuleScope,
+    VersionAdvisory,
 )
 from talktoharnesses.domain.transcripts import (
     TranscriptDocument,
@@ -270,6 +271,7 @@ __all__ = [
     "TurnStatus",
     "UsageRecord",
     "UserRuleScope",
+    "VersionAdvisory",
     "append_events",
     "apply_native_title",
     "apply_steer",

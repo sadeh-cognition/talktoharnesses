@@ -251,6 +251,7 @@ class _FakeAcpProcess:
         *,
         agent_name: str = "grok",
         agent_version: str = "1.0.0",
+        load_session: bool = True,
     ) -> None:
         self.process_id = uuid4()
         self.pid = 12345
@@ -266,6 +267,7 @@ class _FakeAcpProcess:
         self._session_id = f"acp-{uuid4()}"
         self._agent_name = agent_name
         self._agent_version = agent_version
+        self._load_session = load_session
         self._task: asyncio.Task[None] | None = None
         self.requests: list[dict[str, Any]] = []
         self._cursor_mode = "agent"
@@ -386,7 +388,7 @@ class _FakeAcpProcess:
                 {
                     "protocolVersion": 1,
                     "agentInfo": {"name": self._agent_name, "version": self._agent_version},
-                    "agentCapabilities": {"loadSession": True},
+                    "agentCapabilities": {"loadSession": self._load_session},
                 },
             )
         elif method == "session/new":

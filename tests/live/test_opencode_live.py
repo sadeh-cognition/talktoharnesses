@@ -13,7 +13,6 @@ from tests.live.helpers import LiveHttp, require_executable, run_live_gate
 
 from talktoharnesses.domain.enums import HarnessKind
 from talktoharnesses.domain.models import HarnessConfiguration
-from talktoharnesses.providers.opencode.compatibility import load_opencode_compatibility
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("TALKTOHARNESSES_LIVE_OPENCODE") != "1",
@@ -35,6 +34,5 @@ async def test_live_opencode_create_resume_interaction(live_http: LiveHttp) -> N
             working_directory=str(live_http.workspace),
             model=os.environ.get("TALKTOHARNESSES_OPENCODE_MODEL", "opencode/big-pickle"),
         ),
-        releases=load_opencode_compatibility().releases,
         min_resume_interactions=0,
     )
