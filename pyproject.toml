@@ -46,6 +46,7 @@ all = [
 [dependency-groups]
 dev = [
     "ruff",
+    "isort",
     "pyright",
     "pytest",
     "pytest-asyncio",
@@ -77,6 +78,12 @@ extend-exclude = ["**/migrations/**"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.isort]
+profile = "black"
+line_length = 100
+src_paths = ["src"]
+skip_glob = ["**/migrations/**"]
 
 [tool.pyright]
 typeCheckingMode = "strict"
