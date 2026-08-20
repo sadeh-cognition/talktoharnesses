@@ -70,18 +70,21 @@ _No published nested-activity combinations yet. Nested-activity rows are added o
 | Release ID | CLI version | ACP | Platforms | Resume | Interrupt | Steer | Multi-interaction | Nested |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | `cursor-2026.08.04-aaa8809` | 2026.08.04-aaa8809 | v1 | linux, darwin, win32 | yes | yes | no | yes | no |
+| `cursor-2026.08.11-e8db854` | 2026.08.11-e8db854 | v1 | linux | yes | yes | no | yes | no |
 
 ### Published create matrix
 
 | Release ID | Platform |
 | --- | --- |
 | `cursor-2026.08.04-aaa8809` | `linux` |
+| `cursor-2026.08.11-e8db854` | `linux` |
 
 ### Published resume matrix
 
 | Release ID | Platform |
 | --- | --- |
 | `cursor-2026.08.04-aaa8809` | `linux` |
+| `cursor-2026.08.11-e8db854` | `linux` |
 
 ### Published steer matrix
 
@@ -92,12 +95,14 @@ _No published steer combinations yet. Steer rows are added only after the opt-in
 | Release ID | Platform |
 | --- | --- |
 | `cursor-2026.08.04-aaa8809` | `linux` |
+| `cursor-2026.08.11-e8db854` | `linux` |
 
 ### Published multi-interaction matrix
 
 | Release ID | Platform |
 | --- | --- |
 | `cursor-2026.08.04-aaa8809` | `linux` |
+| `cursor-2026.08.11-e8db854` | `linux` |
 
 ### Published nested-activity matrix
 

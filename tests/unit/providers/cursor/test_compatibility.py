@@ -18,8 +18,8 @@ from talktoharnesses.providers.cursor.compatibility import (
 def test_load_and_match_release() -> None:
     doc = load_cursor_compatibility()
     assert doc.adapter_version == "2026.8.5"
-    release = match_release("2026.08.04-aaa8809", platform="linux")
-    assert release.id == "cursor-2026.08.04-aaa8809"
+    release = match_release("2026.08.11-e8db854", platform="linux")
+    assert release.id == "cursor-2026.08.11-e8db854"
     caps = release.to_harness_capabilities()
     assert caps.supports_resume is True
     assert caps.supports_steer is False
@@ -42,7 +42,7 @@ def test_malformed_version_fails() -> None:
 def test_markdown_includes_cursor() -> None:
     md = render_supported_harnesses_markdown()
     assert "## Cursor" in md
-    assert "cursor-2026.08.04-aaa8809" in md
+    assert "cursor-2026.08.11-e8db854" in md
 
 
 def test_build_argv_accepts_no_model_mode_flags() -> None:

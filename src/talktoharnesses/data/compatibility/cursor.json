@@ -30,17 +30,53 @@
         "clientCapabilities._meta.parameterizedModelPicker"
       ],
       "notes": "Live create/resume, permissions, model-family selection, parameter selection, and Agent/Plan/Ask selection proven on linux. Interrupt and multi-interaction are published for the same linux gate."
+    },
+    {
+      "id": "cursor-2026.08.11-e8db854",
+      "cli_version": "2026.08.11-e8db854",
+      "version_stdout_prefix": "2026.08.11-e8db854",
+      "agent_name": "cursor",
+      "acp_protocol_version": 1,
+      "platforms": [
+        "linux"
+      ],
+      "capabilities": {
+        "supports_resume": true,
+        "supports_interrupt": true,
+        "supports_steer": false,
+        "supports_multi_interaction": true,
+        "supports_nested_activity": false
+      },
+      "required_agent_methods": [
+        "session/new",
+        "session/load",
+        "session/prompt",
+        "session/cancel",
+        "session/set_config_option"
+      ],
+      "allowlisted_extensions": [
+        "clientCapabilities._meta.parameterizedModelPicker"
+      ],
+      "notes": "Exact release, ACP identity, model discovery, and configuration probing verified on linux."
     }
   ],
   "create_matrix": [
     {
       "release_id": "cursor-2026.08.04-aaa8809",
       "platform": "linux"
+    },
+    {
+      "release_id": "cursor-2026.08.11-e8db854",
+      "platform": "linux"
     }
   ],
   "resume_matrix": [
     {
       "release_id": "cursor-2026.08.04-aaa8809",
+      "platform": "linux"
+    },
+    {
+      "release_id": "cursor-2026.08.11-e8db854",
       "platform": "linux"
     }
   ],
@@ -49,11 +85,19 @@
     {
       "release_id": "cursor-2026.08.04-aaa8809",
       "platform": "linux"
+    },
+    {
+      "release_id": "cursor-2026.08.11-e8db854",
+      "platform": "linux"
     }
   ],
   "multi_interaction_matrix": [
     {
       "release_id": "cursor-2026.08.04-aaa8809",
+      "platform": "linux"
+    },
+    {
+      "release_id": "cursor-2026.08.11-e8db854",
       "platform": "linux"
     }
   ],

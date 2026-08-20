@@ -28,7 +28,7 @@ pytestmark = pytest.mark.skipif(
     reason="set TALKTOHARNESSES_LIVE_CURSOR=1 to run live Cursor tests",
 )
 
-_PINNED_RELEASE = "cursor-2026.08.04-aaa8809"
+_PINNED_RELEASE = "cursor-2026.08.11-e8db854"
 _MODEL = "composer-2.5[fast=false]"
 _MODE = "ask"
 
