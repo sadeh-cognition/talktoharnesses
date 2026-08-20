@@ -17,6 +17,7 @@ from talktoharnesses.domain.events import (
     ToolRequestedPayload,
     TurnCompletedPayload,
     TurnFailedPayload,
+    TurnInterruptedPayload,
     UsageUpdatedPayload,
 )
 from talktoharnesses.domain.questions import canonical_questions
@@ -104,6 +105,21 @@ def test_thinking_tool_result_and_terminal_variants() -> None:
         )
     )
     assert any(isinstance(e, TurnFailedPayload) and "boom" in e.message for e in failed)
+
+    n.begin_turn(uuid4())
+    n.request_interrupt()
+    interrupted = n.on_message(
+        ClaudeResultMessage(
+            subtype="error",
+            session_id="sess-1",
+            is_error=True,
+            errors=["interrupted"],
+            stop_reason=None,
+            result=None,
+            usage=None,
+        )
+    )
+    assert any(isinstance(e, TurnInterruptedPayload) for e in interrupted)
 
     n.begin_turn(uuid4())
     with pytest.raises(DomainError) as mismatch:

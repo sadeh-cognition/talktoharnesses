@@ -49,7 +49,10 @@ async def test_probe_cursor_success_and_error_paths(monkeypatch: pytest.MonkeyPa
         return _Proc(b"2026.08.04-aaa8809")
 
     async def models(*_a: object, **_k: object) -> str:
-        return "Available models\n\nauto - Auto (default)\ncomposer-2.5 - Composer 2.5\n"
+        return (
+            "Available models\n\nauto - Auto (default)\ncomposer-2.5 - Composer 2.5\n"
+            "Tip: use --model <id> to switch.\n"
+        )
 
     monkeypatch.setattr(probe_mod.asyncio, "create_subprocess_exec", ok_exec)
     monkeypatch.setattr(probe_mod, "run_model_command", models)
@@ -66,9 +69,7 @@ async def test_probe_cursor_success_and_error_paths(monkeypatch: pytest.MonkeyPa
             HarnessEffortInfo(id="medium", label="Medium"),
             HarnessEffortInfo(id="high", label="High"),
         )
-        discovered = tuple(
-            model.model_copy(update={"efforts": values}) for model in catalog
-        )
+        discovered = tuple(model.model_copy(update={"efforts": values}) for model in catalog)
         return values, discovered
 
     monkeypatch.setattr(probe_mod, "_discover_model_efforts", efforts)

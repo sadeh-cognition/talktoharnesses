@@ -1,25 +1,30 @@
-"""Shared helpers for opt-in live create/resume/feature gates."""
+"""Shared helpers for opt-in live create/resume/feature gates over HTTP."""
 
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
-from typing import Any
+import os
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Protocol
 from uuid import UUID, uuid4
 
-from talktoharnesses import __version__
+import pytest
+
+from talktoharnesses.client import AsyncTalkToHarnessesClient, ConversationStreamItem
 from talktoharnesses.domain.enums import ApprovalDecision
-from talktoharnesses.domain.events import InteractionRequestedPayload
+from talktoharnesses.domain.events import (
+    ConversationEvent,
+    InteractionRequestedPayload,
+    SessionResumedPayload,
+    SessionStartedPayload,
+    event_turn_id,
+)
 from talktoharnesses.domain.models import (
     HarnessCapabilities,
-    InteractionAnswer,
-    LaunchSnapshot,
-)
-from talktoharnesses.providers.adapter import (
-    HarnessInteractionRequest,
-    HarnessSession,
-    SteerRequest,
-    TurnRequest,
+    HarnessConfiguration,
+    HarnessProjection,
 )
 
 TERMINAL_TYPES = frozenset(
@@ -27,39 +32,143 @@ TERMINAL_TYPES = frozenset(
 )
 
 
-def make_launch(
-    *,
-    caps: HarnessCapabilities,
-    working_directory: str,
-    resolved_executable: str | None = None,
-) -> LaunchSnapshot:
-    return LaunchSnapshot(
-        harness_version=caps.version,
-        working_directory=working_directory,
-        adapter_version=__version__,
-        capabilities=caps,
-        resolved_executable=resolved_executable,
-    )
+@dataclass(frozen=True)
+class LiveHttp:
+    client: AsyncTalkToHarnessesClient
+    workspace: Path
+    close_runtime: Callable[[UUID], Awaitable[None]]
 
 
-def unique_prompt(prefix: str) -> str:
+class CompatibilityRelease(Protocol):
+    id: str
+
+    def to_harness_capabilities(self) -> HarnessCapabilities: ...
+
+
+class LiveStream:
+    """Pull one SSE iterator sequentially and resolve interactions as they arrive."""
+
+    def __init__(
+        self,
+        items: AsyncIterator[ConversationStreamItem],
+        on_event: Callable[[ConversationEvent], Awaitable[None]],
+    ) -> None:
+        self._items = items
+        self._on_event = on_event
+
+    async def wait_until(
+        self,
+        predicate: Callable[[ConversationEvent], bool],
+        *,
+        timeout: float = 180.0,
+    ) -> list[ConversationEvent]:
+        collected: list[ConversationEvent] = []
+
+        async def _run() -> None:
+            async for item in self._items:
+                if not isinstance(item, ConversationEvent):
+                    continue
+                collected.append(item)
+                await self._on_event(item)
+                if predicate(item):
+                    return
+            raise AssertionError("live event stream ended before expected event")
+
+        await asyncio.wait_for(_run(), timeout=timeout)
+        return collected
+
+    async def collect_turn(
+        self,
+        turn_id: UUID,
+        *,
+        expected_terminal: str = "turn_completed",
+        timeout: float = 180.0,
+        min_interactions: int = 0,
+    ) -> list[ConversationEvent]:
+        window = await self.wait_until(
+            lambda event: event.type in TERMINAL_TYPES and event_turn_id(event) == turn_id,
+            timeout=timeout,
+        )
+        return _assert_turn(
+            window,
+            turn_id,
+            expected_terminal=expected_terminal,
+            min_interactions=min_interactions,
+        )
+
+    async def collect_busy_turn(
+        self,
+        turn_id: UUID,
+        *,
+        on_progress: Callable[[], Awaitable[None]],
+        expected_terminal: str,
+        timeout: float = 180.0,
+    ) -> list[ConversationEvent]:
+        collected: list[ConversationEvent] = []
+        progressed = False
+
+        async def _run() -> None:
+            nonlocal progressed
+            async for item in self._items:
+                if not isinstance(item, ConversationEvent):
+                    continue
+                collected.append(item)
+                await self._on_event(item)
+                if (
+                    not progressed
+                    and item.type == "turn_started"
+                    and event_turn_id(item) == turn_id
+                ):
+                    progressed = True
+                    await on_progress()
+                if item.type in TERMINAL_TYPES and event_turn_id(item) == turn_id:
+                    assert item.type == expected_terminal, f"live turn ended with {item.type}"
+                    return
+            raise AssertionError("live event stream ended before expected event")
+
+        await asyncio.wait_for(_run(), timeout=timeout)
+        assert progressed, "busy turn made no progress before terminal"
+        return collected
+
+
+AfterCreateHook = Callable[
+    [LiveStream, AsyncTalkToHarnessesClient, UUID],
+    Awaitable[None],
+]
+
+
+def unique_prompt(prefix: str, *, mention_permission: bool = True) -> str:
     token = uuid4().hex[:12]
     # Workspace-relative write keeps Claude from treating /tmp markers as injection.
     # Explicit shell + python3 keeps broker approvals on Codex/Grok/Cursor allowlists.
+    if mention_permission:
+        return (
+            f"{prefix} token={token}. Use the native shell tool to run "
+            f"`python3 -c \"open('live-{token}.txt','w').write('live-ok')\"` "
+            "and request permission through the provider before completing."
+        )
     return (
-        f"{prefix} token={token}. Use the native shell tool to run "
-        f"`python3 -c \"open('live-{token}.txt','w').write('live-ok')\"` "
-        "and request permission through the provider before completing."
+        f"{prefix} token={token}. Your only task is to invoke the native shell tool "
+        "with this exact command: "
+        f"`python3 -c \"open('live-{token}.txt','w').write('live-ok')\"`. "
+        "Do not respond with text before invoking the tool."
     )
 
 
-def unique_multi_prompt(prefix: str) -> str:
+def unique_multi_prompt(prefix: str, *, mention_permission: bool = True) -> str:
     token = uuid4().hex[:12]
+    if mention_permission:
+        return (
+            f"{prefix} token={token}. Use the native shell tool twice: first run "
+            f"`python3 -c \"open('live-{token}-a.txt','w').write('a')\"` then "
+            f"`python3 -c \"open('live-{token}-b.txt','w').write('b')\"`. "
+            "Request permission through the provider for each command before completing."
+        )
     return (
         f"{prefix} token={token}. Use the native shell tool twice: first run "
         f"`python3 -c \"open('live-{token}-a.txt','w').write('a')\"` then "
         f"`python3 -c \"open('live-{token}-b.txt','w').write('b')\"`. "
-        "Request permission through the provider for each command before completing."
+        "Do not respond with text before making both tool calls."
     )
 
 
@@ -84,220 +193,253 @@ def unique_nested_prompt(prefix: str) -> str:
     )
 
 
-async def drain_until_terminal(
-    events: AsyncIterator[Any],
+def unique_text_prompt(prefix: str) -> str:
+    token = f"{prefix}-{uuid4().hex[:12]}"
+    return f"Reply with exactly this token and do not use tools: {token}"
+
+
+def require_executable(env_name: str) -> str:
+    path = os.environ.get(env_name)
+    if not path:
+        pytest.fail(f"{env_name} is required when live tests are enabled")
+    return path
+
+
+def release_id_for_version(releases: Sequence[CompatibilityRelease], version: str) -> str:
+    matched = [item.id for item in releases if item.to_harness_capabilities().version == version]
+    assert matched, "probed version is not a packaged compatibility release"
+    return matched[0]
+
+
+def _idempotency_key(prefix: str) -> str:
+    return f"{prefix}-{uuid4().hex}"
+
+
+def _assert_turn(
+    window: Sequence[ConversationEvent],
+    turn_id: UUID,
     *,
-    timeout: float = 180.0,
-) -> list[Any]:
-    """Consume events through the first authoritative terminal payload."""
-    collected: list[Any] = []
-
-    async def _run() -> list[Any]:
-        async for item in events:
-            collected.append(item)
-            if getattr(item, "type", None) in TERMINAL_TYPES:
-                assert getattr(item, "type", None) == "turn_completed", (
-                    f"live turn ended with {getattr(item, 'type', None)}"
-                )
-                return collected
-        return collected
-
-    return await asyncio.wait_for(_run(), timeout=timeout)
+    expected_terminal: str,
+    min_interactions: int,
+) -> list[ConversationEvent]:
+    matching = [event for event in window if event_turn_id(event) == turn_id]
+    terminals = [event for event in matching if event.type in TERMINAL_TYPES]
+    assert terminals, "live turn did not produce a terminal event"
+    assert terminals[0].type == expected_terminal, f"live turn ended with {terminals[0].type}"
+    interactions = [event for event in matching if event.type == "interaction_requested"]
+    if min_interactions:
+        assert len(interactions) >= min_interactions, (
+            f"live turn completed with {len(interactions)} interactions; "
+            f"expected >= {min_interactions}"
+        )
+    return matching
 
 
-def assert_no_duplicate_first_turn(
-    first_events: list[Any],
-    second_events: list[Any],
-    *,
-    first_turn_id: UUID,
+async def _resolve_interaction(
+    client: AsyncTalkToHarnessesClient,
+    conversation_id: UUID,
+    event: ConversationEvent,
 ) -> None:
-    """Ensure the resumed turn stream does not replay the first turn's terminal."""
-    first_terminals = [
-        item
-        for item in first_events
-        if getattr(item, "type", None) in TERMINAL_TYPES
-        and getattr(item, "turn_id", None) == first_turn_id
-    ]
-    assert first_terminals, "first turn did not produce a terminal event"
-    replayed = [
-        item
-        for item in second_events
-        if getattr(item, "type", None) in TERMINAL_TYPES
-        and getattr(item, "turn_id", None) == first_turn_id
-    ]
-    assert not replayed, "first turn terminal was replayed after resume"
-
-
-async def _answer_interaction(adapter: Any, session: HarnessSession, item: object) -> bool:
-    """Answer one deferred interaction as soon as it appears on the stream."""
-    payload: InteractionRequestedPayload | None = None
-    if isinstance(item, HarnessInteractionRequest):
-        payload = item.payload
-    elif isinstance(item, InteractionRequestedPayload):
-        payload = item
-    else:
-        return False
+    payload = event.payload
+    if not isinstance(payload, InteractionRequestedPayload):
+        return
     request = payload.request
-    if getattr(request, "kind", None) == "structured_question":
+    if request.kind == "structured_question":
         answers: dict[str, list[str]] = {}
-        for question in getattr(request, "questions", ()) or ():
+        for question in request.questions:
             options = question.options
             value = options[0].value if options else "yes"
             answers[question.id] = [value]
-        await adapter.answer_interaction(
-            session,
-            InteractionAnswer(
-                interaction_id=payload.interaction_id,
-                answers=answers,
-            ),
+        await client.resolve_interaction(
+            conversation_id,
+            payload.interaction_id,
+            answers=answers,
         )
-    else:
-        await adapter.answer_interaction(
-            session,
-            InteractionAnswer(
-                interaction_id=payload.interaction_id,
-                decision=ApprovalDecision.ALLOW_ONCE,
-            ),
-        )
-    return True
+        return
+    await client.resolve_interaction(
+        conversation_id,
+        payload.interaction_id,
+        decision=ApprovalDecision.ALLOW_ONCE,
+    )
 
 
-async def collect_turn(
-    adapter: Any,
-    session: HarnessSession,
-    *,
-    timeout: float = 180.0,
-    require_interaction: bool = True,
-    min_interactions: int = 0,
-    expected_terminal: str = "turn_completed",
-) -> list[Any]:
-    """Drain one turn, answering interactions until a terminal event arrives."""
-    events: list[Any] = []
-    interaction_count = 0
-
-    async def _run() -> None:
-        nonlocal interaction_count
-        async for item in adapter.events(session):
-            events.append(item)
-            if await _answer_interaction(adapter, session, item):
-                interaction_count += 1
-            event_type = getattr(item, "type", None)
-            if event_type in TERMINAL_TYPES:
-                assert event_type == expected_terminal, f"live turn ended with {event_type}"
-                return
-        raise AssertionError("live event stream ended without a terminal event")
-
-    await asyncio.wait_for(_run(), timeout=timeout)
-    required = max(1 if require_interaction else 0, min_interactions)
-    if required:
-        assert interaction_count >= required, (
-            f"live turn completed with {interaction_count} interactions; expected >= {required}"
-        )
-    return events
-
-
-async def _drain_busy_turn(
-    adapter: Any,
-    session: HarnessSession,
-    *,
-    on_progress: Any,
-    expected_terminal: str,
-    timeout: float,
-) -> list[Any]:
-    events: list[Any] = []
-    progressed = False
-
-    async def _run() -> None:
-        nonlocal progressed
-        async for item in adapter.events(session):
-            events.append(item)
-            await _answer_interaction(adapter, session, item)
-            if not progressed:
-                progressed = True
-                await on_progress()
-            event_type = getattr(item, "type", None)
-            if event_type in TERMINAL_TYPES:
-                assert event_type == expected_terminal, f"live turn ended with {event_type}"
-                return
-        raise AssertionError("live event stream ended without a terminal event")
-
-    await asyncio.wait_for(_run(), timeout=timeout)
-    return events
+def _session_native_id(
+    events: Sequence[ConversationEvent],
+    payload_type: type[SessionStartedPayload] | type[SessionResumedPayload],
+) -> str:
+    for event in events:
+        if isinstance(event.payload, payload_type) and event.payload.native_session_id:
+            return event.payload.native_session_id
+    raise AssertionError(f"missing {payload_type.__name__} native_session_id")
 
 
 async def exercise_advertised_features(
-    adapter: Any,
-    session: HarnessSession,
+    stream: LiveStream,
+    client: AsyncTalkToHarnessesClient,
+    conversation_id: UUID,
     caps: HarnessCapabilities,
     *,
     use_shell: bool = True,
+    mention_permission: bool = True,
 ) -> None:
     """Prove each advertised capability that has a published live gate."""
     if caps.supports_multi_interaction:
-        await adapter.submit(
-            session,
-            TurnRequest(turn_id=uuid4(), prompt=unique_multi_prompt("multi-turn")),
+        submitted = await client.submit_turn(
+            conversation_id,
+            prompt=unique_multi_prompt(
+                "multi-turn",
+                mention_permission=mention_permission,
+            ),
+            idempotency_key=_idempotency_key("multi"),
         )
-        await collect_turn(adapter, session, min_interactions=2)
+        await stream.collect_turn(submitted.turn.id, min_interactions=2)
 
     if caps.supports_nested_activity:
-        await adapter.submit(
-            session,
-            TurnRequest(turn_id=uuid4(), prompt=unique_nested_prompt("nested-turn")),
+        submitted = await client.submit_turn(
+            conversation_id,
+            prompt=unique_nested_prompt("nested-turn"),
+            idempotency_key=_idempotency_key("nested"),
         )
-        nested_events = await collect_turn(adapter, session, require_interaction=False)
-        assert any(getattr(item, "type", None) == "activity_started" for item in nested_events), (
+        nested_events = await stream.collect_turn(submitted.turn.id)
+        assert any(event.type == "activity_started" for event in nested_events), (
             "nested-activity gate did not observe activity_started"
         )
 
     if caps.supports_steer:
-        steer_turn = uuid4()
-        await adapter.submit(
-            session,
-            TurnRequest(
-                turn_id=steer_turn,
-                prompt=unique_busy_prompt("steer-turn", use_shell=use_shell),
-            ),
+        submitted = await client.submit_turn(
+            conversation_id,
+            prompt=unique_busy_prompt("steer-turn", use_shell=use_shell),
+            idempotency_key=_idempotency_key("steer-submit"),
         )
-        steered = False
 
         async def _steer() -> None:
-            nonlocal steered
-            ok = await adapter.steer(
-                session,
-                SteerRequest(
-                    turn_id=steer_turn,
-                    prompt="Stop waiting and reply with the single word done.",
-                ),
+            await client.steer(
+                conversation_id,
+                prompt="Stop waiting and reply with the single word done.",
+                idempotency_key=_idempotency_key("steer"),
             )
-            assert ok is True, "advertised steer returned False"
-            steered = True
 
-        await _drain_busy_turn(
-            adapter,
-            session,
+        await stream.collect_busy_turn(
+            submitted.turn.id,
             on_progress=_steer,
             expected_terminal="turn_completed",
-            timeout=180.0,
         )
-        assert steered
 
     if caps.supports_interrupt:
-        await adapter.submit(
-            session,
-            TurnRequest(
-                turn_id=uuid4(),
-                prompt=unique_busy_prompt("interrupt-turn", use_shell=use_shell),
-            ),
+        submitted = await client.submit_turn(
+            conversation_id,
+            prompt=unique_busy_prompt("interrupt-turn", use_shell=use_shell),
+            idempotency_key=_idempotency_key("interrupt-submit"),
         )
 
         async def _interrupt() -> None:
-            await adapter.interrupt(session)
+            await client.interrupt(conversation_id)
 
-        await _drain_busy_turn(
-            adapter,
-            session,
+        await stream.collect_busy_turn(
+            submitted.turn.id,
             on_progress=_interrupt,
             expected_terminal="turn_interrupted",
             timeout=60.0,
         )
+
+
+async def run_live_gate(
+    live: LiveHttp,
+    *,
+    configuration: HarnessConfiguration,
+    releases: Sequence[CompatibilityRelease],
+    expected_release_id: str | None = None,
+    min_create_interactions: int = 1,
+    min_resume_interactions: int = 1,
+    use_shell: bool = True,
+    mention_permission: bool = True,
+    prompt_fn: Callable[[str], str] = unique_prompt,
+    after_create: AfterCreateHook | None = None,
+) -> HarnessProjection:
+    """Create, probe, turn, close runtime, resume, and exercise advertised features."""
+    client = live.client
+    harness = await client.create_harness(
+        name=f"live-{configuration.kind.value}",
+        configuration=configuration,
+    )
+    probe = await client.probe_harness(harness.id, timeout=120.0)
+    caps = probe.capabilities
+    assert caps.supports_resume is True
+    release_id = release_id_for_version(releases, caps.version)
+    if expected_release_id is not None:
+        assert release_id == expected_release_id
+    print(f"detected_release_id={release_id}")
+
+    snapshot = await client.create_conversation(harness.id, title="live-gate")
+    conversation_id = snapshot.detail.conversation.id
+    items = client.stream_conversation_events(conversation_id)
+
+    async def on_event(event: ConversationEvent) -> None:
+        await _resolve_interaction(client, conversation_id, event)
+
+    stream = LiveStream(items, on_event)
+    try:
+        created = await client.submit_turn(
+            conversation_id,
+            prompt=prompt_fn("create-turn"),
+            idempotency_key=_idempotency_key("create"),
+        )
+        first_window = await stream.wait_until(
+            lambda event: event.type in TERMINAL_TYPES and event_turn_id(event) == created.turn.id,
+        )
+        _assert_turn(
+            first_window,
+            created.turn.id,
+            expected_terminal="turn_completed",
+            min_interactions=min_create_interactions,
+        )
+        first_native = _session_native_id(first_window, SessionStartedPayload)
+        if after_create is not None:
+            await after_create(stream, client, conversation_id)
+
+        await live.close_runtime(conversation_id)
+        resumed_turn = await client.submit_turn(
+            conversation_id,
+            prompt=prompt_fn("resume-turn"),
+            idempotency_key=_idempotency_key("resume"),
+        )
+        resume_window = await stream.wait_until(
+            lambda event: (
+                event.type in TERMINAL_TYPES and event_turn_id(event) == resumed_turn.turn.id
+            ),
+        )
+        assert any(event.type == "session_closed" for event in resume_window), (
+            "runtime close did not produce session_closed before resume"
+        )
+        _assert_turn(
+            resume_window,
+            resumed_turn.turn.id,
+            expected_terminal="turn_completed",
+            min_interactions=min_resume_interactions,
+        )
+        resumed_native = _session_native_id(resume_window, SessionResumedPayload)
+        assert resumed_native == first_native
+        assert not any(event.type == "session_started" for event in resume_window), (
+            "resume spawned a new session instead of session_resumed"
+        )
+        replayed = [
+            event
+            for event in resume_window
+            if event.type in TERMINAL_TYPES and event_turn_id(event) == created.turn.id
+        ]
+        assert not replayed, "first turn terminal was replayed after resume"
+        await exercise_advertised_features(
+            stream,
+            client,
+            conversation_id,
+            caps,
+            use_shell=use_shell,
+            mention_permission=mention_permission,
+        )
+    finally:
+        closer = getattr(items, "aclose", None)
+        if closer is not None:
+            await closer()
+
+    print(f"live_gate_passed release_id={release_id}")
+    return harness

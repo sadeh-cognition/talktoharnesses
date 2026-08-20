@@ -26,7 +26,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-      - run: uv sync --locked --extra django --extra grok
+      - run: uv sync --locked --extra django --extra client --extra grok
       - name: Create/resume gate
         env:
           TALKTOHARNESSES_LIVE_GROK: "1"
@@ -45,7 +45,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-      - run: uv sync --locked --extra django --extra cursor
+      - run: uv sync --locked --extra django --extra client --extra cursor
       - name: Create/resume gate
         env:
           TALKTOHARNESSES_LIVE_CURSOR: "1"
@@ -64,7 +64,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-      - run: uv sync --locked --extra django --extra codex
+      - run: uv sync --locked --extra django --extra client --extra codex
       - name: Create/resume gate
         env:
           TALKTOHARNESSES_LIVE_CODEX: "1"
@@ -83,7 +83,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-      - run: uv sync --locked --extra django --extra claude
+      - run: uv sync --locked --extra django --extra client --extra claude
       - name: Create/resume gate
         env:
           TALKTOHARNESSES_LIVE_CLAUDE: "1"
@@ -102,7 +102,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-      - run: uv sync --locked --extra django --extra opencode
+      - run: uv sync --locked --extra django --extra client --extra opencode
       - name: Create/resume gate
         env:
           TALKTOHARNESSES_LIVE_OPENCODE: "1"
@@ -121,7 +121,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-      - run: uv sync --locked --extra django --extra prime-agent
+      - run: uv sync --locked --extra django --extra client --extra prime-agent
       - name: Create/resume gate
         env:
           TALKTOHARNESSES_LIVE_PRIME_AGENT: "1"

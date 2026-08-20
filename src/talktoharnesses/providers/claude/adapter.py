@@ -166,6 +166,7 @@ class ClaudeAdapter:
         self._require_session(session)
         if self._release is not None and self._release.capabilities.supports_interrupt:
             enforce_published_operation(self._release, mode="interrupt")
+        self._normalizer.request_interrupt()
         for interaction_id, future in list(self._pending_interactions.items()):
             if not future.done():
                 future.set_result(
@@ -176,8 +177,11 @@ class ClaudeAdapter:
                 )
             del self._pending_interactions[interaction_id]
         if self._client is not None:
-            with contextlib.suppress(Exception):
+            try:
                 await self._client.interrupt()
+            except Exception:
+                self._normalizer.cancel_interrupt()
+                raise
 
     async def answer_interaction(
         self,

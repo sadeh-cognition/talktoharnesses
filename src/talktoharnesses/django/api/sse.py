@@ -8,6 +8,9 @@ import logging
 from collections.abc import AsyncIterator
 from uuid import UUID
 
+from asgiref.sync import sync_to_async
+from django.db import connections
+
 from talktoharnesses.application.publisher import ConversationWakeup
 from talktoharnesses.application.service import TalkToHarnessesService
 from talktoharnesses.domain.enums import ErrorCode
@@ -120,6 +123,29 @@ async def _bounded_replay(
     return [_snapshot_frame(snapshot)], snapshot.sequence, deleted
 
 
+async def close_idle_db() -> None:
+    """Drop thread-local connections so a live SSE request does not hold SQLite."""
+    await sync_to_async(connections.close_all, thread_sensitive=True)()
+
+
+async def _replay_and_release(
+    service: TalkToHarnessesService,
+    *,
+    owner_id: str,
+    conversation_id: UUID,
+    after: int,
+) -> tuple[list[str], int, bool]:
+    try:
+        return await _bounded_replay(
+            service,
+            owner_id=owner_id,
+            conversation_id=conversation_id,
+            after=after,
+        )
+    finally:
+        await close_idle_db()
+
+
 async def iter_sse(
     service: TalkToHarnessesService,
     *,
@@ -141,7 +167,7 @@ async def iter_sse(
         # Open subscription before reading replay state (close race).
         aiter = subscription.__aiter__()
 
-        frames, last_sent, deleted = await _bounded_replay(
+        frames, last_sent, deleted = await _replay_and_release(
             service,
             owner_id=owner_id,
             conversation_id=conversation_id,
@@ -155,24 +181,15 @@ async def iter_sse(
 
         while True:
             try:
-                await asyncio.wait_for(aiter.__anext__(), timeout=_KEEPALIVE_S)
+                wakeup = await asyncio.wait_for(aiter.__anext__(), timeout=_KEEPALIVE_S)
             except TimeoutError:
                 yield _keepalive_frame()
-                frames, last_sent, deleted = await _bounded_replay(
-                    service,
-                    owner_id=owner_id,
-                    conversation_id=conversation_id,
-                    after=last_sent,
-                )
-                for frame in frames:
-                    yield frame
-                if deleted:
-                    return
                 continue
             except StopAsyncIteration:
                 break
-
-            frames, last_sent, deleted = await _bounded_replay(
+            if wakeup.sequence <= last_sent:
+                continue
+            frames, last_sent, deleted = await _replay_and_release(
                 service,
                 owner_id=owner_id,
                 conversation_id=conversation_id,

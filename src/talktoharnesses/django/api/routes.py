@@ -25,7 +25,7 @@ from talktoharnesses.django.api.schemas import (
     SubmitTurnBody,
     SwitchHarnessBody,
 )
-from talktoharnesses.django.api.sse import iter_sse, parse_last_event_id
+from talktoharnesses.django.api.sse import close_idle_db, iter_sse, parse_last_event_id
 from talktoharnesses.django.asgi import get_service
 from talktoharnesses.django.auth import owner_id_for_user, revoke_token, rotate_token
 from talktoharnesses.domain.models import (
@@ -630,6 +630,7 @@ async def conversation_events(request: HttpRequest, conversation_id: UUID) -> St
         get_observability().record_sse_reconnect()
     service = get_service()
     await service.get_conversation(owner_id, conversation_id)
+    await close_idle_db()
     stream = iter_sse(
         service,
         owner_id=owner_id,

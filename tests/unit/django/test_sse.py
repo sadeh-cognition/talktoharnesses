@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncGenerator, AsyncIterator, Sequence
 from datetime import UTC, datetime
 from typing import cast
+from unittest.mock import patch
 from uuid import UUID, uuid4
 
 import pytest
@@ -149,13 +151,13 @@ async def test_incomplete_replay_uses_deleted_stream_snapshot() -> None:
 
 
 @pytest.mark.asyncio
-async def test_stale_wakeup_still_reconciles_persistence() -> None:
+async def test_stale_wakeup_does_not_replay_until_high_water_advances() -> None:
     conversation_id = uuid4()
     service = _Service(
         conversation_id,
         high_waters=(0, 1),
         events=(_event(conversation_id, 1),),
-        wakeups=(0,),
+        wakeups=(0, 1),
         defer_first_replay=True,
     )
     stream = cast(
@@ -169,7 +171,35 @@ async def test_stale_wakeup_still_reconciles_persistence() -> None:
     )
 
     assert "event: sync" in await anext(stream)
+    assert service.replay_calls == 1
     assert "event: turn_started" in await anext(stream)
+    assert service.replay_calls == 2
+    await stream.aclose()
+
+
+@pytest.mark.asyncio
+async def test_keepalive_does_not_replay_persistence() -> None:
+    conversation_id = uuid4()
+    service = _Service(conversation_id, high_waters=(0,))
+
+    async def hang(_conversation_id: UUID) -> AsyncIterator[ConversationWakeup]:
+        await asyncio.Event().wait()
+        yield ConversationWakeup(conversation_id=_conversation_id, sequence=0)
+
+    service.subscribe = hang  # type: ignore[method-assign]
+    stream = cast(
+        AsyncGenerator[str, None],
+        iter_sse(
+            cast(TalkToHarnessesService, service),
+            owner_id="owner",
+            conversation_id=conversation_id,
+            last_event_id=0,
+        ),
+    )
+    with patch("talktoharnesses.django.api.sse._KEEPALIVE_S", 0.05):
+        assert "event: sync" in await anext(stream)
+        assert await anext(stream) == ": keepalive\n\n"
+    assert service.replay_calls == 1
     await stream.aclose()
 
 

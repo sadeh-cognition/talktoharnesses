@@ -39,6 +39,11 @@ from talktoharnesses.runtime.paths import resolve_executable
 from talktoharnesses.runtime.spec import ProcessSpec
 from talktoharnesses.runtime.supervisor import ProcessSupervisor
 
+_EFFORT_CACHE: dict[
+    tuple[str, str, str, bool, str],
+    tuple[tuple[HarnessEffortInfo, ...], tuple[HarnessModelInfo, ...]],
+] = {}
+
 
 async def probe_cursor(
     config: HarnessConfiguration,
@@ -80,16 +85,25 @@ async def probe_cursor(
     )
     models = _parse_models(output)
     capabilities = release.to_harness_capabilities()
-    default_efforts, models = await _discover_model_efforts(
-        executable,
-        config,
-        release,
-        capabilities,
-        models,
+    cache_key = (
+        str(executable),
+        release.id,
+        config.working_directory,
+        config.yolo,
+        output,
     )
-    capabilities = capabilities.model_copy(
-        update={"models": models, "efforts": default_efforts}
-    )
+    cached = _EFFORT_CACHE.get(cache_key)
+    if cached is None:
+        cached = await _discover_model_efforts(
+            executable,
+            config,
+            release,
+            capabilities,
+            models,
+        )
+        _EFFORT_CACHE[cache_key] = cached
+    default_efforts, models = cached
+    capabilities = capabilities.model_copy(update={"models": models, "efforts": default_efforts})
     validate_effort(config, capabilities)
     return capabilities, release
 
@@ -121,6 +135,11 @@ async def _discover_model_efforts(
         )
     )
     connection = AcpConnection(handle, protocol=cursor_acp_protocol())
+
+    async def ignore_session_update(_notification: object) -> None:
+        return None
+
+    connection.set_notification_handler("session/update", ignore_session_update)
     try:
         await connection.start()
         await initialize_cursor(connection, release)
@@ -143,8 +162,25 @@ async def _discover_model_efforts(
         session_id = session_id_obj
         options = parse_cursor_config_options(cast(object, result))
         default_efforts = _efforts_from_options(options)
+        model_option = find_cursor_config_option(options, "model")
+        if model_option is None:
+            raise DomainError(
+                ErrorCode.PROVIDER_INCOMPATIBLE,
+                "Cursor effort probe did not advertise a model option",
+            )
+        listed_models = {model.id: model for model in models}
+        selectable_models = tuple(
+            listed_models.get(
+                "auto" if item.value == "default" else item.value,
+                HarnessModelInfo(
+                    id="auto" if item.value == "default" else item.value,
+                    label=item.name,
+                ),
+            )
+            for item in model_option.options
+        )
         discovered: list[HarnessModelInfo] = []
-        for model in models:
+        for model in selectable_models:
             model_value = "default" if model.id == "auto" else model.id
             model_option = find_cursor_config_option(options, "model")
             if model_option is None:
@@ -160,9 +196,7 @@ async def _discover_model_efforts(
                     value=model_value,
                     options=options,
                 )
-            discovered.append(
-                model.model_copy(update={"efforts": _efforts_from_options(options)})
-            )
+            discovered.append(model.model_copy(update={"efforts": _efforts_from_options(options)}))
         return default_efforts, tuple(discovered)
     finally:
         with contextlib.suppress(Exception):
@@ -175,7 +209,10 @@ def _efforts_from_options(
     options: tuple[CursorSelectConfigOption, ...],
 ) -> tuple[HarnessEffortInfo, ...]:
     thought_options = tuple(
-        option for option in options if option.category == "thought_level"
+        option
+        for option in options
+        if option.category == "thought_level"
+        and {item.value for item in option.options} != {"false", "true"}
     )
     if not thought_options:
         return ()
@@ -186,8 +223,7 @@ def _efforts_from_options(
             details={"advertised_count": len(thought_options)},
         )
     return tuple(
-        HarnessEffortInfo(id=item.value, label=item.name)
-        for item in thought_options[0].options
+        HarnessEffortInfo(id=item.value, label=item.name) for item in thought_options[0].options
     )
 
 
@@ -200,6 +236,8 @@ def _parse_models(output: str) -> tuple[HarnessModelInfo, ...]:
         )
     models: list[HarnessModelInfo] = []
     for line in lines[1:]:
+        if line.startswith("Tip: use --model "):
+            continue
         model_id, separator, label = line.partition(" - ")
         if not separator or not model_id or not label:
             raise DomainError(

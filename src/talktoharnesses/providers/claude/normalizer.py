@@ -27,6 +27,7 @@ from talktoharnesses.domain.events import (
     ToolStartedPayload,
     TurnCompletedPayload,
     TurnFailedPayload,
+    TurnInterruptedPayload,
     UsageUpdatedPayload,
 )
 from talktoharnesses.domain.models import (
@@ -65,6 +66,7 @@ class ClaudeNormalizer:
         self._has_assistant_message = False
         self._reasoning_id: UUID | None = None
         self._reasoning_text = ""
+        self._interrupt_requested = False
         self._tools: dict[str, UUID] = {}
         self._tool_names: dict[str, str] = {}
         self._seen_native_ids: set[str] = set()
@@ -86,6 +88,14 @@ class ClaudeNormalizer:
         self._has_assistant_message = False
         self._reasoning_id = None
         self._reasoning_text = ""
+        self._interrupt_requested = False
+
+    def request_interrupt(self) -> None:
+        if self._active_turn_id is not None:
+            self._interrupt_requested = True
+
+    def cancel_interrupt(self) -> None:
+        self._interrupt_requested = False
 
     def import_seen(
         self,
@@ -159,14 +169,20 @@ class ClaudeNormalizer:
         if self._active_turn_id is None:
             return []
         events = self._close_open_streams()
-        events.append(
-            TurnFailedPayload(
-                turn_id=self._active_turn_id,
-                error_code=error_code,
-                message=message,
+        if self._interrupt_requested:
+            events.append(
+                TurnInterruptedPayload(turn_id=self._active_turn_id, reason="interrupted")
             )
-        )
+        else:
+            events.append(
+                TurnFailedPayload(
+                    turn_id=self._active_turn_id,
+                    error_code=error_code,
+                    message=message,
+                )
+            )
         self._active_turn_id = None
+        self._interrupt_requested = False
         return events
 
     def _assistant(self, msg: ClaudeAssistantMessage) -> list[HarnessEvent]:
@@ -296,7 +312,11 @@ class ClaudeNormalizer:
                     total_tokens=_as_int(msg.usage.get("total_tokens")),
                 )
             )
-        if msg.is_error:
+        if self._interrupt_requested:
+            events.append(
+                TurnInterruptedPayload(turn_id=self._active_turn_id, reason="interrupted")
+            )
+        elif msg.is_error:
             err = "; ".join(msg.errors or []) or "claude turn failed"
             events.append(
                 TurnFailedPayload(
@@ -314,6 +334,7 @@ class ClaudeNormalizer:
                 )
             )
         self._active_turn_id = None
+        self._interrupt_requested = False
         return events
 
     def _close_open_streams(self) -> list[HarnessEvent]:
