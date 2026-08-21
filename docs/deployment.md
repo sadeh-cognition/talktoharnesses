@@ -84,6 +84,12 @@ use their pinned SDK extras; Claude may use a bundled or explicit CLI path.
 ## Authentication
 
 - Issue tokens with trusted in-process `talktoharnesses.django.auth.issue_token(user)`.
+- Hosts with the standard Django admin installed can issue a token from
+  `/admin/talktoharnesses/apitoken/add/`. The form selects an active Django user
+  and shows the raw token only on the immediate success page.
+- Treat the Django `talktoharnesses.add_apitoken` permission as highly
+  privileged: it can replace the API credential of any active Django user and
+  act as that user's TTH API identity.
 - One active token per user; rotation/revocation invalidate prior JTIs.
 - Do not commit signing keys. Do not add login, OAuth, or credential-storage flows
   in this package.

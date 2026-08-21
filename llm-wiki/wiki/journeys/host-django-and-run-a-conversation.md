@@ -10,8 +10,8 @@ tags:
   - capability/http
   - capability/conversations
   - status/implemented
-last_verified: 2026-08-20
-verified_against_commit: bb3d2b755500fc663816d6cbd1a7cd7947a8920b
+last_verified: 2026-08-21
+verified_against_commit: 7cb2e2c82909ebe01fc3eb68220d7764adab64bd
 ---
 
 # Host Django and Run a Conversation
@@ -24,7 +24,10 @@ The host adds `talktoharnesses.django`, sets `TALKTOHARNESSES_JWT_SIGNING_KEY`, 
 
 ## 2. Authenticate
 
-The host issues a JWT with `issue_token(user)`. Clients send `Authorization: Bearer`. Requirement: [Authenticate with JWT](../requirements/authenticate-with-jwt.md).
+The host issues a JWT with `issue_token(user)` or, when the standard Django
+admin is installed, selects an active user in the TTH API tokens admin. The raw
+admin-issued token appears only on the immediate result page. Clients send
+`Authorization: Bearer`. Requirement: [Authenticate with JWT](../requirements/authenticate-with-jwt.md).
 
 ## 3. Create and probe a harness
 

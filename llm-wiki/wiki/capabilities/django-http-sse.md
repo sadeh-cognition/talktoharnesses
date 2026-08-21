@@ -9,8 +9,8 @@ tags:
   - type/capability
   - capability/http
   - status/implemented
-last_verified: 2026-08-20
-verified_against_commit: bb3d2b755500fc663816d6cbd1a7cd7947a8920b
+last_verified: 2026-08-21
+verified_against_commit: 7cb2e2c82909ebe01fc3eb68220d7764adab64bd
 ---
 
 # Django HTTP and SSE Surface
@@ -23,7 +23,10 @@ Hosts compose Django settings, URL includes, and ASGI lifespan. Clients authenti
 
 ## Current implementation
 
-`talktoharnesses.django` registers models, migrations, auth, and management commands. `talktoharnesses_lifespan` starts one process-local service. Health, readiness, and OpenAPI docs are unauthenticated. Owner isolation is enforced on every domain query.
+`talktoharnesses.django` registers models, migrations, auth, Django admin token
+issuance, and management commands. `talktoharnesses_lifespan` starts one
+process-local service. Health, readiness, and OpenAPI docs are unauthenticated.
+Owner isolation is enforced on every domain query.
 
 ## Requirements
 

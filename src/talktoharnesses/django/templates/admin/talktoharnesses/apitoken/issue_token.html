@@ -1,0 +1,44 @@
+{% extends "admin/base_site.html" %}
+{% load admin_urls %}
+
+{% block breadcrumbs %}
+<div class="breadcrumbs">
+  <a href="{% url 'admin:index' %}">Home</a>
+  &rsaquo; <a href="{% url 'admin:app_list' app_label=opts.app_label %}">{{ opts.app_config.verbose_name }}</a>
+  &rsaquo; Generate client JWT
+</div>
+{% endblock %}
+
+{% block content %}
+<div id="content-main">
+  {% if token %}
+    <p><strong>Copy this token now.</strong> It will not be shown again.</p>
+    <p>Submitting this request again, including by refreshing this page, will generate a new token and invalidate this one.</p>
+    <div class="form-row">
+      <label for="issued-token">JWT bearer token</label>
+      <textarea id="issued-token" rows="8" cols="100" readonly spellcheck="false">{{ token }}</textarea>
+    </div>
+    <p>Expires: {{ expires_at }}</p>
+    <p><a class="button" href="{% url opts|admin_urlname:'add' %}">Generate another token</a></p>
+  {% else %}
+    <p>Select the active Django user that will own this client token.</p>
+    <p>Generating a token replaces any token already issued for that user.</p>
+    <form method="post" novalidate>
+      {% csrf_token %}
+      {{ form.non_field_errors }}
+      <fieldset class="module aligned">
+        {% for field in form %}
+          <div class="form-row{% if field.errors %} errors{% endif %}">
+            {{ field.errors }}
+            {{ field.label_tag }}
+            {{ field }}
+          </div>
+        {% endfor %}
+      </fieldset>
+      <div class="submit-row">
+        <input type="submit" value="Generate token" class="default">
+      </div>
+    </form>
+  {% endif %}
+</div>
+{% endblock %}

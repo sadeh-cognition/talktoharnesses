@@ -15,6 +15,18 @@ verified_against_commit: 3f90f85a37028a1ba0498cff641ef5c8a1bec6d7
 
 Entries are appended using `## [YYYY-MM-DD] operation | Title`.
 
+## [2026-08-21] implement | Issue client JWTs from Django admin
+
+- Preserved the approved Django admin client-token request under
+  `raw/product/django-admin-client-token-issuance.md`.
+- Added trusted admin issuance for active Django users while retaining the
+  existing one-active-token rule and avoiding a remote issuance endpoint.
+- Updated the JWT requirement, Django capability, host journey, deployment
+  guidance, and README onboarding.
+- Verified against TalkToHarnesses baseline
+  `7cb2e2c82909ebe01fc3eb68220d7764adab64bd` plus the uncommitted
+  implementation recorded with this entry.
+
 ## [2026-08-21] implement | Locate process-bound CLIs from kind
 
 - Removed `executable_path` from harness create/configuration contracts.

@@ -73,11 +73,39 @@ there is no package-owned `otel` extra.
 ```python
 # settings.py
 INSTALLED_APPS = [
+    "django.contrib.admin",
     "django.contrib.contenttypes",
     "django.contrib.auth",
+    "django.contrib.sessions",
+    "django.contrib.messages",
+    "django.contrib.staticfiles",
     "talktoharnesses.django",
     # ...
 ]
+MIDDLEWARE = [
+    "django.middleware.security.SecurityMiddleware",
+    "django.contrib.sessions.middleware.SessionMiddleware",
+    "django.middleware.common.CommonMiddleware",
+    "django.middleware.csrf.CsrfViewMiddleware",
+    "django.contrib.auth.middleware.AuthenticationMiddleware",
+    "django.contrib.messages.middleware.MessageMiddleware",
+    "django.middleware.clickjacking.XFrameOptionsMiddleware",
+]
+TEMPLATES = [
+    {
+        "BACKEND": "django.template.backends.django.DjangoTemplates",
+        "DIRS": [],
+        "APP_DIRS": True,
+        "OPTIONS": {
+            "context_processors": [
+                "django.template.context_processors.request",
+                "django.contrib.auth.context_processors.auth",
+                "django.contrib.messages.context_processors.messages",
+            ],
+        },
+    },
+]
+STATIC_URL = "static/"
 TALKTOHARNESSES_JWT_SIGNING_KEY = "replace-with-a-secret-at-least-32-bytes"
 ```
 
@@ -91,9 +119,11 @@ application = talktoharnesses_lifespan(get_asgi_application())
 
 ```python
 # host/urls.py
+from django.contrib import admin
 from django.urls import include, path
 
 urlpatterns = [
+    path("admin/", admin.site.urls),
     path("api/v1/", include("talktoharnesses.django.api.urls")),
 ]
 ```
@@ -103,8 +133,60 @@ python manage.py migrate
 uvicorn host.asgi:application --host 127.0.0.1
 ```
 
-Issue tokens in-process with `talktoharnesses.django.auth.issue_token(user)`.
-The JWT signing key must be at least 32 bytes and must not equal `SECRET_KEY`.
+### Provision a client token
+
+TTH does not expose a login or initial token-issuance endpoint. An operator must
+issue the initial token inside the trusted TTH Django host and provide it to the
+remote client through its secret configuration. For example, with Django's
+default user model, create a dedicated client user and print its token:
+
+```bash
+python manage.py shell -c '
+from django.contrib.auth import get_user_model
+from talktoharnesses.django.auth import issue_token_sync
+
+user, _ = get_user_model().objects.get_or_create(username="example-client")
+print(issue_token_sync(user).token)
+'
+```
+
+Treat the printed value as a secret. Pass it as a bearer token:
+
+```bash
+export TTH_API_TOKEN="replace-with-the-issued-token"
+curl -H "Authorization: Bearer ${TTH_API_TOKEN}" \
+  http://127.0.0.1:8000/api/v1/harnesses
+```
+
+Or provide it to the official HTTP client:
+
+```python
+import os
+
+from talktoharnesses.client import AsyncTalkToHarnessesClient
+
+
+async def list_harnesses():
+    async with AsyncTalkToHarnessesClient(
+        "http://127.0.0.1:8000/api/v1/",
+        token=os.environ["TTH_API_TOKEN"],
+    ) as client:
+        return await client.list_harnesses(limit=100)
+```
+
+Applications embedded in the TTH Django host can instead call
+`talktoharnesses.django.auth.issue_token(user)` directly. Only one token is
+active per Django user, so issuing another token invalidates the previous one.
+An authenticated client can use `rotate_token()`, but must persist the returned
+replacement token itself. The JWT signing key must be at least 32 bytes and
+must not equal `SECRET_KEY`.
+
+When the standard Django admin is installed, TTH also registers an **API
+tokens** admin. Create a host administrator with `python manage.py
+createsuperuser`, then open `/admin/talktoharnesses/apitoken/add/` to select an
+active Django user and generate its client token. The raw token appears only on
+the immediate success page; copy it into the client's secret configuration
+before leaving the page.
 
 Authenticated submissions execute local harnesses with the Django OS user's
 workspace access. This is not a sandbox.
