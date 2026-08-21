@@ -33,7 +33,6 @@ from talktoharnesses.providers.claude.compatibility import (
 from talktoharnesses.providers.claude.normalizer import ClaudeNormalizer
 from talktoharnesses.providers.claude.probe import probe_claude
 from talktoharnesses.providers.claude.schemas import parse_claude_message
-from talktoharnesses.runtime.paths import resolve_executable
 
 logger = logging.getLogger(__name__)
 
@@ -312,13 +311,11 @@ class ClaudeAdapter:
                 "resume": resume,
                 "session_id": session_id,
                 "permission_mode": "bypassPermissions" if config.yolo else "default",
-                "cli_path": config.executable_path,
+                "cli_path": None,
             }
             options["can_use_tool"] = self._can_use_tool_yolo if config.yolo else self._can_use_tool
             return options
         cli_path = None
-        if config.executable_path:
-            cli_path = str(resolve_executable(config.executable_path))
 
         if config.yolo:
             return ClaudeAgentOptions(

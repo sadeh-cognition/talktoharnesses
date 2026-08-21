@@ -59,7 +59,6 @@ class HarnessConfiguration(BaseModel):
     model_config = FROZEN
 
     kind: HarnessKind
-    executable_path: str | None = None
     model: str | None = None
     mode: str | None = None
     effort: str | None = None

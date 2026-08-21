@@ -55,10 +55,14 @@ uv add "talktoharnesses[django,postgres]"
 uv add "talktoharnesses[all]"
 ```
 
-Grok, Cursor, OpenCode, and Prime Agent executables are external. The package never discovers,
-installs, upgrades, or invents arbitrary flags for them. Provider SDK/executable
-versions are accepted when they meet the packaged compatibility floor for the
-current platform. Models, modes, and efforts come from the live CLI.
+Grok, Cursor, OpenCode, and Prime Agent executables are external. At probe and
+launch, TalkToHarnesses locates each conventional executable on its process
+PATH, after checking the matching `TALKTOHARNESSES_*_EXECUTABLE` environment
+override. Harness configuration does not accept an executable path. The
+package never installs, upgrades, or invents arbitrary flags for external
+CLIs. Provider SDK/executable versions are accepted when they meet the
+packaged compatibility floor for the current platform. Models, modes, and
+efforts come from the live CLI.
 
 OpenTelemetry's API is a core dependency and is a no-op without host
 configuration. Install and configure your own SDK/exporter packages separately;
@@ -120,7 +124,6 @@ For example, a Cursor harness can set its session baseline with:
 ```json
 {
   "kind": "cursor",
-  "executable_path": "/path/to/cursor-agent",
   "working_directory": "/workspace",
   "model": "composer-2.5[fast=false]",
   "mode": "ask"

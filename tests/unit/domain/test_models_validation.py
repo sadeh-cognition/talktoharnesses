@@ -23,10 +23,19 @@ from talktoharnesses.domain.models import SubmitTurnPayload
 
 def test_extra_fields_forbidden() -> None:
     with pytest.raises(ValidationError):
+        HarnessCapabilities(
+            kind=HarnessKind.GROK,
+            version="1",
+            unknown_field=True,  # type: ignore[call-arg]
+        )
+
+
+def test_harness_configuration_rejects_executable_path_kwarg() -> None:
+    with pytest.raises(ValidationError):
         HarnessConfiguration(
             kind=HarnessKind.GROK,
             working_directory="/tmp",
-            unknown_field=True,  # type: ignore[call-arg]
+            executable_path="/old/grok",  # type: ignore[call-arg]
         )
 
 

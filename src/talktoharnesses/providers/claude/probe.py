@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import sys
 from typing import Any, Literal, cast
 
@@ -19,11 +18,9 @@ from talktoharnesses.providers.claude.compatibility import (
     match_release,
 )
 from talktoharnesses.providers.effort import validate_effort
-from talktoharnesses.runtime.paths import resolve_executable
 
 _EFFORTS = tuple(
-    HarnessEffortInfo(id=value, label=value.title())
-    for value in ("low", "medium", "high", "max")
+    HarnessEffortInfo(id=value, label=value.title()) for value in ("low", "medium", "high", "max")
 )
 
 
@@ -63,51 +60,14 @@ async def probe_claude(
             "claude_agent_sdk.__version__ missing",
         )
     cli_source: Literal["bundled", "explicit"] = "bundled"
-    cli_path: str | None = None
-    if config.executable_path:
-        executable = resolve_executable(config.executable_path)
-        cli_path = str(executable)
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                str(executable),
-                "--version",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-        except OSError as exc:
-            raise DomainError(
-                ErrorCode.INVALID_EXECUTABLE,
-                f"failed to execute Claude Code: {exc}",
-                details={"executable": str(executable)},
-            ) from exc
-        stdout_b, stderr_b = await proc.communicate()
-        if proc.returncode not in (0, None):
-            raise DomainError(
-                ErrorCode.PROVIDER_INCOMPATIBLE,
-                "Claude Code --version failed",
-                details={
-                    "returncode": proc.returncode,
-                    "stderr": stderr_b.decode("utf-8", errors="replace")[:500],
-                },
-            )
-        version_output = stdout_b.decode("utf-8", errors="replace").strip()
-        cli_version = version_output.removesuffix(" (Claude Code)")
-        if not cli_version or "\n" in cli_version:
-            raise DomainError(
-                ErrorCode.PROVIDER_INCOMPATIBLE,
-                "malformed Claude Code version output",
-                details={"version_stdout": version_output},
-            )
-        cli_source = "explicit"
-    else:
-        cli_version = _bundled_cli_version()
+    cli_version = _bundled_cli_version()
     release = match_release(
         sdk_version=sdk_version,
         cli_version=cli_version,
         cli_source=cli_source,
         platform=sys.platform,
     )
-    models = await _discover_models(sdk, config.working_directory, cli_path)
+    models = await _discover_models(sdk, config.working_directory, None)
     capabilities = release.to_harness_capabilities().model_copy(
         update={"models": models, "efforts": _EFFORTS}
     )

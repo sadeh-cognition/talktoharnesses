@@ -158,7 +158,6 @@ class _FakePrimeProcess:
 def _config() -> HarnessConfiguration:
     return HarnessConfiguration(
         kind=HarnessKind.PRIME_AGENT,
-        executable_path="/bin/true",
         working_directory="/tmp",
         model="anthropic/claude-sonnet-4-5",
         effort="high",
@@ -276,7 +275,6 @@ async def test_yolo_is_accepted_on_create_and_resume_without_argv_change(
     )
     yolo = HarnessConfiguration(
         kind=HarnessKind.PRIME_AGENT,
-        executable_path="/bin/true",
         working_directory="/tmp",
         model="anthropic/claude-sonnet-4-5",
         effort="high",

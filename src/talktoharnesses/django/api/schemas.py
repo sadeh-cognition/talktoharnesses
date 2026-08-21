@@ -30,7 +30,6 @@ class HarnessConfigurationBody(BaseModel):
     model_config = _REQUEST
 
     kind: HarnessKind
-    executable_path: str | None = None
     model: str | None = Field(
         default=None,
         description=(
@@ -65,7 +64,6 @@ class HarnessConfigurationBody(BaseModel):
     def to_domain(self) -> HarnessConfiguration:
         return HarnessConfiguration(
             kind=self.kind,
-            executable_path=self.executable_path,
             model=self.model,
             mode=self.mode,
             effort=self.effort,

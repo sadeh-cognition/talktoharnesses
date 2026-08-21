@@ -4,12 +4,23 @@ from __future__ import annotations
 
 import contextlib
 import os
+import shutil
 import sys
 from pathlib import Path
 from typing import Any
 
-from talktoharnesses.domain.enums import ErrorCode
+from talktoharnesses.domain.enums import ErrorCode, HarnessKind
 from talktoharnesses.domain.errors import DomainError
+
+_KIND_EXECUTABLES: dict[HarnessKind, tuple[str, str]] = {
+    HarnessKind.GROK: ("grok", "TALKTOHARNESSES_GROK_EXECUTABLE"),
+    HarnessKind.CURSOR: ("cursor-agent", "TALKTOHARNESSES_CURSOR_EXECUTABLE"),
+    HarnessKind.OPENCODE: ("opencode", "TALKTOHARNESSES_OPENCODE_EXECUTABLE"),
+    HarnessKind.PRIME_AGENT: (
+        "prime-agent",
+        "TALKTOHARNESSES_PRIME_AGENT_EXECUTABLE",
+    ),
+}
 
 
 def resolve_directory(path: str, *, error_code: ErrorCode) -> Path:
@@ -29,6 +40,29 @@ def resolve_directory(path: str, *, error_code: ErrorCode) -> Path:
             details={"path": path, "resolved": str(resolved)},
         )
     return resolved
+
+
+def resolve_kind_executable(kind: HarnessKind) -> Path:
+    """Locate the process-bound CLI for ``kind`` from TTH env or PATH."""
+    executable = _KIND_EXECUTABLES.get(kind)
+    if executable is None:
+        raise DomainError(
+            ErrorCode.INVALID_EXECUTABLE,
+            f"kind {kind.value} does not use an external executable",
+            details={"kind": kind.value},
+        )
+    name, environment_variable = executable
+    override = os.environ.get(environment_variable)
+    if override is not None:
+        return resolve_executable(override)
+    found = shutil.which(name)
+    if not found:
+        raise DomainError(
+            ErrorCode.INVALID_EXECUTABLE,
+            f"{name} not found on PATH",
+            details={"kind": kind.value, "executable": name},
+        )
+    return resolve_executable(found)
 
 
 def resolve_executable(path: str) -> Path:

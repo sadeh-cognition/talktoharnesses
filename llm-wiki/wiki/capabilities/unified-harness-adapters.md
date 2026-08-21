@@ -9,8 +9,8 @@ tags:
   - type/capability
   - capability/adapters
   - status/implemented
-last_verified: 2026-08-20
-verified_against_commit: bb3d2b755500fc663816d6cbd1a7cd7947a8920b
+last_verified: 2026-08-21
+verified_against_commit: 3f90f85a37028a1ba0498cff641ef5c8a1bec6d7
 ---
 
 # Unified Harness Adapters
@@ -21,7 +21,7 @@ TalkToHarnesses drives Grok, Cursor, Codex, Claude Code, OpenCode, and Prime Age
 
 [Target users](../concepts/target-users.md) select a harness kind, working directory, and optional model, mode, and effort. The package accepts identities at or above the packaged floor for the current platform. Models, modes, and efforts come from the live CLI.
 
-Grok, Cursor, OpenCode, and Prime Agent executables are external. Codex and Claude extras pin SDKs. The package never discovers, installs, upgrades, or invents arbitrary flags.
+Grok, Cursor, OpenCode, and Prime Agent executables are external CLIs located on PATH (or a TalkToHarnesses process environment override) at probe and launch. Codex and Claude extras pin SDKs. The package never installs, upgrades, or invents arbitrary flags.
 
 ## Current implementation
 

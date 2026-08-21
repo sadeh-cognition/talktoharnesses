@@ -21,6 +21,7 @@ pytestmark = pytest.mark.skipif(
 
 
 async def test_live_opencode_create_resume_interaction(live_http: LiveHttp) -> None:
+    require_executable("TALKTOHARNESSES_OPENCODE_EXECUTABLE")
     # Force shell tool approvals through the broker for this disposable workspace.
     (live_http.workspace / "opencode.json").write_text(
         '{\n  "permission": {\n    "bash": "ask"\n  }\n}\n',
@@ -30,7 +31,6 @@ async def test_live_opencode_create_resume_interaction(live_http: LiveHttp) -> N
         live_http,
         configuration=HarnessConfiguration(
             kind=HarnessKind.OPENCODE,
-            executable_path=require_executable("TALKTOHARNESSES_OPENCODE_EXECUTABLE"),
             working_directory=str(live_http.workspace),
             model=os.environ.get("TALKTOHARNESSES_OPENCODE_MODEL", "opencode/big-pickle"),
         ),

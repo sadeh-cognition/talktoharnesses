@@ -32,10 +32,10 @@ def test_opencode_model_list_rejects_malformed_output(output: str) -> None:
 async def test_probe_opencode_success_and_error_paths(monkeypatch: pytest.MonkeyPatch) -> None:
     executable = Path("/tmp/opencode")
 
-    def _resolve_executable(_path: Path) -> Path:
+    def _resolve_kind(_kind: object) -> Path:
         return executable
 
-    monkeypatch.setattr(probe_mod, "resolve_executable", _resolve_executable)
+    monkeypatch.setattr(probe_mod, "resolve_kind_executable", _resolve_kind)
 
     async def ok_exec(*_a: object, **_k: object) -> _Proc:
         return _Proc(b"1.2.27")
@@ -51,7 +51,6 @@ async def test_probe_opencode_success_and_error_paths(monkeypatch: pytest.Monkey
     caps, release = await probe_mod.probe_opencode(
         HarnessConfiguration(
             kind=HarnessKind.OPENCODE,
-            executable_path=str(executable),
             model="configured/typo",
             working_directory="/tmp",
         )
@@ -65,12 +64,6 @@ async def test_probe_opencode_success_and_error_paths(monkeypatch: pytest.Monkey
     assert [effort.id for effort in caps.models[0].efforts or ()] == ["low", "high"]
     assert caps.models[1].efforts == ()
 
-    with pytest.raises(DomainError) as no_path:
-        await probe_mod.probe_opencode(
-            HarnessConfiguration(kind=HarnessKind.OPENCODE, working_directory="/tmp")
-        )
-    assert no_path.value.code is ErrorCode.INVALID_EXECUTABLE
-
     async def boom(*_a: object, **_k: object) -> _Proc:
         raise OSError("cannot exec")
 
@@ -79,7 +72,6 @@ async def test_probe_opencode_success_and_error_paths(monkeypatch: pytest.Monkey
         await probe_mod.probe_opencode(
             HarnessConfiguration(
                 kind=HarnessKind.OPENCODE,
-                executable_path=str(executable),
                 working_directory="/tmp",
             )
         )
@@ -93,7 +85,6 @@ async def test_probe_opencode_success_and_error_paths(monkeypatch: pytest.Monkey
         await probe_mod.probe_opencode(
             HarnessConfiguration(
                 kind=HarnessKind.OPENCODE,
-                executable_path=str(executable),
                 working_directory="/tmp",
             )
         )

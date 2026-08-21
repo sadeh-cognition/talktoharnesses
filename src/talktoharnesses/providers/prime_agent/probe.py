@@ -18,7 +18,7 @@ from talktoharnesses.providers.prime_agent.compatibility import (
     PrimeAgentReleaseRecord,
     match_release,
 )
-from talktoharnesses.runtime.paths import resolve_executable
+from talktoharnesses.runtime.paths import resolve_kind_executable
 
 
 async def probe_prime_agent(
@@ -30,9 +30,7 @@ async def probe_prime_agent(
             "Prime Agent mode no longer represents thinking; recreate the harness with effort",
             details={"mode": config.mode},
         )
-    if not config.executable_path:
-        raise DomainError(ErrorCode.INVALID_EXECUTABLE, "configuration has no executable_path")
-    executable = resolve_executable(config.executable_path)
+    executable = resolve_kind_executable(config.kind)
     try:
         process = await asyncio.create_subprocess_exec(
             str(executable),

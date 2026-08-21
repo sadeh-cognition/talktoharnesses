@@ -21,11 +21,11 @@ pytestmark = pytest.mark.skipif(
 
 
 async def test_live_grok_create_resume_interaction(live_http: LiveHttp) -> None:
+    require_executable("TALKTOHARNESSES_GROK_EXECUTABLE")
     await run_live_gate(
         live_http,
         configuration=HarnessConfiguration(
             kind=HarnessKind.GROK,
-            executable_path=require_executable("TALKTOHARNESSES_GROK_EXECUTABLE"),
             working_directory=str(live_http.workspace),
         ),
     )

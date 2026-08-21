@@ -40,10 +40,10 @@ def test_cursor_model_list_rejects_malformed_output(output: str) -> None:
 async def test_probe_cursor_success_and_error_paths(monkeypatch: pytest.MonkeyPatch) -> None:
     executable = Path("/tmp/cursor-agent")
 
-    def _resolve_executable(_path: Path) -> Path:
+    def _resolve_kind(_kind: object) -> Path:
         return executable
 
-    monkeypatch.setattr(probe_mod, "resolve_executable", _resolve_executable)
+    monkeypatch.setattr(probe_mod, "resolve_kind_executable", _resolve_kind)
 
     async def ok_exec(*_a: object, **_k: object) -> _Proc:
         return _Proc(b"2026.08.04-aaa8809")
@@ -76,7 +76,6 @@ async def test_probe_cursor_success_and_error_paths(monkeypatch: pytest.MonkeyPa
     caps, release = await probe_mod.probe_cursor(
         HarnessConfiguration(
             kind=HarnessKind.CURSOR,
-            executable_path=str(executable),
             working_directory="/tmp",
         )
     )
@@ -88,12 +87,6 @@ async def test_probe_cursor_success_and_error_paths(monkeypatch: pytest.MonkeyPa
     ]
     assert [effort.id for effort in caps.efforts] == ["low", "medium", "high"]
 
-    with pytest.raises(DomainError) as no_path:
-        await probe_mod.probe_cursor(
-            HarnessConfiguration(kind=HarnessKind.CURSOR, working_directory="/tmp")
-        )
-    assert no_path.value.code is ErrorCode.INVALID_EXECUTABLE
-
     async def boom(*_a: object, **_k: object) -> _Proc:
         raise OSError("cannot exec")
 
@@ -102,7 +95,6 @@ async def test_probe_cursor_success_and_error_paths(monkeypatch: pytest.MonkeyPa
         await probe_mod.probe_cursor(
             HarnessConfiguration(
                 kind=HarnessKind.CURSOR,
-                executable_path=str(executable),
                 working_directory="/tmp",
             )
         )
@@ -116,7 +108,6 @@ async def test_probe_cursor_success_and_error_paths(monkeypatch: pytest.MonkeyPa
         await probe_mod.probe_cursor(
             HarnessConfiguration(
                 kind=HarnessKind.CURSOR,
-                executable_path=str(executable),
                 working_directory="/tmp",
             )
         )
@@ -160,7 +151,6 @@ async def test_cursor_effort_discovery_is_prompt_free_and_closes_process(
         Path("/tmp/cursor-agent"),
         HarnessConfiguration(
             kind=HarnessKind.CURSOR,
-            executable_path="/tmp/cursor-agent",
             working_directory="/tmp",
         ),
         match_release("2026.08.04-aaa8809", platform="linux"),

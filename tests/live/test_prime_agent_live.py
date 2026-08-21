@@ -22,11 +22,11 @@ pytestmark = pytest.mark.skipif(
 
 
 async def test_live_prime_agent_create_resume(live_http: LiveHttp) -> None:
+    require_executable("TALKTOHARNESSES_PRIME_AGENT_EXECUTABLE")
     await run_live_gate(
         live_http,
         configuration=HarnessConfiguration(
             kind=HarnessKind.PRIME_AGENT,
-            executable_path=require_executable("TALKTOHARNESSES_PRIME_AGENT_EXECUTABLE"),
             working_directory=str(live_http.workspace),
             model=os.environ.get("TALKTOHARNESSES_PRIME_AGENT_MODEL"),
         ),

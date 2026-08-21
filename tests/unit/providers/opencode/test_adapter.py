@@ -90,7 +90,6 @@ class FakeHttpClient:
 def _config() -> HarnessConfiguration:
     return HarnessConfiguration(
         kind=HarnessKind.OPENCODE,
-        executable_path="/bin/true",
         working_directory="/tmp",
         model="opencode/big-pickle",
         effort="high",
@@ -501,7 +500,6 @@ async def test_question_asked_and_submit_model_ref(monkeypatch: pytest.MonkeyPat
     adapter.prepare_port(19507)
     config = HarnessConfiguration(
         kind=HarnessKind.OPENCODE,
-        executable_path="/bin/true",
         working_directory="/tmp",
         model="openai/gpt-test",
         mode="build",
@@ -586,7 +584,6 @@ async def test_yolo_preserves_plan_mode_permissions_on_create_and_resume(
     adapter.prepare_port(19508)
     yolo = HarnessConfiguration(
         kind=HarnessKind.OPENCODE,
-        executable_path="/bin/true",
         working_directory="/tmp",
         mode="plan",
         yolo=True,
@@ -639,7 +636,6 @@ async def test_yolo_keeps_questions_interactive_and_answers_child_session_approv
     adapter.prepare_port(19511)
     yolo = HarnessConfiguration(
         kind=HarnessKind.OPENCODE,
-        executable_path="/bin/true",
         working_directory="/tmp",
         yolo=True,
     )

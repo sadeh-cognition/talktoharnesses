@@ -630,14 +630,6 @@ def make_adapter_factory(
 
 
 def config_for(kind: HarnessKind) -> HarnessConfiguration:
-    executable = None
-    if kind in {
-        HarnessKind.GROK,
-        HarnessKind.CURSOR,
-        HarnessKind.OPENCODE,
-        HarnessKind.PRIME_AGENT,
-    }:
-        executable = "/bin/true"
     if kind is HarnessKind.CURSOR:
         model: str | None = "composer-2.5[fast=false]"
         mode: str | None = "ask"
@@ -649,7 +641,6 @@ def config_for(kind: HarnessKind) -> HarnessConfiguration:
         mode = "default"
     return HarnessConfiguration(
         kind=kind,
-        executable_path=executable,
         working_directory="/tmp",
         model=model,
         mode=mode,

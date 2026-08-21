@@ -227,6 +227,29 @@ def test_create_harness_and_conversation(service: TalkToHarnessesService, auth_h
     assert listed.status_code == 200
     assert len(listed.json()["items"]) == 1
     assert fetched.json()["configuration"]["yolo"] is False
+    assert "executable_path" not in fetched.json()["configuration"]
+
+
+@pytest.mark.django_db(transaction=True)
+def test_create_harness_rejects_executable_path(
+    service: TalkToHarnessesService, auth_header: str
+) -> None:
+    del service
+    client = Client()
+    create = _post_json(
+        client,
+        "/api/v1/harnesses",
+        {
+            "name": "local-grok",
+            "configuration": {
+                "kind": "grok",
+                "working_directory": "/tmp/ws",
+                "executable_path": "/usr/bin/grok",
+            },
+        },
+        HTTP_AUTHORIZATION=auth_header,
+    )
+    assert create.status_code == 422
 
 
 @pytest.mark.django_db(transaction=True)

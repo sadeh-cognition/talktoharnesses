@@ -49,10 +49,10 @@ def test_grok_model_list_accepts_1_0_3_output() -> None:
 async def test_probe_grok_success_and_error_paths(monkeypatch: pytest.MonkeyPatch) -> None:
     executable = Path("/tmp/grok")
 
-    def _resolve_executable(_path: Path) -> Path:
+    def _resolve_kind(_kind: object) -> Path:
         return executable
 
-    monkeypatch.setattr(probe_mod, "resolve_executable", _resolve_executable)
+    monkeypatch.setattr(probe_mod, "resolve_kind_executable", _resolve_kind)
 
     async def ok_exec(*_a: object, **_k: object) -> _Proc:
         return _Proc(b"grok 1.0.1 (3cd0d0cbce)")
@@ -70,7 +70,6 @@ async def test_probe_grok_success_and_error_paths(monkeypatch: pytest.MonkeyPatc
     caps, release = await probe_mod.probe_grok(
         HarnessConfiguration(
             kind=HarnessKind.GROK,
-            executable_path=str(executable),
             working_directory="/tmp",
         )
     )
@@ -78,12 +77,6 @@ async def test_probe_grok_success_and_error_paths(monkeypatch: pytest.MonkeyPatc
     assert caps.kind is HarnessKind.GROK
     assert [model.id for model in caps.models] == ["grok-4.5"]
     assert caps.supports_resume is False
-
-    with pytest.raises(DomainError) as no_path:
-        await probe_mod.probe_grok(
-            HarnessConfiguration(kind=HarnessKind.GROK, working_directory="/tmp")
-        )
-    assert no_path.value.code is ErrorCode.INVALID_EXECUTABLE
 
     async def boom(*_a: object, **_k: object) -> _Proc:
         raise OSError("cannot exec")
@@ -93,7 +86,6 @@ async def test_probe_grok_success_and_error_paths(monkeypatch: pytest.MonkeyPatc
         await probe_mod.probe_grok(
             HarnessConfiguration(
                 kind=HarnessKind.GROK,
-                executable_path=str(executable),
                 working_directory="/tmp",
             )
         )
@@ -107,7 +99,6 @@ async def test_probe_grok_success_and_error_paths(monkeypatch: pytest.MonkeyPatc
         await probe_mod.probe_grok(
             HarnessConfiguration(
                 kind=HarnessKind.GROK,
-                executable_path=str(executable),
                 working_directory="/tmp",
             )
         )
@@ -142,7 +133,6 @@ async def test_grok_resume_probe_reads_initialize_capability(
         Path("/tmp/grok"),
         HarnessConfiguration(
             kind=HarnessKind.GROK,
-            executable_path="/tmp/grok",
             working_directory="/tmp",
         ),
         match_release("grok 1.0.0 (3cd0d0cbce)", platform="linux"),

@@ -26,7 +26,9 @@ def test_prime_agent_model_list_rejects_malformed_output(output: str) -> None:
 
 
 @pytest.mark.asyncio
-async def test_probe_accepts_version_on_stderr(tmp_path: Path) -> None:
+async def test_probe_accepts_version_on_stderr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     executable = tmp_path / "prime-agent"
     executable.write_text(
         "#!/bin/sh\n"
@@ -39,10 +41,10 @@ async def test_probe_accepts_version_on_stderr(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     executable.chmod(0o755)
+    monkeypatch.setenv("TALKTOHARNESSES_PRIME_AGENT_EXECUTABLE", str(executable))
     capabilities, release = await probe_prime_agent(
         HarnessConfiguration(
             kind=HarnessKind.PRIME_AGENT,
-            executable_path=str(executable),
             working_directory=str(tmp_path),
         )
     )

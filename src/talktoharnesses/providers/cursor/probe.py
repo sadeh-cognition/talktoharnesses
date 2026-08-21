@@ -35,7 +35,7 @@ from talktoharnesses.providers.cursor.control import (
     set_cursor_config_option,
 )
 from talktoharnesses.providers.effort import validate_effort
-from talktoharnesses.runtime.paths import resolve_executable
+from talktoharnesses.runtime.paths import resolve_kind_executable
 from talktoharnesses.runtime.spec import ProcessSpec
 from talktoharnesses.runtime.supervisor import ProcessSupervisor
 
@@ -49,9 +49,7 @@ async def probe_cursor(
     config: HarnessConfiguration,
 ) -> tuple[HarnessCapabilities, CursorReleaseRecord]:
     """Run ``agent --version``, match compatibility, return capabilities + release."""
-    if not config.executable_path:
-        raise DomainError(ErrorCode.INVALID_EXECUTABLE, "configuration has no executable_path")
-    executable = resolve_executable(config.executable_path)
+    executable = resolve_kind_executable(config.kind)
     try:
         proc = await asyncio.create_subprocess_exec(
             str(executable),

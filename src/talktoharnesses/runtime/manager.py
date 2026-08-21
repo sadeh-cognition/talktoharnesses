@@ -62,7 +62,10 @@ from talktoharnesses.runtime.events import (
     ProcessStderrTruncatedEvent,
 )
 from talktoharnesses.runtime.handle import ProcessHandle
-from talktoharnesses.runtime.paths import resolve_directory, resolve_executable
+from talktoharnesses.runtime.paths import (
+    resolve_directory,
+    resolve_kind_executable,
+)
 from talktoharnesses.runtime.policy import RuntimePolicy
 from talktoharnesses.runtime.spec import ProcessSpec
 from talktoharnesses.runtime.supervisor import ProcessSupervisor
@@ -188,7 +191,6 @@ class RuntimeManager:
         configuration: HarnessConfiguration,
         argv: tuple[str, ...],
         adapter_version: str = "0",
-        executable_path: str | None = None,
         worker_id: str | None = None,
         fence: int | None = None,
     ) -> HarnessSession:
@@ -199,7 +201,6 @@ class RuntimeManager:
             configuration=configuration,
             argv=argv,
             adapter_version=adapter_version,
-            executable_path=executable_path,
             resume_native_id=None,
             worker_id=worker_id,
             fence=fence,
@@ -214,7 +215,6 @@ class RuntimeManager:
         native_session_id: str,
         argv: tuple[str, ...],
         adapter_version: str = "0",
-        executable_path: str | None = None,
         worker_id: str | None = None,
         fence: int | None = None,
     ) -> HarnessSession:
@@ -224,7 +224,6 @@ class RuntimeManager:
             configuration=configuration,
             argv=argv,
             adapter_version=adapter_version,
-            executable_path=executable_path,
             resume_native_id=native_session_id,
             worker_id=worker_id,
             fence=fence,
@@ -236,13 +235,11 @@ class RuntimeManager:
         *,
         argv: tuple[str, ...] = (),
         adapter_version: str = "0",
-        executable_path: str | None = None,
     ) -> LaunchSnapshot:
         """Probe and build a prospective launch snapshot without mutating bindings."""
         plan = self._plan_launch(
             configuration=configuration,
             argv=argv,
-            executable_path=executable_path,
         )
         return await self._probe_and_build_launch(
             plan,
@@ -263,7 +260,6 @@ class RuntimeManager:
         previous_launch: LaunchSnapshot | None,
         argv: tuple[str, ...] = (),
         adapter_version: str = "0",
-        executable_path: str | None = None,
     ) -> tuple[ManagedRuntime, RecoveryReasonCode]:
         """Create a fresh local runtime and native-resume under a fence.
 
@@ -302,7 +298,6 @@ class RuntimeManager:
                     previous_launch=previous_launch,
                     argv=argv,
                     adapter_version=adapter_version,
-                    executable_path=executable_path,
                 )
         finally:
             async with self._global_lock:
@@ -320,7 +315,6 @@ class RuntimeManager:
         previous_launch: LaunchSnapshot | None,
         argv: tuple[str, ...],
         adapter_version: str,
-        executable_path: str | None,
     ) -> tuple[ManagedRuntime, RecoveryReasonCode]:
         state = await self._persistence.get_worker_snapshot(conversation_id)
         if state.binding is None:
@@ -329,7 +323,6 @@ class RuntimeManager:
         plan = self._plan_launch(
             configuration=configuration,
             argv=argv,
-            executable_path=executable_path,
         )
         try:
             launch = await self._probe_and_build_launch(
@@ -545,7 +538,6 @@ class RuntimeManager:
         configuration: HarnessConfiguration,
         argv: tuple[str, ...],
         adapter_version: str,
-        executable_path: str | None,
         resume_native_id: str | None,
         worker_id: str | None,
         fence: int | None,
@@ -574,7 +566,6 @@ class RuntimeManager:
                     configuration=configuration,
                     argv=argv,
                     adapter_version=adapter_version,
-                    executable_path=executable_path,
                     resume_native_id=resume_native_id,
                     worker_id=worker_id,
                     fence=fence,
@@ -591,7 +582,6 @@ class RuntimeManager:
         configuration: HarnessConfiguration,
         argv: tuple[str, ...],
         adapter_version: str,
-        executable_path: str | None,
         resume_native_id: str | None,
         worker_id: str | None,
         fence: int | None,
@@ -604,7 +594,6 @@ class RuntimeManager:
         plan = self._plan_launch(
             configuration=configuration,
             argv=argv,
-            executable_path=executable_path,
         )
         adapter = plan.adapter
         sdk_managed = plan.sdk_managed
@@ -1026,7 +1015,6 @@ class RuntimeManager:
         *,
         configuration: HarnessConfiguration,
         argv: tuple[str, ...],
-        executable_path: str | None,
     ) -> _LaunchPlan:
         """Create the adapter and resolve the executable/argv it will launch with."""
         adapter = self._registry.create(configuration.kind)
@@ -1034,12 +1022,7 @@ class RuntimeManager:
         if callable(set_redaction_patterns):
             set_redaction_patterns(self._redaction_patterns)
         sdk_managed = _is_sdk_managed(adapter)
-        exe = executable_path or configuration.executable_path
-        if not sdk_managed and not exe:
-            raise DomainError(
-                ErrorCode.INVALID_EXECUTABLE,
-                "configuration has no executable_path",
-            )
+        exe = None if sdk_managed else str(resolve_kind_executable(configuration.kind))
 
         # Process-bound adapters may construct argv when the caller passes empty.
         effective_argv: tuple[str, ...] = argv
@@ -1075,7 +1058,6 @@ class RuntimeManager:
         )
         if plan.sdk_managed:
             return self._build_sdk_launch_snapshot(
-                executable_path=plan.executable_path,
                 working_directory=configuration.working_directory,
                 workspace_roots=configuration.workspace_roots,
                 capabilities=caps,
@@ -1137,7 +1119,6 @@ class RuntimeManager:
         configuration: HarnessConfiguration,
         argv: tuple[str, ...] = (),
         adapter_version: str = "0",
-        executable_path: str | None = None,
         worker_id: str | None = None,
         fence: int | None = None,
     ) -> ManagedRuntime:
@@ -1161,7 +1142,6 @@ class RuntimeManager:
         plan = self._plan_launch(
             configuration=configuration,
             argv=argv,
-            executable_path=executable_path,
         )
         process_id = uuid4()
         handle: ProcessHandle | None = None
@@ -1417,7 +1397,6 @@ class RuntimeManager:
     def _build_sdk_launch_snapshot(
         self,
         *,
-        executable_path: str | None,
         working_directory: str,
         workspace_roots: tuple[str, ...],
         capabilities: HarnessCapabilities,
@@ -1426,7 +1405,7 @@ class RuntimeManager:
         adapter_version: str,
         effort: str | None = None,
     ) -> LaunchSnapshot:
-        """Resolve cwd/roots for SDK-managed runtimes; executable is optional."""
+        """Resolve cwd/roots for an SDK-managed runtime."""
         workdir = resolve_directory(
             working_directory,
             error_code=ErrorCode.WORKING_DIRECTORY_NOT_FOUND,
@@ -1435,11 +1414,8 @@ class RuntimeManager:
             resolve_directory(root, error_code=ErrorCode.WORKSPACE_ROOT_NOT_FOUND)
             for root in workspace_roots
         )
-        resolved_exe: str | None = None
-        if executable_path:
-            resolved_exe = str(resolve_executable(executable_path))
         return LaunchSnapshot(
-            resolved_executable=resolved_exe,
+            resolved_executable=None,
             harness_version=capabilities.version,
             working_directory=str(workdir),
             workspace_roots=tuple(str(r) for r in roots),

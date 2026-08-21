@@ -66,7 +66,6 @@ async def test_start_and_close(
         owner_id="owner-1",
         configuration=config,
         argv=_argv("exit_code", "0"),
-        executable_path=str(owned_python),
     )
     assert session.native_session_id
     assert mgr.get_runtime(cid) is not None
@@ -102,7 +101,6 @@ async def test_process_matrix_preflight_rejects_before_spawn(
             owner_id="owner-1",
             configuration=config,
             argv=_argv("silence", "1"),
-            executable_path=str(owned_python),
         )
 
     assert exc.value.code is ErrorCode.PROVIDER_INCOMPATIBLE
@@ -126,7 +124,6 @@ async def test_concurrent_start_same_conversation(
             owner_id="owner-1",
             configuration=config,
             argv=_argv("silence", "2"),
-            executable_path=str(owned_python),
         )
 
     results = await asyncio.gather(start_one(), start_one(), return_exceptions=True)
@@ -153,8 +150,8 @@ async def test_distinct_adapter_instances(
         return adapter
 
     store = MemoryPersistence()
-    s1 = make_state(now=now, workdir=workdir, executable=str(owned_python), owner_id="o1")
-    s2 = make_state(now=now, workdir=workdir, executable=str(owned_python), owner_id="o2")
+    s1 = make_state(now=now, workdir=workdir, owner_id="o1")
+    s2 = make_state(now=now, workdir=workdir, owner_id="o2")
     store.seed(s1)
     store.seed(s2)
     reg = AdapterRegistry()
@@ -166,14 +163,12 @@ async def test_distinct_adapter_instances(
         owner_id="o1",
         configuration=s1.binding.configuration,  # type: ignore[union-attr]
         argv=_argv("silence", "1"),
-        executable_path=str(owned_python),
     )
     await mgr.start(
         conversation_id=s2.conversation.id,
         owner_id="o2",
         configuration=s2.binding.configuration,  # type: ignore[union-attr]
         argv=_argv("silence", "1"),
-        executable_path=str(owned_python),
     )
     assert len(created) == 2
     assert created[0] is not created[1]
@@ -205,7 +200,6 @@ async def test_idle_reap_preserves_native_id(
         owner_id="owner-1",
         configuration=config,
         argv=_argv("silence", "5"),
-        executable_path=str(owned_python),
     )
     native = session.native_session_id
     assert await mgr.reap_if_eligible(cid)
@@ -235,7 +229,6 @@ async def test_idle_reap_does_not_close_runtime_after_concurrent_prompt(
         owner_id="owner-1",
         configuration=config,
         argv=_argv("silence", "5"),
-        executable_path=str(owned_python),
     )
     managed = mgr.get_runtime(cid)
     assert managed is not None
@@ -291,7 +284,6 @@ async def test_background_activity_suppresses_reap(
         owner_id="owner-1",
         configuration=config,
         argv=_argv("silence", "2"),
-        executable_path=str(owned_python),
     )
     # Mark a running background activity on the aggregate.
     state = persistence.states[cid]
@@ -327,7 +319,7 @@ async def test_interrupt_timeout_escalates(
 ) -> None:
     FakeAdapter.instances.clear()
     store = MemoryPersistence()
-    state = make_state(now=now, workdir=workdir, executable=str(owned_python))
+    state = make_state(now=now, workdir=workdir)
     store.seed(state)
     reg = AdapterRegistry()
     reg.register(
@@ -341,7 +333,6 @@ async def test_interrupt_timeout_escalates(
         owner_id="owner-1",
         configuration=state.binding.configuration,  # type: ignore[union-attr]
         argv=_argv("ignore_interrupt"),
-        executable_path=str(owned_python),
     )
     with pytest.raises(DomainError) as ei:
         await mgr.interrupt(cid)
@@ -397,7 +388,6 @@ async def test_shutdown_idempotent(
         owner_id="owner-1",
         configuration=config,
         argv=_argv("ignore_interrupt"),
-        executable_path=str(owned_python),
     )
     await mgr.shutdown()
     await mgr.shutdown()  # idempotent
@@ -408,7 +398,6 @@ async def test_shutdown_idempotent(
             owner_id="owner-1",
             configuration=config,
             argv=_argv("exit_code", "0"),
-            executable_path=str(owned_python),
         )
 
 
@@ -444,7 +433,6 @@ async def test_fresh_adapter_after_reap_resume(
         owner_id="owner-1",
         configuration=config,
         argv=_argv("silence", "5"),
-        executable_path=str(owned_python),
     )
     native = session.native_session_id
     assert native
@@ -457,7 +445,6 @@ async def test_fresh_adapter_after_reap_resume(
         configuration=config,
         native_session_id=native,
         argv=_argv("exit_code", "0"),
-        executable_path=str(owned_python),
     )
     assert len(created) == 2
     assert created[1] is not first
@@ -479,7 +466,6 @@ async def test_abnormal_exit_session_failed(
         owner_id="owner-1",
         configuration=config,
         argv=_argv("exit_code", "7"),
-        executable_path=str(owned_python),
     )
     # Wait for process exit to be observed.
     for _ in range(50):
@@ -513,7 +499,6 @@ async def test_injected_supervisor_uses_manager_redaction_patterns(
         owner_id="owner-1",
         configuration=config,
         argv=_argv("secret_stderr"),
-        executable_path=str(owned_python),
     )
     for _ in range(50):
         if any(process.status.value != "running" for process in persistence.processes.values()):
@@ -532,7 +517,7 @@ async def test_launch_snapshot_survives_adapter_start_timeout(
     now: datetime,
 ) -> None:
     store = MemoryPersistence()
-    state = make_state(now=now, workdir=workdir, executable=str(owned_python))
+    state = make_state(now=now, workdir=workdir)
     store.seed(state)
     reg = AdapterRegistry()
     reg.register(HarnessKind.OPENCODE, lambda: FakeAdapter(hang_start=True))
@@ -544,7 +529,6 @@ async def test_launch_snapshot_survives_adapter_start_timeout(
             owner_id="owner-1",
             configuration=state.binding.configuration,  # type: ignore[union-attr]
             argv=_argv("silence", "5"),
-            executable_path=str(owned_python),
         )
     assert exc_info.value.code is ErrorCode.RUNTIME_TIMEOUT
     stored = store.states[state.conversation.id]
@@ -575,7 +559,7 @@ async def test_sdk_client_is_closed_when_start_fails(
         return adapter
 
     store = MemoryPersistence()
-    state = make_state(now=now, workdir=workdir, executable=str(owned_python))
+    state = make_state(now=now, workdir=workdir)
     store.seed(state)
     registry = AdapterRegistry()
     registry.register(HarnessKind.OPENCODE, factory)
@@ -627,7 +611,7 @@ async def test_process_adapter_retries_one_pre_session_bind_failure(
 
     adapter = RetryAdapter()
     store = MemoryPersistence()
-    state = make_state(now=now, workdir=workdir, executable=str(owned_python))
+    state = make_state(now=now, workdir=workdir)
     store.seed(state)
     registry = AdapterRegistry()
     registry.register(HarnessKind.OPENCODE, lambda: adapter)
@@ -637,7 +621,6 @@ async def test_process_adapter_retries_one_pre_session_bind_failure(
         owner_id="owner-1",
         configuration=state.binding.configuration,  # type: ignore[union-attr]
         argv=(),
-        executable_path=str(owned_python),
     )
     assert adapter.start_calls == 2
     assert adapter.retry_calls == 1
@@ -655,7 +638,7 @@ async def test_shutdown_cancels_overlapping_start(
     now: datetime,
 ) -> None:
     store = MemoryPersistence()
-    state = make_state(now=now, workdir=workdir, executable=str(owned_python))
+    state = make_state(now=now, workdir=workdir)
     store.seed(state)
     reg = AdapterRegistry()
     reg.register(HarnessKind.OPENCODE, lambda: FakeAdapter(start_delay=1))
@@ -666,7 +649,6 @@ async def test_shutdown_cancels_overlapping_start(
             owner_id="owner-1",
             configuration=state.binding.configuration,  # type: ignore[union-attr]
             argv=_argv("silence", "5"),
-            executable_path=str(owned_python),
         )
     )
     for _ in range(50):
@@ -698,7 +680,7 @@ async def test_lifecycle_conflict_is_retried(
             return await super().commit_runtime_lifecycle(*args, **kwargs)  # type: ignore[arg-type]
 
     store = ConflictOncePersistence()
-    state = make_state(now=now, workdir=workdir, executable=str(owned_python))
+    state = make_state(now=now, workdir=workdir)
     store.seed(state)
     mgr = RuntimeManager(store, registry, policy=short_policy)
     await mgr.start(
@@ -706,7 +688,6 @@ async def test_lifecycle_conflict_is_retried(
         owner_id="owner-1",
         configuration=state.binding.configuration,  # type: ignore[union-attr]
         argv=_argv("exit_code", "0"),
-        executable_path=str(owned_python),
     )
     for _ in range(50):
         if any(event.type == "process_exited" for event in store.events[state.conversation.id]):
@@ -726,7 +707,6 @@ async def test_shutdown_force_phase_is_concurrent_and_within_budget(
         make_state(
             now=now,
             workdir=workdir,
-            executable=str(owned_python),
             owner_id=f"owner-{index}",
         )
         for index in range(2)
@@ -752,7 +732,6 @@ async def test_shutdown_force_phase_is_concurrent_and_within_budget(
             owner_id=f"owner-{index}",
             configuration=state.binding.configuration,  # type: ignore[union-attr]
             argv=_argv("ignore_interrupt"),
-            executable_path=str(owned_python),
         )
 
     started = time.monotonic()

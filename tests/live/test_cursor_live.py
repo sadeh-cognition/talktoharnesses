@@ -61,11 +61,11 @@ async def _after_create(
 
 
 async def test_live_cursor_create_resume_interaction(live_http: LiveHttp) -> None:
+    require_executable("TALKTOHARNESSES_CURSOR_EXECUTABLE")
     await run_live_gate(
         live_http,
         configuration=HarnessConfiguration(
             kind=HarnessKind.CURSOR,
-            executable_path=require_executable("TALKTOHARNESSES_CURSOR_EXECUTABLE"),
             working_directory=str(live_http.workspace),
             model=_MODEL,
             mode=_MODE,

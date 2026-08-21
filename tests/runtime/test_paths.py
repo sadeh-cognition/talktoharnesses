@@ -7,11 +7,14 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from pydantic import ValidationError
 
 from talktoharnesses.domain import DomainError, ErrorCode
+from talktoharnesses.domain.enums import HarnessKind
 from talktoharnesses.runtime.paths import (
     resolve_directory,
     resolve_executable,
+    resolve_kind_executable,
     resolve_launch_paths,
 )
 
@@ -151,3 +154,86 @@ def test_execute_check_uses_effective_ids(owned_python: Path) -> None:
 
     with patch("talktoharnesses.runtime.paths.os.access", side_effect=access):
         assert resolve_executable(str(owned_python)) == owned_python.resolve()
+
+
+def test_resolve_kind_executable_uses_env_then_path(
+    owned_python: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("TALKTOHARNESSES_GROK_EXECUTABLE", str(owned_python))
+    assert resolve_kind_executable(HarnessKind.GROK) == owned_python.resolve()
+
+    monkeypatch.delenv("TALKTOHARNESSES_GROK_EXECUTABLE")
+
+    def found(_name: str) -> str:
+        return str(owned_python)
+
+    monkeypatch.setattr(
+        "talktoharnesses.runtime.paths.shutil.which",
+        found,
+    )
+    assert resolve_kind_executable(HarnessKind.GROK) == owned_python.resolve()
+
+
+def test_resolve_kind_executable_missing_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("TALKTOHARNESSES_GROK_EXECUTABLE", raising=False)
+
+    def missing(_name: str) -> None:
+        return None
+
+    monkeypatch.setattr("talktoharnesses.runtime.paths.shutil.which", missing)
+    with pytest.raises(DomainError) as exc:
+        resolve_kind_executable(HarnessKind.GROK)
+    assert exc.value.code is ErrorCode.INVALID_EXECUTABLE
+    assert "grok" in exc.value.message
+
+
+def test_resolve_kind_executable_does_not_fallback_from_invalid_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(
+        "TALKTOHARNESSES_GROK_EXECUTABLE",
+        str(tmp_path / "missing-grok"),
+    )
+
+    def fail(_name: str) -> str:
+        pytest.fail("PATH fallback must not run")
+
+    monkeypatch.setattr(
+        "talktoharnesses.runtime.paths.shutil.which",
+        fail,
+    )
+    with pytest.raises(DomainError) as exc:
+        resolve_kind_executable(HarnessKind.GROK)
+    assert exc.value.code is ErrorCode.INVALID_EXECUTABLE
+
+
+def test_resolve_kind_executable_does_not_fallback_from_empty_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TALKTOHARNESSES_GROK_EXECUTABLE", "")
+
+    def fail(_name: str) -> str:
+        pytest.fail("PATH fallback must not run")
+
+    monkeypatch.setattr(
+        "talktoharnesses.runtime.paths.shutil.which",
+        fail,
+    )
+    with pytest.raises(DomainError) as exc:
+        resolve_kind_executable(HarnessKind.GROK)
+    assert exc.value.code is ErrorCode.INVALID_EXECUTABLE
+
+
+def test_resolve_kind_executable_rejects_sdk_kinds() -> None:
+    with pytest.raises(DomainError) as exc:
+        resolve_kind_executable(HarnessKind.CLAUDE)
+    assert exc.value.code is ErrorCode.INVALID_EXECUTABLE
+
+
+def test_harness_configuration_rejects_legacy_executable_path() -> None:
+    from talktoharnesses.domain.models import HarnessConfiguration
+
+    with pytest.raises(ValidationError):
+        HarnessConfiguration.model_validate_json(
+            '{"kind":"grok","working_directory":"/tmp","executable_path":"/old/grok"}'
+        )

@@ -75,6 +75,16 @@ def owned_python(tmp_path: Path) -> Path:
     return copy_owned_executable(tmp_path / "bin")
 
 
+@pytest.fixture(autouse=True)
+def process_bound_executable_env(
+    owned_python: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("TALKTOHARNESSES_OPENCODE_EXECUTABLE", str(owned_python))
+    monkeypatch.setenv("TALKTOHARNESSES_GROK_EXECUTABLE", str(owned_python))
+    monkeypatch.setenv("TALKTOHARNESSES_CURSOR_EXECUTABLE", str(owned_python))
+    monkeypatch.setenv("TALKTOHARNESSES_PRIME_AGENT_EXECUTABLE", str(owned_python))
+
+
 @pytest.fixture
 def child_script() -> Path:
     return child_modes_path()
@@ -103,13 +113,11 @@ def make_state(
     *,
     now: datetime,
     workdir: Path,
-    executable: str | None = None,
     owner_id: str = "owner-1",
 ) -> ConversationState:
     conversation_id = uuid4()
     config = HarnessConfiguration(
         kind=HarnessKind.OPENCODE,
-        executable_path=executable,
         working_directory=str(workdir),
         workspace_roots=(str(workdir),),
         model="m",
@@ -272,7 +280,7 @@ def registry(fake_adapter_factory: type[FakeAdapter]) -> AdapterRegistry:
 @pytest.fixture
 def persistence(now: datetime, workdir: Path, owned_python: Path) -> MemoryPersistence:
     store = MemoryPersistence()
-    state = make_state(now=now, workdir=workdir, executable=str(owned_python))
+    state = make_state(now=now, workdir=workdir)
     store.seed(state)
     return store
 

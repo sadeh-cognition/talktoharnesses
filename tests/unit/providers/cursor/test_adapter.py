@@ -53,7 +53,6 @@ def _config(
 ) -> HarnessConfiguration:
     return HarnessConfiguration(
         kind=HarnessKind.CURSOR,
-        executable_path="/bin/true",
         working_directory="/tmp",
         model=model,
         mode=mode,

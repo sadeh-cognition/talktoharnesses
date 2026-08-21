@@ -29,7 +29,6 @@ async def test_live_claude_create_resume_interaction(live_http: LiveHttp) -> Non
         live_http,
         configuration=HarnessConfiguration(
             kind=HarnessKind.CLAUDE,
-            executable_path=os.environ.get("TALKTOHARNESSES_CLAUDE_EXECUTABLE"),
             working_directory=str(live_http.workspace),
         ),
         mention_permission=False,

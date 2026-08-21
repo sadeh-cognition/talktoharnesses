@@ -8,12 +8,27 @@ audiences:
 tags:
   - type/log
 last_verified: 2026-08-21
-verified_against_commit: bffc9566181f4309b7f22d446dc950451d78a0d1
+verified_against_commit: 3f90f85a37028a1ba0498cff641ef5c8a1bec6d7
 ---
 
 # Wiki Log
 
 Entries are appended using `## [YYYY-MM-DD] operation | Title`.
+
+## [2026-08-21] implement | Locate process-bound CLIs from kind
+
+- Removed `executable_path` from harness create/configuration contracts.
+  Grok, Cursor, OpenCode, and Prime Agent binaries are located at probe and
+  launch from PATH or `TALKTOHARNESSES_*_EXECUTABLE`. Codex and Claude stay
+  SDK-bundled. New and stored configuration containing `executable_path` is
+  rejected and must be recreated.
+- Preserved the approved TTH-owned executable-discovery source, which
+  supersedes the older statement that TTH never discovers external CLIs.
+- Updated README create examples and derived probe, harness-instance, glossary,
+  adapter, overview, and upgrading pages.
+- Verified against TalkToHarnesses baseline
+  `3f90f85a37028a1ba0498cff641ef5c8a1bec6d7` plus the uncommitted
+  implementation recorded with this entry.
 
 ## [2026-08-21] operation | Record TTH abbreviation
 

@@ -10,7 +10,7 @@ tags:
   - audience/product
   - audience/developer
 last_verified: 2026-08-21
-verified_against_commit: bb3d2b755500fc663816d6cbd1a7cd7947a8920b
+verified_against_commit: 3f90f85a37028a1ba0498cff641ef5c8a1bec6d7
 ---
 
 # Glossary
@@ -33,7 +33,7 @@ The minimum packaged identity and platforms an adapter will drive. Identities ol
 
 ## Harness
 
-A named owner-owned configuration of kind, working directory, optional executable path, model, mode, effort, and yolo. See [Harness instance](domain/harness-instance.md).
+A named owner-owned configuration of kind, working directory, workspace roots, and optional model, mode, effort, and yolo. See [Harness instance](domain/harness-instance.md).
 
 ## Interaction
 
