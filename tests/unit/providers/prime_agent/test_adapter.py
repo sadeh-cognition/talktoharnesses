@@ -134,7 +134,22 @@ class _FakePrimeProcess:
                     "assistantMessageEvent": {"type": "text_delta", "delta": "done"},
                 }
             )
-            await self._emit({"type": "message_end", "message": {"role": "assistant"}})
+            await self._emit(
+                {
+                    "type": "message_end",
+                    "message": {
+                        "id": "assistant-1",
+                        "role": "assistant",
+                        "usage": {
+                            "input": 10,
+                            "output": 2,
+                            "cacheRead": 4,
+                            "cacheWrite": 1,
+                            "totalTokens": 12,
+                        },
+                    },
+                }
+            )
             await self._emit({"type": "agent_end", "messages": []})
 
     def stdout(self) -> AsyncIterator[bytes]:
@@ -233,6 +248,7 @@ async def test_start_submit_steer_and_close(monkeypatch: pytest.MonkeyPatch) -> 
         "assistant_message_started",
         "assistant_message_delta",
         "assistant_message_completed",
+        "usage_updated",
         "turn_completed",
     ]
     await adapter.close(session)

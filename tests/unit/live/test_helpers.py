@@ -18,6 +18,7 @@ from talktoharnesses.domain.events import (
     TurnFailedPayload,
     TurnQueuedPayload,
     TurnStartedPayload,
+    UsageUpdatedPayload,
 )
 from talktoharnesses.domain.models import ApprovalRequestPayload
 
@@ -153,3 +154,71 @@ async def test_collect_busy_turn_waits_for_target_turn_to_start() -> None:
     )
 
     assert progress_after == ["turn_started"]
+
+
+@pytest.mark.asyncio
+async def test_collect_turn_requires_meaningful_usage_before_terminal() -> None:
+    conversation_id = uuid4()
+    turn_id = uuid4()
+
+    async def on_event(_event: ConversationEvent) -> None:
+        return None
+
+    stream = LiveStream(
+        _stream(
+            [
+                _event(
+                    conversation_id,
+                    1,
+                    UsageUpdatedPayload(turn_id=turn_id, input_tokens=10, output_tokens=2),
+                ),
+                _event(
+                    conversation_id,
+                    2,
+                    TurnCompletedPayload(turn_id=turn_id, terminal_reason="end_turn"),
+                ),
+            ]
+        ),
+        on_event,
+    )
+
+    events = await stream.collect_turn(turn_id, timeout=1.0, require_usage=True)
+    assert [event.type for event in events] == ["usage_updated", "turn_completed"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "case",
+    [
+        "missing",
+        "zero",
+        "negative",
+        "wrong_turn",
+    ],
+)
+async def test_collect_turn_rejects_invalid_usage(case: str) -> None:
+    conversation_id = uuid4()
+    turn_id = uuid4()
+    payloads: list[Any] = []
+    if case == "zero":
+        payloads.append(UsageUpdatedPayload(turn_id=turn_id, input_tokens=0, output_tokens=0))
+    elif case == "negative":
+        payloads.append(UsageUpdatedPayload(turn_id=turn_id, input_tokens=-1))
+    elif case == "wrong_turn":
+        payloads.append(UsageUpdatedPayload(turn_id=uuid4(), input_tokens=10))
+    payloads.append(TurnCompletedPayload(turn_id=turn_id, terminal_reason="end_turn"))
+
+    async def on_event(_event: ConversationEvent) -> None:
+        return None
+
+    stream = LiveStream(
+        _stream(
+            [
+                _event(conversation_id, sequence, payload)
+                for sequence, payload in enumerate(payloads, start=1)
+            ]
+        ),
+        on_event,
+    )
+    with pytest.raises(AssertionError):
+        await stream.collect_turn(turn_id, timeout=1.0, require_usage=True)

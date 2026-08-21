@@ -172,6 +172,86 @@ def test_permission_request_mapping() -> None:
     assert n.fail_active_turn(error_code="x", message="y") == []
 
 
+def test_model_usage_is_aggregated_without_inventing_total() -> None:
+    normalizer = ClaudeNormalizer()
+    normalizer.set_session("sess-1")
+    turn_id = uuid4()
+    normalizer.begin_turn(turn_id)
+
+    events = normalizer.on_message(
+        ClaudeResultMessage(
+            subtype="success",
+            session_id="sess-1",
+            usage={"input_tokens": 999, "output_tokens": 999},
+            model_usage={
+                "claude-a": {
+                    "inputTokens": 10,
+                    "outputTokens": 3,
+                    "cacheReadInputTokens": 5,
+                    "totalTokens": 13,
+                },
+                "claude-b": {
+                    "inputTokens": 20,
+                    "outputTokens": 4,
+                    "cacheReadInputTokens": 6,
+                },
+            },
+        )
+    )
+
+    usage = next(event for event in events if isinstance(event, UsageUpdatedPayload))
+    assert usage.input_tokens == 30
+    assert usage.output_tokens == 7
+    assert usage.cached_input_tokens == 11
+    assert usage.total_tokens is None
+
+
+@pytest.mark.parametrize(
+    "model_usage",
+    [
+        {"claude": {"input_tokens": 100, "output_tokens": 20}},
+        {"claude": {"unrecognized": 100}},
+    ],
+)
+def test_unrecognized_model_usage_falls_back_to_top_level_usage(
+    model_usage: dict[str, object],
+) -> None:
+    normalizer = ClaudeNormalizer()
+    normalizer.set_session("sess-1")
+    normalizer.begin_turn(uuid4())
+
+    events = normalizer.on_message(
+        ClaudeResultMessage(
+            subtype="success",
+            session_id="sess-1",
+            usage={"input_tokens": 10, "output_tokens": 3},
+            model_usage=model_usage,
+        )
+    )
+
+    usage = next(event for event in events if isinstance(event, UsageUpdatedPayload))
+    assert usage.input_tokens == 10
+    assert usage.output_tokens == 3
+
+
+def test_unrecognized_usage_is_omitted() -> None:
+    normalizer = ClaudeNormalizer()
+    normalizer.set_session("sess-1")
+    normalizer.begin_turn(uuid4())
+
+    events = normalizer.on_message(
+        ClaudeResultMessage(
+            subtype="success",
+            session_id="sess-1",
+            usage={"unrecognized": 10},
+            model_usage={"claude": {"unrecognized": 20}},
+        )
+    )
+
+    assert not any(isinstance(event, UsageUpdatedPayload) for event in events)
+    assert any(isinstance(event, TurnCompletedPayload) for event in events)
+
+
 def test_structured_question_mapping() -> None:
     from talktoharnesses.domain.enums import InteractionKind
 

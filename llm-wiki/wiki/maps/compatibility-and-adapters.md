@@ -7,8 +7,8 @@ audiences:
 tags:
   - type/map
   - audience/developer
-last_verified: 2026-08-20
-verified_against_commit: bb3d2b755500fc663816d6cbd1a7cd7947a8920b
+last_verified: 2026-08-21
+verified_against_commit: c996cbcd23b7cbf4f6b4d70422ab17ce715661bf
 ---
 
 # Compatibility and Adapters
@@ -17,7 +17,7 @@ Compatibility is a packaged floor plus live probe. Adapters must not claim opera
 
 ## Providers
 
-Grok, Cursor, Codex, Claude Code, OpenCode, and Prime Agent each have an adapter, packaged floor JSON, and live gate. Models, modes, and efforts come from the installed CLI.
+Grok, Cursor, Codex, Claude Code, OpenCode, and Prime Agent each have an adapter, packaged floor JSON, and live gate. Every live gate proves meaningful token usage on successful create and resume turns. Models, modes, and efforts come from the installed CLI.
 
 ## Capability flags
 
@@ -31,3 +31,4 @@ Resume, interrupt, steer, multi-interaction, and nested activity are adapter-own
 - [Adapter protocol](../interfaces/adapter-protocol.md)
 - [Floor-and-probe compatibility decision](../decisions/floor-and-probe-compatibility.md)
 - [Probe and configure harnesses](../requirements/probe-and-configure-harnesses.md)
+- [Report harness token usage](../requirements/report-harness-token-usage.md)

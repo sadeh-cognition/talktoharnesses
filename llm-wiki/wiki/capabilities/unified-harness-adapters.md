@@ -10,7 +10,7 @@ tags:
   - capability/adapters
   - status/implemented
 last_verified: 2026-08-21
-verified_against_commit: 3f90f85a37028a1ba0498cff641ef5c8a1bec6d7
+verified_against_commit: c996cbcd23b7cbf4f6b4d70422ab17ce715661bf
 ---
 
 # Unified Harness Adapters
@@ -27,10 +27,15 @@ Grok, Cursor, OpenCode, and Prime Agent executables are external CLIs located on
 
 Each provider implements `HarnessAdapter` with probe, start, resume, submit, steer, interrupt, answer_interaction, events, and close. A default registry constructs the six adapters. Cursor model selectors use the string `model` field (`model-id[key=value,...]`). `yolo: true` suppresses approval prompts through provider-native mechanisms.
 
+Adapters map provider-reported token counts into the canonical `usage_updated`
+event before successful turn completion. Categories remain absent when the
+provider does not report them.
+
 ## Requirements
 
 - [Probe and configure harnesses](../requirements/probe-and-configure-harnesses.md)
 - [Steer, interrupt, and switch harness](../requirements/steer-interrupt-and-switch-harness.md)
+- [Report harness token usage](../requirements/report-harness-token-usage.md)
 
 ## Related
 

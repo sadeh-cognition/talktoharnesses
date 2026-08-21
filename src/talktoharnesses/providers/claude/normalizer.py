@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, cast
 from uuid import UUID, uuid4, uuid5
 
 from talktoharnesses.domain.enums import (
@@ -303,13 +303,15 @@ class ClaudeNormalizer:
                 details={"expected": self._native_session_id, "got": msg.session_id},
             )
         events = self._close_open_streams()
-        if msg.usage:
+        usage = _normalized_usage(msg)
+        if usage is not None:
             events.append(
                 UsageUpdatedPayload(
                     turn_id=self._active_turn_id,
-                    input_tokens=_as_int(msg.usage.get("input_tokens")),
-                    output_tokens=_as_int(msg.usage.get("output_tokens")),
-                    total_tokens=_as_int(msg.usage.get("total_tokens")),
+                    input_tokens=usage["input_tokens"],
+                    output_tokens=usage["output_tokens"],
+                    total_tokens=usage["total_tokens"],
+                    cached_input_tokens=usage["cached_input_tokens"],
                 )
             )
         if self._interrupt_requested:
@@ -371,6 +373,64 @@ class ClaudeNormalizer:
 
 
 def _as_int(value: object) -> int | None:
-    if isinstance(value, int):
+    if isinstance(value, int) and not isinstance(value, bool):
         return value
+    return None
+
+
+def _normalized_usage(msg: ClaudeResultMessage) -> dict[str, int | None] | None:
+    buckets: list[dict[str, Any]] = []
+    for value in (msg.model_usage or {}).values():
+        if isinstance(value, dict):
+            buckets.append(
+                {str(key): item for key, item in cast(dict[object, object], value).items()}
+            )
+    if buckets:
+        normalized = _reported_usage(
+            {
+                "input_tokens": _sum_reported(buckets, "inputTokens"),
+                "output_tokens": _sum_reported(buckets, "outputTokens"),
+                "total_tokens": _sum_if_complete(buckets, "totalTokens"),
+                "cached_input_tokens": _sum_reported(buckets, "cacheReadInputTokens"),
+            }
+        )
+        if normalized is not None:
+            return normalized
+    if not msg.usage:
+        return None
+    return _reported_usage(
+        {
+            "input_tokens": _as_int(msg.usage.get("input_tokens")),
+            "output_tokens": _as_int(msg.usage.get("output_tokens")),
+            "total_tokens": _as_int(msg.usage.get("total_tokens")),
+            "cached_input_tokens": _first_int(
+                msg.usage.get("cache_read_input_tokens"),
+                msg.usage.get("cached_input_tokens"),
+            ),
+        }
+    )
+
+
+def _reported_usage(usage: dict[str, int | None]) -> dict[str, int | None] | None:
+    return usage if any(value is not None for value in usage.values()) else None
+
+
+def _sum_reported(buckets: list[dict[str, Any]], key: str) -> int | None:
+    values = [_as_int(bucket.get(key)) for bucket in buckets]
+    reported = [value for value in values if value is not None]
+    return sum(reported) if reported else None
+
+
+def _sum_if_complete(buckets: list[dict[str, Any]], key: str) -> int | None:
+    values = [_as_int(bucket.get(key)) for bucket in buckets]
+    if any(value is None for value in values):
+        return None
+    return sum(value for value in values if value is not None)
+
+
+def _first_int(*values: object) -> int | None:
+    for value in values:
+        parsed = _as_int(value)
+        if parsed is not None:
+            return parsed
     return None

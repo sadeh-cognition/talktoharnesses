@@ -8,12 +8,24 @@ audiences:
 tags:
   - type/log
 last_verified: 2026-08-21
-verified_against_commit: 3f90f85a37028a1ba0498cff641ef5c8a1bec6d7
+verified_against_commit: c996cbcd23b7cbf4f6b4d70422ab17ce715661bf
 ---
 
 # Wiki Log
 
 Entries are appended using `## [YYYY-MM-DD] operation | Title`.
+
+## [2026-08-21] implement | Report harness token usage
+
+- Preserved the approved cross-harness token-usage requirement and the updated
+  live-testing procedure as immutable raw sources.
+- Normalized provider-reported token usage for all six harnesses without
+  inventing omitted categories or backfilling historical turns.
+- Made meaningful pre-terminal usage mandatory for every provider's successful
+  live create and resume turns.
+- Verified against TalkToHarnesses baseline
+  `c996cbcd23b7cbf4f6b4d70422ab17ce715661bf` plus the uncommitted
+  implementation recorded with this entry.
 
 ## [2026-08-21] implement | Issue client JWTs from Django admin
 

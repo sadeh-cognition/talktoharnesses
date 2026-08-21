@@ -18,6 +18,7 @@ from talktoharnesses.domain.events import (
     InteractionRequestedPayload,
     SessionResumedPayload,
     SessionStartedPayload,
+    UsageUpdatedPayload,
     event_turn_id,
 )
 from talktoharnesses.domain.models import (
@@ -77,6 +78,7 @@ class LiveStream:
         expected_terminal: str = "turn_completed",
         timeout: float = 180.0,
         min_interactions: int = 0,
+        require_usage: bool = False,
     ) -> list[ConversationEvent]:
         window = await self.wait_until(
             lambda event: event.type in TERMINAL_TYPES and event_turn_id(event) == turn_id,
@@ -87,6 +89,7 @@ class LiveStream:
             turn_id,
             expected_terminal=expected_terminal,
             min_interactions=min_interactions,
+            require_usage=require_usage,
         )
 
     async def collect_busy_turn(
@@ -208,6 +211,7 @@ def _assert_turn(
     *,
     expected_terminal: str,
     min_interactions: int,
+    require_usage: bool = False,
 ) -> list[ConversationEvent]:
     matching = [event for event in window if event_turn_id(event) == turn_id]
     terminals = [event for event in matching if event.type in TERMINAL_TYPES]
@@ -219,7 +223,32 @@ def _assert_turn(
             f"live turn completed with {len(interactions)} interactions; "
             f"expected >= {min_interactions}"
         )
+    if require_usage:
+        _assert_token_usage(matching, terminals[0])
     return matching
+
+
+def _assert_token_usage(
+    matching: Sequence[ConversationEvent],
+    terminal: ConversationEvent,
+) -> None:
+    usage_events: list[tuple[int, UsageUpdatedPayload]] = []
+    for index, event in enumerate(matching):
+        if isinstance(event.payload, UsageUpdatedPayload):
+            usage_events.append((index, event.payload))
+    assert usage_events, "live turn did not produce usage_updated before terminal"
+    usage_index, usage = usage_events[-1]
+    assert usage_index < matching.index(terminal), "live turn produced usage_updated after terminal"
+    values: tuple[int | None, ...] = (
+        usage.input_tokens,
+        usage.output_tokens,
+        usage.total_tokens,
+        usage.cached_input_tokens,
+    )
+    reported = [value for value in values if value is not None]
+    assert reported, "live usage_updated did not report any token values"
+    assert all(value >= 0 for value in reported), "live usage_updated reported negative tokens"
+    assert any(value > 0 for value in reported), "live usage_updated reported only zero tokens"
 
 
 async def _resolve_interaction(
@@ -376,6 +405,7 @@ async def run_live_gate(
             created.turn.id,
             expected_terminal="turn_completed",
             min_interactions=min_create_interactions,
+            require_usage=True,
         )
         first_native = _session_native_id(first_window, SessionStartedPayload)
         if after_create is not None:
@@ -400,6 +430,7 @@ async def run_live_gate(
             resumed_turn.turn.id,
             expected_terminal="turn_completed",
             min_interactions=min_resume_interactions,
+            require_usage=True,
         )
         resumed_native = _session_native_id(resume_window, SessionResumedPayload)
         assert resumed_native == first_native

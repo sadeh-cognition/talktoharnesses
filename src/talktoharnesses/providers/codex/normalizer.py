@@ -46,6 +46,7 @@ from talktoharnesses.providers.codex.schemas import (
     CodexItemStarted,
     CodexNotification,
     CodexReasoningDelta,
+    CodexTokenUsageUpdated,
     CodexTurnCompleted,
     parse_codex_notification,
 )
@@ -122,6 +123,8 @@ class CodexNormalizer:
             return self._item_started(note)
         if isinstance(note, CodexItemCompleted):
             return self._item_completed(note)
+        if isinstance(note, CodexTokenUsageUpdated):
+            return self._token_usage_updated(note)
         if isinstance(note, CodexTurnCompleted):
             return self._turn_completed(note)
         return []
@@ -313,6 +316,19 @@ class CodexNormalizer:
                 tool_id=tool_id,
                 tool_name=name,
                 outcome=outcome,
+            )
+        ]
+
+    def _token_usage_updated(self, note: CodexTokenUsageUpdated) -> list[HarnessEvent]:
+        if self._active_turn_id is None or self._resync_mode:
+            return []
+        return [
+            UsageUpdatedPayload(
+                turn_id=self._active_turn_id,
+                input_tokens=note.usage.input_tokens,
+                output_tokens=note.usage.output_tokens,
+                total_tokens=note.usage.total_tokens,
+                cached_input_tokens=note.usage.cached_input_tokens,
             )
         ]
 

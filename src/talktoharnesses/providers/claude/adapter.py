@@ -538,6 +538,7 @@ class ClaudeAdapter:
                 "stop_reason": getattr(message, "stop_reason", None),
                 "total_cost_usd": getattr(message, "total_cost_usd", None),
                 "usage": getattr(message, "usage", None),
+                "model_usage": getattr(message, "model_usage", None),
                 "result": getattr(message, "result", None),
                 "errors": getattr(message, "errors", None),
             }

@@ -52,6 +52,7 @@ class FakeHttpClient:
         self.posts: list[tuple[str, dict[str, Any] | None]] = []
         self.closed = False
         self._session_id = "sess-1"
+        self.message_history: list[dict[str, Any]] = []
 
     def _session_body(self) -> dict[str, Any]:
         return {"id": self._session_id, "directory": "/tmp"}
@@ -59,6 +60,8 @@ class FakeHttpClient:
     async def get(self, path: str) -> FakeResponse:
         if path == "/global/health":
             return FakeResponse(200, {"healthy": True, "version": "1.2.27"})
+        if path.endswith("/message"):
+            return FakeResponse(200, self.message_history)
         if path.startswith("/session/"):
             return FakeResponse(200, self._session_body())
         return FakeResponse(404, {})
@@ -372,6 +375,152 @@ def test_bind_process_redaction_seen_and_build_argv() -> None:
     argv = adapter.build_argv(_config())
     assert any(part.isdigit() or part.startswith("--") for part in argv)
     assert adapter._port is not None  # pyright: ignore[reportPrivateUsage]
+
+
+def test_only_root_session_is_success_terminal() -> None:
+    adapter = OpenCodeAdapter()
+    adapter._normalizer.set_session("parent")  # pyright: ignore[reportPrivateUsage]
+
+    assert adapter._is_success_terminal(  # pyright: ignore[reportPrivateUsage]
+        {"type": "session.idle", "properties": {"sessionID": "parent"}}
+    )
+    assert not adapter._is_success_terminal(  # pyright: ignore[reportPrivateUsage]
+        {"type": "session.idle", "properties": {"sessionID": "child"}}
+    )
+    assert not adapter._is_success_terminal(  # pyright: ignore[reportPrivateUsage]
+        {"type": "session.status", "properties": {"status": {"type": "idle"}}}
+    )
+
+
+@pytest.mark.asyncio
+async def test_terminal_reconciles_usage_history_before_emitting_completion() -> None:
+    from talktoharnesses.domain.events import UsageUpdatedPayload
+
+    client = FakeHttpClient("http://127.0.0.1")
+    client.message_history = [
+        {
+            "info": {"id": "old-message"},
+            "parts": [
+                {
+                    "id": "old-step",
+                    "sessionID": "sess-1",
+                    "messageID": "old-message",
+                    "type": "step-finish",
+                    "reason": "stop",
+                    "cost": 1.0,
+                    "tokens": {
+                        "total": 999,
+                        "input": 999,
+                        "output": 0,
+                        "reasoning": 0,
+                        "cache": {"read": 0, "write": 0},
+                    },
+                }
+            ],
+        },
+        {"info": {"id": "root-message"}, "parts": []},
+        {
+            "info": {"id": "answer"},
+            "parts": [
+                {
+                    "id": "current-step",
+                    "sessionID": "sess-1",
+                    "messageID": "answer",
+                    "type": "step-finish",
+                    "reason": "stop",
+                    "cost": 0.1,
+                    "tokens": {
+                        "total": 12,
+                        "input": 10,
+                        "output": 2,
+                        "reasoning": 1,
+                        "cache": {"read": 4, "write": 3},
+                    },
+                }
+            ],
+        },
+    ]
+    adapter = OpenCodeAdapter(http_client_factory=lambda _base_url: client)
+    adapter._client = client  # pyright: ignore[reportPrivateUsage]
+    adapter._normalizer.set_session("sess-1")  # pyright: ignore[reportPrivateUsage]
+    adapter._normalizer.begin_turn(  # pyright: ignore[reportPrivateUsage]
+        uuid4(), root_message_id="root-message"
+    )
+
+    await adapter._dispatch_sse(  # pyright: ignore[reportPrivateUsage]
+        None,
+        json.dumps(
+            {
+                "type": "session.idle",
+                "properties": {"sessionID": "sess-1"},
+            }
+        ),
+    )
+    events: list[object] = []
+    while not adapter._event_q.empty():  # pyright: ignore[reportPrivateUsage]
+        events.append(adapter._event_q.get_nowait())  # pyright: ignore[reportPrivateUsage]
+    usage = next(event for event in events if isinstance(event, UsageUpdatedPayload))
+    assert usage.input_tokens == 10
+    assert [getattr(event, "type", None) for event in events][-2:] == [
+        "usage_updated",
+        "turn_completed",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_terminal_keeps_live_usage_when_history_reconciliation_fails() -> None:
+    from talktoharnesses.domain.events import UsageUpdatedPayload
+
+    class FailingHistoryClient(FakeHttpClient):
+        async def get(self, path: str) -> FakeResponse:
+            if path.endswith("/message"):
+                raise OSError("history unavailable")
+            return await super().get(path)
+
+    client = FailingHistoryClient("http://127.0.0.1")
+    adapter = OpenCodeAdapter(http_client_factory=lambda _base_url: client)
+    adapter._client = client  # pyright: ignore[reportPrivateUsage]
+    adapter._normalizer.set_session("sess-1")  # pyright: ignore[reportPrivateUsage]
+    adapter._normalizer.begin_turn(uuid4())  # pyright: ignore[reportPrivateUsage]
+    await adapter._dispatch_sse(  # pyright: ignore[reportPrivateUsage]
+        None,
+        json.dumps(
+            {
+                "type": "message.part.updated",
+                "properties": {
+                    "part": {
+                        "id": "step-1",
+                        "sessionID": "sess-1",
+                        "messageID": "answer",
+                        "type": "step-finish",
+                        "reason": "stop",
+                        "cost": 0.1,
+                        "tokens": {
+                            "total": 12,
+                            "input": 10,
+                            "output": 2,
+                            "reasoning": 1,
+                            "cache": {"read": 4, "write": 3},
+                        },
+                    }
+                },
+            }
+        ),
+    )
+    await adapter._dispatch_sse(  # pyright: ignore[reportPrivateUsage]
+        None,
+        json.dumps(
+            {
+                "type": "session.idle",
+                "properties": {"sessionID": "sess-1"},
+            }
+        ),
+    )
+    events: list[object] = []
+    while not adapter._event_q.empty():  # pyright: ignore[reportPrivateUsage]
+        events.append(adapter._event_q.get_nowait())  # pyright: ignore[reportPrivateUsage]
+    assert any(isinstance(event, UsageUpdatedPayload) for event in events)
+    assert getattr(events[-1], "type", None) == "turn_completed"
 
 
 @pytest.mark.asyncio

@@ -87,6 +87,7 @@ class ClaudeResultMessage(BaseModel):
     stop_reason: str | None = None
     total_cost_usd: float | None = None
     usage: dict[str, Any] | None = None
+    model_usage: dict[str, Any] | None = None
     result: str | None = None
     errors: list[str] | None = None
 

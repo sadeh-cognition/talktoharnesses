@@ -44,6 +44,7 @@ logger = logging.getLogger(__name__)
 
 ClientFactory = Callable[[], Any]
 
+
 def _codex_settings(mode: str | None) -> tuple[Any, Any]:
     """Map finite canonical modes to tested Sandbox values."""
     try:
@@ -600,6 +601,30 @@ class CodexAdapter:
                 "status": str(turn.get("status") or "completed"),
                 "final_response": turn.get("final_response"),
                 "error_message": error.get("message"),
+            }
+        if method == "thread/tokenUsage/updated" and payload_dump is not None:
+            token_usage_obj = payload_dump.get("token_usage")
+            token_usage = (
+                {str(k): v for k, v in cast(dict[object, object], token_usage_obj).items()}
+                if isinstance(token_usage_obj, dict)
+                else {}
+            )
+            last_obj = token_usage.get("last")
+            last = (
+                {str(k): v for k, v in cast(dict[object, object], last_obj).items()}
+                if isinstance(last_obj, dict)
+                else {}
+            )
+            return {
+                "method": "tokenUsageUpdated",
+                "thread_id": str(payload_dump.get("thread_id") or ""),
+                "turn_id": str(payload_dump.get("turn_id") or ""),
+                "usage": {
+                    "input_tokens": last.get("input_tokens"),
+                    "output_tokens": last.get("output_tokens"),
+                    "total_tokens": last.get("total_tokens"),
+                    "cached_input_tokens": last.get("cached_input_tokens"),
+                },
             }
         if method == "item/agentMessage/delta" and payload_dump is not None:
             return {

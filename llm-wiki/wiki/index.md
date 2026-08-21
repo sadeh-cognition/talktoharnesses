@@ -7,7 +7,7 @@ audiences:
   - developer
 tags:
   - type/index
-last_verified: 2026-08-20
+last_verified: 2026-08-21
 ---
 
 # Wiki Index
@@ -39,6 +39,7 @@ Use this catalog to route into the maintained knowledge graph. Obsidian users sh
 - [Probe and configure harnesses](requirements/probe-and-configure-harnesses.md)
 - [Create and manage conversations](requirements/create-and-manage-conversations.md)
 - [Submit turns and stream events](requirements/submit-turns-and-stream-events.md)
+- [Report harness token usage](requirements/report-harness-token-usage.md)
 - [Resolve approvals and structured questions](requirements/resolve-approvals-and-structured-questions.md)
 - [Steer, interrupt, and switch harness](requirements/steer-interrupt-and-switch-harness.md)
 - [Queue and edit prompts](requirements/queue-and-edit-prompts.md)

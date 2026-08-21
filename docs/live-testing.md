@@ -53,19 +53,23 @@ test.
 3. Consume canonical SSE `ConversationEvent`s through the authoritative
    terminal event. Answer `interaction_requested` events with
    `resolve_interaction`.
-4. Close the in-process runtime (native session id is retained), submit a
+4. For the successful create and resume turns, observe `usage_updated` before
+   the terminal event. Every reported token value must be a nonnegative integer,
+   and at least one reported value must be positive. Providers may omit token
+   categories they do not report.
+5. Close the in-process runtime (native session id is retained), submit a
    second unique prompt, observe `session_resumed` with that same id, and
    assert the first turn is not replayed.
-5. Exercise broker-compatible approval/question handling when the live stream
+6. Exercise broker-compatible approval/question handling when the live stream
    surfaces interactions for advertised capabilities.
-6. For each advertised capability, run the matching feature gate on the resumed
+7. For each advertised capability, run the matching feature gate on the resumed
    conversation:
    - **multi-interaction** — one turn that defers at least two interactions
    - **nested activity** — observe `activity_started` (unpublished until a
      normalizer emits it)
    - **steer** — steer an in-flight turn and reach `turn_completed`
    - **interrupt** — interrupt an in-flight turn and reach `turn_interrupted`
-7. Shut the worker down so no owned task, client, responder, process, or
+8. Shut the worker down so no owned task, client, responder, process, or
    descendant remains.
 
 Live tests may print probed versions, advisory status, and pass/fail state. They

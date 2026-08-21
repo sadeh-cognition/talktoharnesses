@@ -88,6 +88,36 @@ class OpenCodeMessagePartDelta(BaseModel):
     delta: str
 
 
+class OpenCodeTokenCache(BaseModel):
+    model_config = _STRICT
+
+    read: int
+    write: int
+
+
+class OpenCodeStepTokens(BaseModel):
+    model_config = _STRICT
+
+    total: int | None = None
+    input: int
+    output: int
+    reasoning: int
+    cache: OpenCodeTokenCache
+
+
+class OpenCodeStepFinishPart(BaseModel):
+    model_config = _STRICT
+
+    id: str
+    sessionID: str
+    messageID: str
+    type: Literal["step-finish"] = "step-finish"
+    reason: str
+    snapshot: str | None = None
+    cost: float
+    tokens: OpenCodeStepTokens
+
+
 class OpenCodePermissionAsked(BaseModel):
     model_config = _STRICT
 

@@ -17,6 +17,7 @@ from talktoharnesses.domain.events import (
     TurnFailedPayload,
     TurnInterruptedPayload,
     TurnOutcomeUnknownPayload,
+    UsageUpdatedPayload,
 )
 from talktoharnesses.domain.models import ApprovalRequestPayload
 from talktoharnesses.providers.opencode.normalizer import OpenCodeNormalizer
@@ -49,6 +50,34 @@ def _status(*, session_id: str = "sess-1", status: str) -> dict[str, object]:
             "sessionID": session_id,
             "status": status,
         },
+    }
+
+
+def _step(
+    part_id: str,
+    *,
+    session_id: str = "sess-1",
+    input_tokens: int = 10,
+    output_tokens: int = 2,
+    cached_tokens: int = 4,
+    total_tokens: int | None = 12,
+) -> dict[str, object]:
+    tokens: dict[str, object] = {
+        "input": input_tokens,
+        "output": output_tokens,
+        "reasoning": 1,
+        "cache": {"read": cached_tokens, "write": 3},
+    }
+    if total_tokens is not None:
+        tokens["total"] = total_tokens
+    return {
+        "id": part_id,
+        "sessionID": session_id,
+        "messageID": f"message-{part_id}",
+        "type": "step-finish",
+        "reason": "stop",
+        "cost": 0.1,
+        "tokens": tokens,
     }
 
 
@@ -128,7 +157,7 @@ def test_child_sessions_accepted_via_parent_id() -> None:
         n.on_server_event(
             {
                 "type": "session.created",
-                "properties": {"sessionID": "child-1", "parentID": "parent"},
+                "properties": {"info": {"id": "child-1", "parentID": "parent"}},
             }
         )
         == []
@@ -140,6 +169,35 @@ def test_child_sessions_accepted_via_parent_id() -> None:
 
     # Foreign session is ignored.
     assert n.on_server_event(_delta(session_id="other", delta="x")) == []
+
+
+@pytest.mark.parametrize(
+    ("event_type", "status"),
+    [
+        ("session.idle", None),
+        ("session.status", {"type": "idle"}),
+    ],
+)
+def test_child_session_terminal_does_not_complete_parent(
+    event_type: str,
+    status: object,
+) -> None:
+    normalizer = OpenCodeNormalizer()
+    normalizer.set_session("parent")
+    normalizer.begin_turn(uuid4())
+    normalizer.on_server_event(
+        {
+            "type": "session.created",
+            "properties": {"info": {"id": "child-1", "parentID": "parent"}},
+        }
+    )
+    properties: dict[str, object] = {"sessionID": "child-1"}
+    if status is not None:
+        properties["status"] = status
+
+    assert normalizer.on_server_event({"type": event_type, "properties": properties}) == []
+    parent_terminal = normalizer.on_server_event(_status(session_id="parent", status="idle"))
+    assert any(isinstance(event, TurnCompletedPayload) for event in parent_terminal)
 
 
 def test_unknown_event_type_is_unsupported() -> None:
@@ -163,6 +221,68 @@ def test_known_noise_event_types_are_ignored() -> None:
         "permission.asked",
     ):
         assert n.on_server_event({"type": event_type, "properties": {"sessionID": "sess-1"}}) == []
+
+
+def test_step_usage_aggregates_unique_parent_and_child_parts_before_terminal() -> None:
+    normalizer = OpenCodeNormalizer()
+    normalizer.set_session("sess-1")
+    turn_id = uuid4()
+    normalizer.begin_turn(turn_id, root_message_id="root-message")
+
+    parent = {
+        "type": "message.part.updated",
+        "properties": {"part": _step("step-1")},
+    }
+    normalizer.on_server_event(parent)
+    normalizer.on_server_event(parent)
+    normalizer.on_server_event(
+        {
+            "type": "session.created",
+            "properties": {"info": {"id": "child-1", "parentID": "sess-1"}},
+        }
+    )
+    normalizer.on_server_event(
+        {
+            "type": "message.part.updated",
+            "properties": {
+                "part": _step(
+                    "step-2",
+                    session_id="child-1",
+                    input_tokens=20,
+                    output_tokens=5,
+                    cached_tokens=6,
+                    total_tokens=None,
+                )
+            },
+        }
+    )
+
+    terminal = normalizer.on_server_event(_status(status="idle"))
+    usage = next(event for event in terminal if isinstance(event, UsageUpdatedPayload))
+    assert usage.input_tokens == 30
+    assert usage.output_tokens == 7
+    assert usage.cached_input_tokens == 10
+    assert usage.total_tokens is None
+    assert terminal.index(usage) < len(terminal) - 1
+
+
+def test_history_usage_starts_at_current_root_message() -> None:
+    normalizer = OpenCodeNormalizer()
+    normalizer.set_session("sess-1")
+    normalizer.begin_turn(uuid4(), root_message_id="root-message")
+    normalizer.on_message_history(
+        "sess-1",
+        [
+            {"info": {"id": "old"}, "parts": [_step("old-step", input_tokens=999)]},
+            {"info": {"id": "root-message"}, "parts": []},
+            {"info": {"id": "answer"}, "parts": [_step("current-step")]},
+        ],
+        after_message_id="root-message",
+    )
+
+    terminal = normalizer.on_server_event(_status(status="idle"))
+    usage = next(event for event in terminal if isinstance(event, UsageUpdatedPayload))
+    assert usage.input_tokens == 10
 
 
 def test_on_permission_and_outcome_unknown() -> None:

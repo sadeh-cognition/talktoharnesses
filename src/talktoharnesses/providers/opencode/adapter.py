@@ -60,6 +60,12 @@ class _PendingQuestion:
 _PendingInteraction = _PendingPermission | _PendingQuestion
 
 
+def _mapping(value: object) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    return {str(key): item for key, item in cast(dict[object, object], value).items()}
+
+
 def _allocate_loopback_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
@@ -214,8 +220,8 @@ class OpenCodeAdapter:
         assert self._client is not None
         if not session.native_session_id:
             raise DomainError(ErrorCode.INVALID_STATE, "session has no native_session_id")
-        self._normalizer.begin_turn(request.turn_id)
         message_id = f"msg_{uuid4().hex}"
+        self._normalizer.begin_turn(request.turn_id, root_message_id=message_id)
         payload: dict[str, Any] = {
             "parts": [{"type": "text", "text": request.prompt}],
             "messageID": message_id,
@@ -502,8 +508,49 @@ class OpenCodeAdapter:
             envelope = raw
             if "type" not in envelope:
                 envelope = {**envelope, "type": event_type}
+        if self._is_success_terminal(envelope):
+            await self._reconcile_usage()
         events = self._normalizer.on_server_event(envelope)
         await self._emit_many(events)
+
+    def _is_success_terminal(self, envelope: dict[str, Any]) -> bool:
+        if envelope.get("type") not in {"session.status", "session.idle"}:
+            return False
+        props = envelope.get("properties")
+        properties = _mapping(props)
+        session_id = properties.get("sessionID") or properties.get("session_id")
+        if not isinstance(session_id, str) or not self._normalizer.accepts_terminal_session(
+            session_id
+        ):
+            return False
+        status_obj = properties.get("status")
+        if isinstance(status_obj, dict):
+            status = str(_mapping(cast(object, status_obj)).get("type") or "").lower()
+        else:
+            status = str(status_obj or ("idle" if envelope.get("type") == "session.idle" else ""))
+            status = status.lower()
+        return status in {"idle", "completed", "done"}
+
+    async def _reconcile_usage(self) -> None:
+        if self._client is None:
+            return
+        try:
+            for session_id, after_message_id in self._normalizer.usage_history_requests():
+                response = await self._client.get(f"/session/{session_id}/message")
+                self._raise_http(response, "GET /session/{id}/message")
+                body = response.json()
+                if not isinstance(body, list):
+                    raise DomainError(
+                        ErrorCode.PROTOCOL_ERROR,
+                        "opencode message history must be a list",
+                    )
+                self._normalizer.on_message_history(
+                    session_id,
+                    cast(list[object], body),
+                    after_message_id=after_message_id,
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("opencode usage reconciliation failed: %s", exc)
 
     async def _handle_permission(self, props: dict[str, Any]) -> None:
         permission_id = str(props.get("permissionID") or props.get("id") or "")

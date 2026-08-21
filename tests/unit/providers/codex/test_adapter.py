@@ -446,6 +446,7 @@ def test_coerce_public_slotted_notifications() -> None:
         ItemStartedNotification,
         ReasoningTextDeltaNotification,
         ThreadItem,
+        ThreadTokenUsageUpdatedNotification,
         Turn,
         TurnCompletedNotification,
         TurnStartedNotification,
@@ -499,6 +500,31 @@ def test_coerce_public_slotted_notifications() -> None:
             ),
         ),
         Notification(
+            method="thread/tokenUsage/updated",
+            payload=ThreadTokenUsageUpdatedNotification.model_validate(
+                {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "tokenUsage": {
+                        "last": {
+                            "inputTokens": 10,
+                            "cachedInputTokens": 4,
+                            "outputTokens": 3,
+                            "reasoningOutputTokens": 2,
+                            "totalTokens": 13,
+                        },
+                        "total": {
+                            "inputTokens": 100,
+                            "cachedInputTokens": 40,
+                            "outputTokens": 30,
+                            "reasoningOutputTokens": 20,
+                            "totalTokens": 130,
+                        },
+                    },
+                }
+            ),
+        ),
+        Notification(
             method="turn/completed",
             payload=TurnCompletedNotification(thread_id="thread-1", turn=turn),
         ),
@@ -514,8 +540,17 @@ def test_coerce_public_slotted_notifications() -> None:
         "agentMessageDelta",
         "reasoningDelta",
         "itemCompleted",
+        "tokenUsageUpdated",
         "turnCompleted",
     ]
+    usage = adapter._coerce_notification(notifications[-2])  # pyright: ignore[reportPrivateUsage]
+    assert usage is not None
+    assert usage["usage"] == {
+        "input_tokens": 10,
+        "output_tokens": 3,
+        "total_tokens": 13,
+        "cached_input_tokens": 4,
+    }
 
 
 def test_normalizer_reasoning_tool_and_turn_completed_variants() -> None:
@@ -527,6 +562,7 @@ def test_normalizer_reasoning_tool_and_turn_completed_variants() -> None:
         TurnCompletedPayload,
         TurnFailedPayload,
         TurnInterruptedPayload,
+        UsageUpdatedPayload,
     )
 
     normalizer = CodexNormalizer()
@@ -571,6 +607,29 @@ def test_normalizer_reasoning_tool_and_turn_completed_variants() -> None:
         isinstance(e, ToolCompletedPayload) and e.outcome.value == "failure" for e in completed
     )
 
+    usage = normalizer.on_notification(
+        {
+            "method": "tokenUsageUpdated",
+            "thread_id": "t1",
+            "turn_id": "u1",
+            "usage": {
+                "input_tokens": 1,
+                "output_tokens": 2,
+                "total_tokens": 3,
+                "cached_input_tokens": 0,
+            },
+        }
+    )
+    assert usage == [
+        UsageUpdatedPayload(
+            turn_id=turn,
+            input_tokens=1,
+            output_tokens=2,
+            total_tokens=3,
+            cached_input_tokens=0,
+        )
+    ]
+
     terminal = normalizer.on_notification(
         {
             "method": "turnCompleted",
@@ -578,12 +637,6 @@ def test_normalizer_reasoning_tool_and_turn_completed_variants() -> None:
             "turn_id": "u1",
             "status": "completed",
             "final_response": "done",
-            "usage": {
-                "input_tokens": 1,
-                "output_tokens": 2,
-                "total_tokens": 3,
-                "cached_input_tokens": 0,
-            },
         }
     )
     assert any(isinstance(e, TurnCompletedPayload) for e in terminal)

@@ -26,6 +26,7 @@ from talktoharnesses.domain.events import (
     TurnFailedPayload,
     TurnInterruptedPayload,
     TurnOutcomeUnknownPayload,
+    UsageUpdatedPayload,
 )
 from talktoharnesses.domain.models import CanonicalQuestion, StructuredQuestionPayload
 
@@ -38,6 +39,12 @@ _IGNORED_EVENTS = {
     "compaction_start",
     "compaction_end",
     "auto_retry_end",
+}
+_USAGE_KEYS = {
+    "input": "input_tokens",
+    "output": "output_tokens",
+    "totalTokens": "total_tokens",
+    "cacheRead": "cached_input_tokens",
 }
 
 
@@ -64,6 +71,12 @@ def _result_text(value: object) -> str:
     return "".join(parts)
 
 
+def _optional_int(value: object) -> int | None:
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    return None
+
+
 class PrimeAgentNormalizer:
     def __init__(self) -> None:
         self._active_turn_id: UUID | None = None
@@ -77,6 +90,8 @@ class PrimeAgentNormalizer:
         self._tools: dict[str, tuple[UUID, str, str, int]] = {}
         self._has_assistant_message = False
         self._pending_terminal: TurnFailedPayload | TurnInterruptedPayload | None = None
+        self._usage: dict[str, int] = {}
+        self._usage_message_ids: set[str] = set()
         self._redaction_patterns: tuple[str, ...] = ()
 
     @property
@@ -100,6 +115,8 @@ class PrimeAgentNormalizer:
         self._tools.clear()
         self._has_assistant_message = False
         self._pending_terminal = None
+        self._usage.clear()
+        self._usage_message_ids.clear()
 
     def on_event(self, raw: dict[str, Any]) -> list[HarnessEvent]:
         event_type = raw.get("type")
@@ -112,6 +129,7 @@ class PrimeAgentNormalizer:
         if event_type == "message_start":
             return []
         if event_type == "message_end":
+            self._record_usage(_mapping(raw.get("message")))
             return self._close_streams()
         if event_type == "tool_execution_start":
             return self._tool_start(raw)
@@ -318,6 +336,16 @@ class PrimeAgentNormalizer:
             return []
         turn_id = self._active_turn_id
         events = self._close_streams()
+        if self._usage:
+            events.append(
+                UsageUpdatedPayload(
+                    turn_id=turn_id,
+                    input_tokens=self._usage.get("input_tokens"),
+                    output_tokens=self._usage.get("output_tokens"),
+                    total_tokens=self._usage.get("total_tokens"),
+                    cached_input_tokens=self._usage.get("cached_input_tokens"),
+                )
+            )
         if self._pending_terminal is not None:
             events.append(self._pending_terminal)
         else:
@@ -331,6 +359,20 @@ class PrimeAgentNormalizer:
         self._active_turn_id = None
         self._pending_terminal = None
         return events
+
+    def _record_usage(self, message: dict[str, Any]) -> None:
+        if message.get("role") != "assistant":
+            return
+        native_id = message.get("id")
+        if isinstance(native_id, str) and native_id:
+            if native_id in self._usage_message_ids:
+                return
+            self._usage_message_ids.add(native_id)
+        usage = _mapping(message.get("usage"))
+        for native_key, canonical_key in _USAGE_KEYS.items():
+            value = _optional_int(usage.get(native_key))
+            if value is not None:
+                self._usage[canonical_key] = self._usage.get(canonical_key, 0) + value
 
     def _close_streams(self) -> list[HarnessEvent]:
         if self._active_turn_id is None:

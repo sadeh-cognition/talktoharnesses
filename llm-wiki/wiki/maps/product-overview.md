@@ -8,7 +8,7 @@ tags:
   - type/map
   - audience/product
 last_verified: 2026-08-21
-verified_against_commit: bb3d2b755500fc663816d6cbd1a7cd7947a8920b
+verified_against_commit: c996cbcd23b7cbf4f6b4d70422ab17ce715661bf
 ---
 
 # Product Overview
@@ -37,6 +37,7 @@ TalkToHarnesses (TTH) gives [library embedders, Django hosts, and remote HTTP cl
 - [Probe and configure harnesses](../requirements/probe-and-configure-harnesses.md)
 - [Create and manage conversations](../requirements/create-and-manage-conversations.md)
 - [Submit turns and stream events](../requirements/submit-turns-and-stream-events.md)
+- [Report harness token usage](../requirements/report-harness-token-usage.md)
 - [Resolve approvals and structured questions](../requirements/resolve-approvals-and-structured-questions.md)
 - [Steer, interrupt, and switch harness](../requirements/steer-interrupt-and-switch-harness.md)
 - [Queue and edit prompts](../requirements/queue-and-edit-prompts.md)

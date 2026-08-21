@@ -60,6 +60,15 @@ class CodexTurnCompleted(BaseModel):
     usage: CodexTurnUsage | None = None
 
 
+class CodexTokenUsageUpdated(BaseModel):
+    model_config = _STRICT
+
+    method: Literal["tokenUsageUpdated"] = "tokenUsageUpdated"
+    thread_id: str
+    turn_id: str
+    usage: CodexTurnUsage
+
+
 class CodexItemStarted(BaseModel):
     model_config = _STRICT
 
@@ -207,6 +216,7 @@ CodexNotification = (
     | CodexReasoningDelta
     | CodexTurnStarted
     | CodexTurnCompleted
+    | CodexTokenUsageUpdated
     | CodexItemStarted
     | CodexItemCompleted
 )
@@ -222,6 +232,8 @@ def parse_codex_notification(raw: dict[str, Any]) -> CodexNotification:
         return CodexTurnStarted.model_validate(raw)
     if method == "turnCompleted":
         return CodexTurnCompleted.model_validate(raw)
+    if method == "tokenUsageUpdated":
+        return CodexTokenUsageUpdated.model_validate(raw)
     if method == "itemStarted":
         return CodexItemStarted.model_validate(raw)
     if method == "itemCompleted":

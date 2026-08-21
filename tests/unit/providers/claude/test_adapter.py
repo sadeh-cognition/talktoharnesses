@@ -391,12 +391,14 @@ def test_coerce_message_branches() -> None:
         stop_reason = "end_turn"
         total_cost_usd = 0.1
         usage = None
+        model_usage = {"claude": {"inputTokens": 3, "outputTokens": 1}}
         result = "done"
         errors = None
 
     result_msg = adapter._coerce_message(ResultMessage())  # pyright: ignore[reportPrivateUsage]
     assert result_msg is not None
     assert result_msg["type"] == "result"
+    assert result_msg["model_usage"] == {"claude": {"inputTokens": 3, "outputTokens": 1}}
 
     class SystemMessage:
         subtype = "init"

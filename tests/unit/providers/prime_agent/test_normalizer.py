@@ -2,7 +2,7 @@
 
 from uuid import uuid4
 
-from talktoharnesses.domain.events import ToolRequestedPayload
+from talktoharnesses.domain.events import ToolRequestedPayload, UsageUpdatedPayload
 from talktoharnesses.providers.prime_agent.normalizer import PrimeAgentNormalizer
 
 
@@ -57,6 +57,58 @@ def test_separate_assistant_messages_get_separate_ids() -> None:
     assert first[0].type == "assistant_message_started"
     assert second[0].type == "assistant_message_started"
     assert first[0].message_id != second[0].message_id
+
+
+def test_assistant_message_usage_is_deduped_and_aggregated_before_terminal() -> None:
+    normalizer = PrimeAgentNormalizer()
+    turn_id = uuid4()
+    normalizer.begin_turn(turn_id)
+    first = {
+        "type": "message_end",
+        "message": {
+            "id": "message-1",
+            "role": "assistant",
+            "usage": {
+                "input": 10,
+                "output": 2,
+                "cacheRead": 4,
+                "cacheWrite": 3,
+                "totalTokens": 12,
+            },
+        },
+    }
+    normalizer.on_event(first)
+    normalizer.on_event(first)
+    normalizer.on_event(
+        {
+            "type": "message_end",
+            "message": {
+                "id": "message-2",
+                "role": "assistant",
+                "usage": {
+                    "input": 20,
+                    "output": 5,
+                    "cacheRead": 6,
+                    "cacheWrite": 7,
+                    "totalTokens": 25,
+                },
+            },
+        }
+    )
+    normalizer.on_event(
+        {
+            "type": "message_end",
+            "message": {"id": "user-1", "role": "user", "usage": {"input": 999}},
+        }
+    )
+
+    terminal = normalizer.on_event({"type": "agent_end"})
+    usage = next(event for event in terminal if isinstance(event, UsageUpdatedPayload))
+    assert usage.input_tokens == 30
+    assert usage.output_tokens == 7
+    assert usage.cached_input_tokens == 10
+    assert usage.total_tokens == 37
+    assert terminal.index(usage) < len(terminal) - 1
 
 
 def test_errors_and_tool_arguments_are_redacted() -> None:
