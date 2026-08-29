@@ -20,13 +20,14 @@ publication from this tree is therefore **`2026.8.1`** / tag **`v2026.8.1`**
 4. Aggregate statement coverage for `talktoharnesses` is at least 91% on the
    non-live suite (migrations omitted only). Raise coverage with meaningful
    path tests — do not add trivial assertions solely to move the percentage.
-5. `bash scripts/ci/stable_cut_checklist.sh` reports a floor and platform for
-   every adapter.
+5. `bash scripts/ci/stable_cut_checklist.sh` validates a floor and platform for
+   every split-owned adapter document.
 
 ## Candidate commit gate
 
 1. Static checks: lockfile, Ruff, format, strict Pyright, migration drift,
-   development compatibility validation, `render_supported --check`.
+   development compatibility validation, and
+   `uv run python scripts/render_supported.py --check`.
 2. Coverage job ≥ 91% on the non-live suite.
 3. Provider, PostgreSQL, OS-runtime, and performance jobs green.
 4. Build job produces one wheel and one sdist; artifact content and isolated
@@ -44,7 +45,7 @@ publication from this tree is therefore **`2026.8.1`** / tag **`v2026.8.1`**
 3. Remove provisional “implementation target only” notes that no longer describe
    published rows.
 4. Run stable compatibility validation
-   (`python -m talktoharnesses.providers.render_supported --validate stable --check`).
+   (`uv run python scripts/render_supported.py --validate stable --check`).
 5. Merge the stable-version commit with no further code changes.
 6. Tag exact `v2026.8.1` on that commit. A tag on a development version must fail.
 

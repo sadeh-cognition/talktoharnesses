@@ -111,9 +111,10 @@ rows, search document, and one `transcript_imported` event. Failure leaves no
 durable conversation state. The response is `201` with a normal
 `ConversationSnapshot`.
 
-Imports execute the transcript as a handoff prompt in the selected local harness
-under the authenticated user's normal workspace permissions. Import is not a
-sandbox or a trusted backup restore. Import never attaches to an existing
-conversation, reuses source IDs, or exposes native identifiers.
+Imports execute the transcript as a handoff prompt in the selected split
+service with the workspace access configured for that deployment. Import is not
+a trusted backup restore and does not add isolation beyond the configured split
+boundary. Import never attaches to an existing conversation, reuses source IDs,
+or exposes native identifiers.
 
 Limits include at most 5,000 entries and a 5 MiB canonical JSON representation.

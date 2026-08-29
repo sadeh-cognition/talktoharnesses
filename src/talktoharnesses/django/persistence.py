@@ -32,6 +32,7 @@ from talktoharnesses.application.persistence import (
     PruneResult,
     RecoveryAttempt,
     SwitchPreparation,
+    merge_command_progress,
 )
 from talktoharnesses.application.search_query import (
     BODY_PHRASE_CAP,
@@ -162,7 +163,6 @@ _RENEWABLE_COMMAND_STATUSES = (
     CommandStatus.DELIVERY_STARTED.value,
     CommandStatus.DELIVERED.value,
 )
-
 
 def _json(model: BaseModel) -> dict[str, object]:
     return model.model_dump(mode="json")
@@ -414,7 +414,16 @@ class DjangoPersistence:
                 "conversation not found",
                 details={"conversation_id": str(conversation_id)},
             ) from exc
-        return _load(ConversationState, row.state)
+        state = _load(ConversationState, row.state)
+        # The aggregate blob's command copies go stale the moment a worker
+        # writes delivery progress through update_command; overlay the rows so
+        # delivery guards and recovery classification see the durable truth.
+        if state.commands:
+            records = CommandRecord.objects.filter(command_id__in=list(state.commands))
+            overlay = {record.command_id: _load(Command, record.data) for record in records}
+            if overlay:
+                state = state.model_copy(update={"commands": {**state.commands, **overlay}})
+        return state
 
     async def save_snapshot(self, state: ConversationState) -> ConversationState:
         return await sync_to_async(self._save_snapshot, thread_sensitive=True)(state)
@@ -555,6 +564,7 @@ class DjangoPersistence:
             command, worker_id, fence
         )
 
+    @transaction.atomic
     def _update_command(
         self,
         command: Command,
@@ -563,12 +573,14 @@ class DjangoPersistence:
     ) -> Command:
         if worker_id is not None or fence is not None:
             self._require_conversation_owner(command.conversation_id, worker_id, fence)
-        updated = CommandRecord.objects.filter(command_id=command.id).update(
-            **self._command_values(command)
-        )
-        if not updated:
+        row = CommandRecord.objects.select_for_update().filter(command_id=command.id).first()
+        if row is None:
             raise DomainError(ErrorCode.INVALID_STATE, "command not found")
-        return command
+        merged = merge_command_progress(_load(Command, row.data), command)
+        CommandRecord.objects.filter(command_id=command.id).update(
+            **self._command_values(merged)
+        )
+        return merged
 
     async def commit_event_batch(
         self,
@@ -1842,15 +1854,17 @@ class DjangoPersistence:
         )
 
     def _settle_command(self, command: Command) -> None:
-        updated = CommandRecord.objects.filter(command_id=command.id).update(
-            **self._command_values(command)
-        )
-        if not updated:
+        row = CommandRecord.objects.select_for_update().filter(command_id=command.id).first()
+        if row is None:
             raise DomainError(
                 ErrorCode.INVALID_STATE,
                 "command not found",
                 details={"command_id": str(command.id)},
             )
+        merged = merge_command_progress(_load(Command, row.data), command)
+        CommandRecord.objects.filter(command_id=command.id).update(
+            **self._command_values(merged)
+        )
 
     async def get_retention_policy(self, owner_id: str) -> RetentionPolicyProjection:
         return await sync_to_async(self._get_retention_policy, thread_sensitive=True)(owner_id)

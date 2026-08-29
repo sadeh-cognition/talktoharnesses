@@ -104,6 +104,47 @@ async def test_start_probes_until_one_succeeds_in_harness_id_order() -> None:
 
 
 @pytest.mark.asyncio
+async def test_spawn_gate_false_skips_probing() -> None:
+    clock = _Clock(datetime(2026, 8, 9, 12, 0, 0, tzinfo=UTC))
+    persistence = MemoryPersistence()
+    await persistence.create_harness(_harness())
+    registry = AdapterRegistry()
+    registry.register(HarnessKind.GROK, lambda: _OkAdapter())  # type: ignore[arg-type, return-value]
+    gated: list[HarnessKind] = []
+
+    async def gate(kind: HarnessKind) -> bool:
+        gated.append(kind)
+        return False
+
+    monitor = ReadinessProbeMonitor(persistence, registry, clock, spawn_gate=gate)
+    await monitor.start()
+    try:
+        assert gated == [HarnessKind.GROK]
+        assert monitor.is_fresh(clock()) is False
+    finally:
+        await monitor.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_spawn_gate_true_probes_normally() -> None:
+    clock = _Clock(datetime(2026, 8, 9, 12, 0, 0, tzinfo=UTC))
+    persistence = MemoryPersistence()
+    await persistence.create_harness(_harness())
+    registry = AdapterRegistry()
+    registry.register(HarnessKind.GROK, lambda: _OkAdapter())  # type: ignore[arg-type, return-value]
+
+    async def gate(kind: HarnessKind) -> bool:
+        return True
+
+    monitor = ReadinessProbeMonitor(persistence, registry, clock, spawn_gate=gate)
+    await monitor.start()
+    try:
+        assert monitor.is_fresh(clock())
+    finally:
+        await monitor.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_empty_registry_leaves_readiness_false() -> None:
     clock = _Clock(datetime(2026, 8, 9, 12, 0, 0, tzinfo=UTC))
     persistence = MemoryPersistence()
@@ -193,3 +234,38 @@ async def test_refresh_retries_remaining_after_preferred_fails() -> None:
     assert second.id in probed
     assert monitor._successful_harness_id == second.id  # type: ignore[attr-defined]
     await monitor.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_probe_adapters_are_released_after_success_and_failure() -> None:
+    """Each probe-only adapter must be aclose()d, or every cycle leaks a client."""
+    clock = _Clock(datetime(2026, 8, 9, 12, 0, 0, tzinfo=UTC))
+    persistence = MemoryPersistence()
+    await persistence.create_harness(_harness())
+    released: list[str] = []
+
+    class _ClosableFail(_FailAdapter):
+        async def aclose(self) -> None:
+            released.append("fail")
+
+    registry = AdapterRegistry()
+    registry.register(HarnessKind.GROK, lambda: _ClosableFail())  # type: ignore[arg-type, return-value]
+    monitor = ReadinessProbeMonitor(persistence, registry, clock)
+    await monitor.start()
+    try:
+        assert released == ["fail"]
+    finally:
+        await monitor.shutdown()
+
+    class _ClosableOk(_OkAdapter):
+        async def aclose(self) -> None:
+            released.append("ok")
+
+    registry = AdapterRegistry()
+    registry.register(HarnessKind.GROK, lambda: _ClosableOk())  # type: ignore[arg-type, return-value]
+    monitor = ReadinessProbeMonitor(persistence, registry, clock)
+    await monitor.start()
+    try:
+        assert released == ["fail", "ok"]
+    finally:
+        await monitor.shutdown()

@@ -430,7 +430,6 @@ Use a configuration equivalent to:
 ```python
 HarnessConfiguration(
     kind=HarnessKind.CURSOR,
-    executable_path=executable,
     working_directory=str(tmp_path),
     model="composer-2.5[fast=false]",
     mode="ask",
@@ -453,9 +452,12 @@ Run it explicitly with:
 
 ```bash
 TALKTOHARNESSES_LIVE_CURSOR=1 \
-TALKTOHARNESSES_CURSOR_EXECUTABLE=/absolute/path/to/cursor-agent \
+TTH_SPLIT_CURSOR_URL=http://127.0.0.1:8112 \
 uv run pytest tests/live/test_cursor_live.py -q -s
 ```
+
+Configure `TALKTOHARNESSES_CURSOR_EXECUTABLE` in the `tth-cursor` process when
+the executable is not on that split's PATH.
 
 ## 7. Verification Order and Completion Criteria
 
@@ -483,7 +485,7 @@ uv run pytest -q
 uv run ruff check .
 uv run ruff format --check .
 uv run pyright
-uv run python -m talktoharnesses.providers.render_supported
+uv run python scripts/render_supported.py
 DJANGO_SETTINGS_MODULE=tests.django_settings uv run django-admin makemigrations --check --dry-run
 git diff --check
 ```

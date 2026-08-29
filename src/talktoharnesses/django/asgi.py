@@ -11,8 +11,9 @@ Run with Uvicorn (host-owned process)::
 
     uvicorn host.asgi:application --host 127.0.0.1
 
-Authentication does **not** sandbox harness execution. Authorized turn
-submitters cause local programs to run as the Django OS user.
+Authentication authorizes the client-facing API; it does not configure the
+proxy-to-split security boundary. Harness programs run in proxy-managed Docker
+sandboxes spawned on demand and tracked in the database.
 
 The host owns Django settings, migrations, URL inclusion, and Uvicorn
 invocation. This package does not auto-run migrations, provide a CLI, or
@@ -32,9 +33,15 @@ from talktoharnesses.application.service import TalkToHarnessesService
 from talktoharnesses.django.auth import validate_jwt_settings
 from talktoharnesses.django.broker import DjangoCommittedEventBroker
 from talktoharnesses.django.persistence import DjangoPersistence
+from talktoharnesses.django.sandbox_store import DjangoSandboxStore
 from talktoharnesses.domain.enums import ErrorCode
 from talktoharnesses.domain.errors import DomainError
-from talktoharnesses.providers.default_registry import build_default_adapter_registry
+from talktoharnesses.remote.registry import build_remote_adapter_registry
+from talktoharnesses.remote.sandbox import (
+    SandboxConfig,
+    SandboxManager,
+    ensure_docker_cli_available,
+)
 from talktoharnesses.runtime.manager import RuntimeManager
 
 logger = logging.getLogger(__name__)
@@ -79,9 +86,14 @@ def _build_service() -> TalkToHarnessesService:
     """Construct the default production composition for one ASGI process."""
     # Fail closed on invalid JWT config before accepting HTTP traffic.
     validate_jwt_settings()
+    # Every harness runs in a Docker sandbox; refuse to start without the CLI.
+    ensure_docker_cli_available()
 
     persistence = DjangoPersistence()
-    registry = build_default_adapter_registry()
+    # Every kind is remote: its Docker sandbox is spawned on demand and
+    # tracked in the sandbox store so restarts reattach to it.
+    sandboxes = SandboxManager(SandboxConfig.from_env(), store=DjangoSandboxStore())
+    registry = build_remote_adapter_registry(sandboxes)
     broker = DjangoCommittedEventBroker()
     runtime = RuntimeManager(persistence, registry, clock=_utc_clock)
     return TalkToHarnessesService(
@@ -90,6 +102,7 @@ def _build_service() -> TalkToHarnessesService:
         broker,
         _utc_clock,
         runtime,
+        readiness_spawn_gate=sandboxes.is_running,
     )
 
 

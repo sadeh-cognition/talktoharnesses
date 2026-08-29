@@ -9,8 +9,8 @@ tags:
   - type/requirement
   - capability/adapters
   - status/implemented
-last_verified: 2026-08-20
-verified_against_commit: bb3d2b755500fc663816d6cbd1a7cd7947a8920b
+last_verified: 2026-08-29
+verified_against_commit: 47644027875773ba520cbfdd9f978d196a548802
 ---
 
 # Steer, Interrupt, and Switch Harness
@@ -37,13 +37,15 @@ No gap remains against adapter-owned capability flags. Nested activity is unpubl
 ## Implementation evidence
 
 - `src/talktoharnesses/application/service.py` (`steer`, `interrupt`, `switch_harness`)
-- `src/talktoharnesses/providers/adapter.py`
-- `src/talktoharnesses/providers/compatibility.py`
+- `src/talktoharnesses/remote/adapter.py`
+- `tth-*/src/tth_*/harness/adapter.py`
+- `tth-*/src/tth_*/harness/compatibility.py`
 
 ## Test evidence
 
 - `tests/e2e/test_phase8_switch_gate.py`
-- `tests/unit/providers/test_adapter_matrix_enforcement.py`
+- `tests/unit/remote/test_remote_adapter.py`
+- `tth-*/tests/test_adapter_conformance.py`
 - `tests/live/test_*_live.py`
 
 ## Related

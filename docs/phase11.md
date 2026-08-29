@@ -383,9 +383,9 @@ suite against SQLite and PostgreSQL.
 7. Close an uncommitted candidate on every failure. After commit, publish once and promote it using
    the existing runtime manager. Do not attempt provider-side deletion of an abandoned native
    session after a process crash.
-8. Document that imports execute the transcript as a handoff prompt in the selected local harness
-   under the authenticated user's normal workspace permissions. Import is not a sandbox or a
-   trusted backup restore.
+8. Document that imports execute the transcript as a handoff prompt in the selected split service.
+   Project access follows that split's deployment configuration, and the import is not a trusted
+   backup restore.
 
 Test deterministic export, dump/load round trips, unknown fields/versions, limits, malformed tool
 JSON, retained-only knowledge, no native/reasoning/raw/secret leakage, cross-owner access, new-ID

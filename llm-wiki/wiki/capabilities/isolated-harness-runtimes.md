@@ -9,8 +9,8 @@ tags:
   - type/capability
   - capability/runtime
   - status/implemented
-last_verified: 2026-08-20
-verified_against_commit: bb3d2b755500fc663816d6cbd1a7cd7947a8920b
+last_verified: 2026-08-30
+verified_against_commit: 2920f5820783245bd5b871e61edd44642ebfe56a
 ---
 
 # Isolated Harness Runtimes
@@ -19,11 +19,11 @@ Each active conversation owns one supervised SDK or process runtime. Request han
 
 ## Product value
 
-Turns outlive HTTP requests. Harnesses run locally as the Django OS user with that user's workspace access. This is not a sandbox.
+Turns outlive HTTP requests. Harness execution occurs in the kind's split service, which runs in a restricted proxy-managed Docker container with explicitly mounted workspace access.
 
 ## Current implementation
 
-`RuntimeManager` and `ProcessSupervisor` create, watch, and reap candidate runtimes. SQLite uses a single-supervisor profile. PostgreSQL may coordinate multiple workers through transactional claims, renewable leases, and notifications without transferring a live stdio connection.
+The proxy's `RuntimeManager` mirrors split sessions through `RemoteProcessHandle`; each split's `ProcessSupervisor` creates, watches, and reaps the native runtime. SQLite uses a single-supervisor proxy profile. PostgreSQL may coordinate multiple proxy workers through transactional claims, renewable leases, and notifications without transferring a live split session.
 
 ## Requirements
 

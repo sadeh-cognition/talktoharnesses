@@ -1,0 +1,43 @@
+"""Cursor compatibility source tests."""
+
+from __future__ import annotations
+
+import pytest
+from tth_types.enums import ErrorCode
+from tth_types.errors import DomainError
+
+from tth_cursor.harness.argv import build_cursor_argv
+from tth_cursor.harness.compatibility import (
+    load_cursor_compatibility,
+    match_release,
+    parse_version_stdout,
+)
+
+
+def test_load_and_match_release() -> None:
+    doc = load_cursor_compatibility()
+    assert doc.adapter_version == "2026.8.5"
+    release = match_release("2026.08.11-e8db854", platform="linux")
+    assert release.id == "cursor-2026.08.11-e8db854"
+    caps = release.to_harness_capabilities()
+    assert caps.supports_resume is True
+    assert caps.supports_steer is False
+    assert "session/set_config_option" in release.required_agent_methods
+    assert "clientCapabilities._meta.parameterizedModelPicker" in release.allowlisted_extensions
+
+
+def test_below_floor_fails() -> None:
+    with pytest.raises(DomainError) as exc:
+        match_release("2026.08.03-deadbeef")
+    assert exc.value.code is ErrorCode.PROVIDER_INCOMPATIBLE
+
+
+def test_malformed_version_fails() -> None:
+    with pytest.raises(DomainError) as exc:
+        parse_version_stdout("line1\nline2")
+    assert exc.value.code is ErrorCode.PROVIDER_INCOMPATIBLE
+
+
+def test_build_argv_accepts_no_model_mode_flags() -> None:
+    assert build_cursor_argv() == ("acp",)
+    assert build_cursor_argv(yolo=True) == ("acp", "--yolo")

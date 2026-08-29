@@ -27,6 +27,7 @@ from talktoharnesses.application.persistence import (
     PruneResult,
     RecoveryAttempt,
     SwitchPreparation,
+    merge_command_progress,
 )
 from talktoharnesses.application.search_documents import (
     SearchDocumentFields,
@@ -216,13 +217,23 @@ class MemoryPersistence:
 
     async def get_worker_snapshot(self, conversation_id: UUID) -> ConversationState:
         try:
-            return self.states[conversation_id]
+            state = self.states[conversation_id]
         except KeyError as exc:
             raise DomainError(
                 ErrorCode.INVALID_STATE,
                 "conversation not found",
                 details={"conversation_id": str(conversation_id)},
             ) from exc
+        # Overlay the durable command store over the aggregate's copies,
+        # matching the django backend's row overlay.
+        overlay = {
+            command_id: self.commands[command_id]
+            for command_id in state.commands
+            if command_id in self.commands
+        }
+        if overlay:
+            state = state.model_copy(update={"commands": {**state.commands, **overlay}})
+        return state
 
     async def save_snapshot(self, state: ConversationState) -> ConversationState:
         self.states[state.conversation.id] = state
@@ -271,6 +282,7 @@ class MemoryPersistence:
             if command.status == CommandStatus.CLAIMED
             and command.lease_expires_at is not None
             and command.lease_expires_at < now
+            and command.delivery_started_at is None
             and command.id not in self.accepted_queue
         )
         for command_id in candidates:
@@ -284,6 +296,7 @@ class MemoryPersistence:
                     command.status == CommandStatus.CLAIMED
                     and command.lease_expires_at is not None
                     and command.lease_expires_at < now
+                    and command.delivery_started_at is None
                 )
             ):
                 continue
@@ -339,10 +352,12 @@ class MemoryPersistence:
     ) -> Command:
         if worker_id is not None or fence is not None:
             self._require_owner(command.conversation_id, worker_id, fence)
-        self.commands[command.id] = command
-        if command.status == CommandStatus.ACCEPTED and command.id not in self.accepted_queue:
-            self.accepted_queue.append(command.id)
-        return command
+        stored = self.commands.get(command.id)
+        merged = command if stored is None else merge_command_progress(stored, command)
+        self.commands[command.id] = merged
+        if merged.status == CommandStatus.ACCEPTED and merged.id not in self.accepted_queue:
+            self.accepted_queue.append(merged.id)
+        return merged
 
     async def commit_event_batch(
         self,
@@ -386,9 +401,11 @@ class MemoryPersistence:
             fence=fence,
         )
         for command in commands:
-            self.commands[command.id] = command
-            if command.status == CommandStatus.ACCEPTED and command.id not in self.accepted_queue:
-                self.accepted_queue.append(command.id)
+            stored = self.commands.get(command.id)
+            merged = command if stored is None else merge_command_progress(stored, command)
+            self.commands[command.id] = merged
+            if merged.status == CommandStatus.ACCEPTED and merged.id not in self.accepted_queue:
+                self.accepted_queue.append(merged.id)
         return committed
 
     async def commit_runtime_lifecycle(

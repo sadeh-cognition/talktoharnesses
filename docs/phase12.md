@@ -89,7 +89,7 @@ redefining them:
    required by advertised capabilities, fix the defect in its existing seam or keep
    its matrix empty and leave the stable release blocked for that adapter.
 5. Regenerate `SUPPORTED_HARNESSES.md` and confirm
-   `python -m talktoharnesses.providers.render_supported --check` is clean.
+   `uv run python scripts/render_supported.py --check` is clean.
 6. Confirm `bash scripts/ci/stable_cut_checklist.sh` reports non-empty create and
    resume matrices for all five adapters.
 
@@ -116,7 +116,7 @@ After Work Packages 1 and 2 are green on `2026.8.0.dev9`:
 3. Remove provisional “implementation target only” notes that no longer describe
    published rows.
 4. Run stable compatibility validation
-   (`python -m talktoharnesses.providers.render_supported --validate stable --check`).
+   (`uv run python scripts/render_supported.py --validate stable --check`).
 5. Run the full CI topology, artifact install matrix, performance gates, and both
    definition-of-done journeys from the built wheel.
 6. Merge the stable-version commit without further code changes, then create the

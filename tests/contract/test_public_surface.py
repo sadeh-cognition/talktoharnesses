@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-import importlib
 import os
 import subprocess
 import sys
-
-import pytest
 
 APPROVED: dict[str, frozenset[str]] = {
     "talktoharnesses": frozenset({"__version__"}),
@@ -38,34 +35,22 @@ APPROVED: dict[str, frozenset[str]] = {
             "StartSessionRequest",
             "SteerRequest",
             "TurnRequest",
-            "build_default_adapter_registry",
         }
     ),
     "talktoharnesses.runtime": frozenset(
         {
-            "STDERR_RETENTION_BYTES",
             "ManagedRuntime",
             "ProcessEvent",
             "ProcessExitedEvent",
             "ProcessForcedTerminationEvent",
-            "ProcessHandle",
             "ProcessSilenceWarningEvent",
-            "ProcessSpec",
             "ProcessStartedEvent",
             "ProcessStderrTruncatedEvent",
-            "ProcessSupervisor",
             "RuntimeManager",
             "RuntimePolicy",
         }
     ),
     "talktoharnesses.django": frozenset({"DjangoPersistence"}),
-    "talktoharnesses.providers.grok": frozenset({"GrokAdapter"}),
-    "talktoharnesses.providers.cursor": frozenset({"CursorAdapter"}),
-    "talktoharnesses.providers.codex": frozenset({"CodexAdapter"}),
-    "talktoharnesses.providers.claude": frozenset({"ClaudeAdapter"}),
-    "talktoharnesses.providers.opencode": frozenset({"OpenCodeAdapter"}),
-    "talktoharnesses.providers.prime_agent": frozenset({"PrimeAgentAdapter"}),
-    "talktoharnesses.providers.acp": frozenset(),
     "talktoharnesses.domain": frozenset(
         {
             "ActivityProjection",
@@ -227,85 +212,6 @@ APPROVED: dict[str, frozenset[str]] = {
     ),
 }
 
-IMPLEMENTATION_ONLY = {
-    "talktoharnesses.providers.grok": frozenset(
-        {
-            "GrokCompatibilityDoc",
-            "GrokReleaseRecord",
-            "load_grok_compatibility",
-            "match_release",
-            "render_supported_harnesses_markdown",
-        }
-    ),
-    "talktoharnesses.providers.cursor": frozenset(
-        {
-            "CursorCompatibilityDoc",
-            "CursorReleaseRecord",
-            "load_cursor_compatibility",
-            "match_release",
-        }
-    ),
-    "talktoharnesses.providers.codex": frozenset(
-        {
-            "CodexCompatibilityDoc",
-            "CodexReleaseRecord",
-            "load_codex_compatibility",
-            "match_release",
-        }
-    ),
-    "talktoharnesses.providers.claude": frozenset(
-        {
-            "ClaudeCompatibilityDoc",
-            "ClaudeReleaseRecord",
-            "load_claude_compatibility",
-            "match_release",
-        }
-    ),
-    "talktoharnesses.providers.opencode": frozenset(
-        {
-            "OpenCodeCompatibilityDoc",
-            "OpenCodeReleaseRecord",
-            "load_opencode_compatibility",
-            "match_release",
-        }
-    ),
-    "talktoharnesses.providers.prime_agent": frozenset(
-        {
-            "PrimeAgentCompatibilityDoc",
-            "PrimeAgentReleaseRecord",
-            "load_prime_agent_compatibility",
-            "match_release",
-        }
-    ),
-    "talktoharnesses.providers.acp": frozenset(
-        {
-            "AcpConnection",
-            "Delivered",
-            "JsonRpcError",
-            "JsonRpcErrorResponse",
-            "JsonRpcNotification",
-            "JsonRpcRequest",
-            "JsonRpcSuccessResponse",
-        }
-    ),
-}
-
-
-@pytest.mark.parametrize("module_name", sorted(APPROVED))
-def test_approved_all_resolves(module_name: str) -> None:
-    module = importlib.import_module(module_name)
-    assert frozenset(module.__all__) == APPROVED[module_name]
-    for name in module.__all__:
-        assert hasattr(module, name), name
-        assert getattr(module, name) is not None
-
-
-@pytest.mark.parametrize("module_name", sorted(IMPLEMENTATION_ONLY))
-def test_implementation_names_absent_from_all(module_name: str) -> None:
-    module = importlib.import_module(module_name)
-    exported = frozenset(module.__all__)
-    leaked = IMPLEMENTATION_ONLY[module_name] & exported
-    assert not leaked, sorted(leaked)
 
 
 def test_core_public_imports_in_fresh_interpreter() -> None:

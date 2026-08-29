@@ -11,12 +11,13 @@ tags:
   - type/map
   - audience/product
   - audience/developer
-last_verified: 2026-08-21
+last_verified: 2026-08-29
+verified_against_commit: 47644027875773ba520cbfdd9f978d196a548802
 ---
 
 # TalkToHarnesses Knowledge Base
 
-TalkToHarnesses (TTH) is a unified coding-agent harness interface for [library embedders, Django hosts, and remote HTTP clients](wiki/concepts/target-users.md).
+TalkToHarnesses (TTH) is a proxy and unified coding-agent harness interface for [library embedders, Django hosts, and remote HTTP clients](wiki/concepts/target-users.md). Provider execution lives in per-kind split services.
 
 This vault connects public contracts to architecture, implementation, and tests. Begin with the view that matches your question:
 

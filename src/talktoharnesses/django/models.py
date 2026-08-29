@@ -431,6 +431,30 @@ class RetentionPolicyRecord(models.Model):
         ]
 
 
+class SandboxRecord(models.Model):
+    """One Docker split sandbox the proxy has spawned and tracks."""
+
+    kind: models.CharField[str, str] = models.CharField(
+        max_length=32, primary_key=True, editable=False
+    )
+    container_name: models.CharField[str, str] = models.CharField(max_length=128)
+    image: models.CharField[str, str] = models.CharField(max_length=255)
+    host_port: models.PositiveIntegerField[int, int] = models.PositiveIntegerField()
+    base_url: models.CharField[str, str] = models.CharField(max_length=255)
+    # Loopback-only trust domain: the token guards 127.0.0.1 traffic between
+    # proxy and container and is stored in the clear.
+    split_token: models.CharField[str, str] = models.CharField(max_length=128)
+    status: models.CharField[str, str] = models.CharField(max_length=16, default="preparing")
+    created_at: models.DateTimeField[datetime, datetime] = models.DateTimeField()
+    updated_at: models.DateTimeField[datetime, datetime] = models.DateTimeField()
+    last_ready_at: models.DateTimeField[datetime | None, datetime | None] = models.DateTimeField(
+        null=True, blank=True
+    )
+
+    class Meta:
+        db_table = "talktoharnesses_sandbox"
+
+
 class ApiToken(models.Model):
     """One active HS256 bearer token per Django user (stores sha256(jti) only)."""
 

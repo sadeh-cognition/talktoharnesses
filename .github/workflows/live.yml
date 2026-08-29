@@ -12,6 +12,9 @@ env:
   UV_VERSION: "0.12.3"
   PYTHON_VERSION: "3.11"
 
+# Each job runs the kind's Docker sandbox gate: the runner needs Docker and
+# the provider's auth file in the runner user's HOME. The image is pre-built
+# so pytest timeouts are not spent on the build.
 jobs:
   live-grok:
     name: Live Grok
@@ -26,11 +29,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-      - run: uv sync --locked --extra django --extra client --extra grok
+      - run: uv sync --locked --extra django --extra client
+      - name: Build sandbox image
+        run: ./deploy/build-splits.sh latest grok
       - name: Create/resume gate
         env:
-          TALKTOHARNESSES_LIVE_GROK: "1"
-        run: uv run pytest tests/live/test_grok_live.py -q --tb=short
+          TALKTOHARNESSES_LIVE_GROK_SANDBOX: "1"
+        run: uv run pytest tests/live/test_grok_sandbox_live.py -q --tb=short
 
   live-cursor:
     name: Live Cursor
@@ -45,11 +50,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-      - run: uv sync --locked --extra django --extra client --extra cursor
+      - run: uv sync --locked --extra django --extra client
+      - name: Build sandbox image
+        run: ./deploy/build-splits.sh latest cursor
       - name: Create/resume gate
         env:
-          TALKTOHARNESSES_LIVE_CURSOR: "1"
-        run: uv run pytest tests/live/test_cursor_live.py -q --tb=short
+          TALKTOHARNESSES_LIVE_CURSOR_SANDBOX: "1"
+        run: uv run pytest tests/live/test_cursor_sandbox_live.py -q --tb=short
 
   live-codex:
     name: Live Codex
@@ -64,11 +71,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-      - run: uv sync --locked --extra django --extra client --extra codex
+      - run: uv sync --locked --extra django --extra client
+      - name: Build sandbox image
+        run: ./deploy/build-splits.sh latest codex
       - name: Create/resume gate
         env:
-          TALKTOHARNESSES_LIVE_CODEX: "1"
-        run: uv run pytest tests/live/test_codex_live.py -q --tb=short
+          TALKTOHARNESSES_LIVE_CODEX_SANDBOX: "1"
+        run: uv run pytest tests/live/test_codex_sandbox_live.py -q --tb=short
 
   live-claude:
     name: Live Claude
@@ -83,11 +92,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-      - run: uv sync --locked --extra django --extra client --extra claude
+      - run: uv sync --locked --extra django --extra client
+      - name: Build sandbox image
+        run: ./deploy/build-splits.sh latest claude
       - name: Create/resume gate
         env:
-          TALKTOHARNESSES_LIVE_CLAUDE: "1"
-        run: uv run pytest tests/live/test_claude_live.py -q --tb=short
+          TALKTOHARNESSES_LIVE_CLAUDE_SANDBOX: "1"
+        run: uv run pytest tests/live/test_claude_sandbox_live.py -q --tb=short
 
   live-opencode:
     name: Live OpenCode
@@ -102,11 +113,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-      - run: uv sync --locked --extra django --extra client --extra opencode
+      - run: uv sync --locked --extra django --extra client
+      - name: Build sandbox image
+        run: ./deploy/build-splits.sh latest opencode
       - name: Create/resume gate
         env:
-          TALKTOHARNESSES_LIVE_OPENCODE: "1"
-        run: uv run pytest tests/live/test_opencode_live.py -q --tb=short
+          TALKTOHARNESSES_LIVE_OPENCODE_SANDBOX: "1"
+        run: uv run pytest tests/live/test_opencode_sandbox_live.py -q --tb=short
 
   live-prime-agent:
     name: Live Prime Agent
@@ -121,8 +134,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-      - run: uv sync --locked --extra django --extra client --extra prime-agent
+      - run: uv sync --locked --extra django --extra client
+      - name: Build sandbox image
+        run: ./deploy/build-splits.sh latest prime-agent
       - name: Create/resume gate
         env:
-          TALKTOHARNESSES_LIVE_PRIME_AGENT: "1"
-        run: uv run pytest tests/live/test_prime_agent_live.py -q --tb=short
+          TALKTOHARNESSES_LIVE_PRIME_AGENT_SANDBOX: "1"
+        run: uv run pytest tests/live/test_prime_agent_sandbox_live.py -q --tb=short

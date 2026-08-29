@@ -6,15 +6,15 @@ import asyncio
 import contextlib
 import logging
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import datetime, timedelta
 from uuid import UUID
 
 from talktoharnesses.application.persistence import Persistence
-from talktoharnesses.domain.enums import ErrorCode
+from talktoharnesses.domain.enums import ErrorCode, HarnessKind
 from talktoharnesses.domain.errors import DomainError
 from talktoharnesses.domain.models import HarnessProjection
-from talktoharnesses.providers.registry import AdapterRegistry
+from talktoharnesses.providers.registry import AdapterRegistry, release_probe_adapter
 
 logger = logging.getLogger(__name__)
 
@@ -31,10 +31,15 @@ class ReadinessProbeMonitor:
         persistence: Persistence,
         registry: AdapterRegistry,
         clock: Callable[[], datetime],
+        *,
+        spawn_gate: Callable[[HarnessKind], Awaitable[bool]] | None = None,
     ) -> None:
         self._persistence = persistence
         self._registry = registry
         self._clock = clock
+        # Background probing must never create containers or build images;
+        # the gate skips kinds whose sandbox is not already running.
+        self._spawn_gate = spawn_gate
         self._fresh_until: datetime | None = None
         self._successful_harness_id: UUID | None = None
         self._task: asyncio.Task[None] | None = None
@@ -149,7 +154,14 @@ class ReadinessProbeMonitor:
         return False
 
     async def _probe_one(self, harness: HarnessProjection) -> bool:
+        adapter = None
         try:
+            if self._spawn_gate is not None and not await self._spawn_gate(harness.kind):
+                logger.debug(
+                    "readiness probe skipped kind=%s: sandbox not running",
+                    harness.kind.value,
+                )
+                return False
             adapter = self._registry.create(harness.kind)
             capabilities = await adapter.probe(harness.configuration)
             probed_at = self._clock()
@@ -170,3 +182,6 @@ class ReadinessProbeMonitor:
                 ErrorCode.PROVIDER_INCOMPATIBLE.value,
             )
             return False
+        finally:
+            if adapter is not None:
+                await release_probe_adapter(adapter)

@@ -20,7 +20,10 @@ from talktoharnesses.application.event_dispatcher import (
 from talktoharnesses.application.faults import FaultCallback, FaultPoint, checkpoint
 from talktoharnesses.application.handoff import render_handoff
 from talktoharnesses.application.observability import get_observability
-from talktoharnesses.application.persistence import Persistence
+from talktoharnesses.application.persistence import (
+    TERMINAL_COMMAND_STATUSES,
+    Persistence,
+)
 from talktoharnesses.application.publisher import CommittedEventPublisher
 from talktoharnesses.domain.enums import ActivityStatus, CommandKind, CommandStatus, ErrorCode
 from talktoharnesses.domain.errors import DomainError, public_message
@@ -42,8 +45,10 @@ from talktoharnesses.domain.models import (
 from talktoharnesses.domain.transitions import (
     ConversationState,
     apply_steer,
+    cancel_queued_prompt,
     commit_switch,
     fail_switch,
+    fail_turn,
     start_turn,
 )
 from talktoharnesses.providers.adapter import (
@@ -56,6 +61,17 @@ from talktoharnesses.providers.adapter import (
 from talktoharnesses.runtime.manager import ManagedRuntime, RuntimeManager
 
 logger = logging.getLogger(__name__)
+
+# Sandbox failures a lease-expiry retry can never fix: the path will still not
+# be mounted and the image/CLI will still be broken. SANDBOX_PREPARING is
+# deliberately absent — leaving the command claimed and retrying is correct
+# while a prepare is in flight.
+_PERMANENT_SANDBOX_ERRORS = frozenset(
+    {
+        ErrorCode.SANDBOX_PATH_NOT_MOUNTED,
+        ErrorCode.SANDBOX_UNAVAILABLE,
+    }
+)
 
 
 class _FenceCommitKwargs(TypedDict, total=False):
@@ -119,7 +135,7 @@ class CommandProcessor:
         self._claims_enabled = True
         self._fences: dict[UUID, int] = {}
         self._claim_task: asyncio.Task[None] | None = None
-        self._command_tasks: set[asyncio.Task[None]] = set()
+        self._command_tasks: dict[UUID, asyncio.Task[None]] = {}
         self._conv_locks: dict[UUID, asyncio.Lock] = {}
         self._pumps: dict[UUID, asyncio.Task[None]] = {}
         self._batchers: dict[UUID, DeltaBatcher] = {}
@@ -151,10 +167,10 @@ class CommandProcessor:
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await self._claim_task
             self._claim_task = None
-        for task in list(self._command_tasks):
+        for task in list(self._command_tasks.values()):
             task.cancel()
         if self._command_tasks:
-            await asyncio.gather(*self._command_tasks, return_exceptions=True)
+            await asyncio.gather(*self._command_tasks.values(), return_exceptions=True)
         self._command_tasks.clear()
         for task in list(self._pumps.values()):
             task.cancel()
@@ -210,14 +226,31 @@ class CommandProcessor:
                     )
                     for claimed_command in claimed:
                         command = claimed_command.command
+                        existing = self._command_tasks.get(command.id)
+                        if existing is not None and not existing.done():
+                            # The claim query re-claims expired-lease commands;
+                            # when the lease lapsed under our own still-running
+                            # delivery (e.g. a slow sandbox cold start), a
+                            # second task would redeliver the same command.
+                            logger.warning(
+                                "re-claimed own in-flight command %s; skipping duplicate task",
+                                command.id,
+                            )
+                            continue
                         self.set_fence(command.conversation_id, claimed_command.fence)
                         await checkpoint(self._fault_callback, FaultPoint.AFTER_CLAIM_COMMIT)
                         task = asyncio.create_task(
                             self._handle_command(command),
                             name=f"cmd-{command.id}",
                         )
-                        self._command_tasks.add(task)
-                        task.add_done_callback(self._command_tasks.discard)
+                        self._command_tasks[command.id] = task
+                        task.add_done_callback(
+                            lambda done, command_id=command.id: (
+                                self._command_tasks.pop(command_id, None)
+                                if self._command_tasks.get(command_id) is done
+                                else None
+                            )
+                        )
             except Exception:
                 logger.exception("command claim failed")
             await asyncio.sleep(self._poll_interval)
@@ -235,6 +268,14 @@ class CommandProcessor:
                     command.conversation_id,
                     command.id,
                 )
+                if exc.code in _PERMANENT_SANDBOX_ERRORS:
+                    try:
+                        await self._fail_undeliverable_command(command, exc)
+                    except Exception:
+                        logger.exception(
+                            "failed to settle undeliverable command %s",
+                            command.id,
+                        )
             except Exception:
                 logger.exception(
                     "command execution failed conversation=%s command=%s",
@@ -254,12 +295,59 @@ class CommandProcessor:
         state = await self._persistence.get_worker_snapshot(command.conversation_id)
         now = self._clock()
 
+        # Guard against duplicate delivery: the durable row (overlaid onto the
+        # snapshot) may show another delivery of this command already made it
+        # to, or past, the adapter call. Re-submitting risks a duplicate
+        # native turn, which under ACP cancels the in-flight one.
+        durable = state.commands.get(command.id)
+        if durable is not None:
+            if durable.status in TERMINAL_COMMAND_STATUSES:
+                logger.info(
+                    "skipping already-resolved command %s (status=%s)",
+                    command.id,
+                    durable.status.value,
+                )
+                return
+            if durable.status is CommandStatus.DELIVERED:
+                logger.warning(
+                    "command %s already delivered; not redelivering",
+                    command.id,
+                )
+                self._ensure_pump(command.conversation_id)
+                return
+            if durable.delivery_started_at is not None:
+                # A previous delivery reached the adapter call and its outcome
+                # is unknown; fence the command rather than guess.
+                logger.warning(
+                    "command %s has an ambiguous prior delivery; marking outcome unknown",
+                    command.id,
+                )
+                unknown = durable.model_copy(
+                    update={
+                        "status": CommandStatus.OUTCOME_UNKNOWN,
+                        "worker_id": None,
+                        "lease_expires_at": None,
+                    }
+                )
+                await self._persistence.update_command(
+                    unknown,
+                    **self._fence_kwargs(command.conversation_id),
+                )
+                get_observability().record_command(
+                    kind=command.kind,
+                    outcome=CommandStatus.OUTCOME_UNKNOWN.value,
+                )
+                self._ensure_pump(command.conversation_id)
+                return
+
         # The aggregate command projection predates this worker's durable claim.
         # Carry the claimed row forward so later projection writes retain its
-        # owner, lease, and attempt metadata.
-        commands = dict(state.commands)
-        commands[command.id] = command
-        state = state.model_copy(update={"commands": commands})
+        # owner, lease, and attempt metadata. The overlaid row copy, when
+        # present, is at least as fresh as the claim-time copy.
+        if command.id not in state.commands:
+            commands = dict(state.commands)
+            commands[command.id] = command
+            state = state.model_copy(update={"commands": commands})
 
         # Switching replaces the binding, so it must never resume the old one first.
         if command.kind == CommandKind.SWITCH_HARNESS:
@@ -267,11 +355,18 @@ class CommandProcessor:
             return
 
         if await self._runtime.ensure_binding_current(command.conversation_id, state) is None:
-            await self._ensure_runtime(state)
+            # A cold sandbox start can outlive the claim lease; keep it
+            # renewed so the claim loop cannot hand this command out again.
+            lease_task = self._spawn_lease_keepalive(command)
+            try:
+                await self._ensure_runtime(state)
+            finally:
+                await self._cancel_lease_keepalive(lease_task)
             state = await self._persistence.get_worker_snapshot(command.conversation_id)
-            commands = dict(state.commands)
-            commands[command.id] = command
-            state = state.model_copy(update={"commands": commands})
+            if command.id not in state.commands:
+                commands = dict(state.commands)
+                commands[command.id] = command
+                state = state.model_copy(update={"commands": commands})
 
         managed = self._runtime.get_runtime(command.conversation_id)
         if managed is None:
@@ -574,31 +669,9 @@ class CommandProcessor:
         binding_id = uuid4()
         quiesced = False
         lease_task: asyncio.Task[None] | None = None
-        parent_task = asyncio.current_task()
-
-        async def renew_lease() -> None:
-            assert self._worker_id is not None
-            while True:
-                await self._persistence.renew_command_lease(
-                    command.id,
-                    self._worker_id,
-                    lease_duration=self._lease_seconds,
-                    fence=self._fences.get(conversation_id),
-                )
-                await asyncio.sleep(max(0.01, self._lease_seconds / 3))
-
-        def stop_on_lost_lease(task: asyncio.Task[None]) -> None:
-            if not task.cancelled() and task.exception() is not None and parent_task is not None:
-                logger.warning("switch command lease renewal failed command=%s", command.id)
-                parent_task.cancel()
 
         try:
-            if self._worker_id is not None:
-                lease_task = asyncio.create_task(
-                    renew_lease(),
-                    name=f"switch-lease-{command.id}",
-                )
-                lease_task.add_done_callback(stop_on_lost_lease)
+            lease_task = self._spawn_lease_keepalive(command)
 
             now = self._clock()
             state, started_cmd = mark_command_delivery_started(state, command.id, now=now)
@@ -644,8 +717,7 @@ class CommandProcessor:
             quiesced = True
 
             if lease_task is not None:
-                lease_task.cancel()
-                await asyncio.gather(lease_task, return_exceptions=True)
+                await self._cancel_lease_keepalive(lease_task)
                 lease_task = None
                 assert self._worker_id is not None
                 await self._persistence.renew_command_lease(
@@ -697,19 +769,15 @@ class CommandProcessor:
                 self._ensure_pump(conversation_id)
             raise
         except Exception as exc:
-            if lease_task is not None:
-                lease_task.cancel()
-                await asyncio.gather(lease_task, return_exceptions=True)
-                lease_task = None
+            await self._cancel_lease_keepalive(lease_task)
+            lease_task = None
             await self._runtime.close_candidate(binding_id)
             if quiesced:
                 self._ensure_pump(conversation_id)
             await self._fail_switch(command, exc)
             return
         finally:
-            if lease_task is not None:
-                lease_task.cancel()
-                await asyncio.gather(lease_task, return_exceptions=True)
+            await self._cancel_lease_keepalive(lease_task)
 
         await self._safe_publish(committed, state=result.state)
         previous = self._runtime.get_runtime(conversation_id)
@@ -752,6 +820,44 @@ class CommandProcessor:
             **self._fence_kwargs(command.conversation_id),
         )
         await self._safe_publish(committed, state=result.state)
+
+    async def _fail_undeliverable_command(self, command: Command, exc: DomainError) -> None:
+        """Settle a command whose runtime can never start.
+
+        Left CLAIMED, the command would be reclaimed after every lease expiry
+        and retried forever against the same permanent sandbox failure; the
+        session-failure event is already persisted by the runtime manager, so
+        only the command (and any turn it carries) still needs resolving.
+        """
+        state = await self._persistence.get_worker_snapshot(command.conversation_id)
+        base_version = state.conversation.version
+        now = self._clock()
+        events: Sequence[ConversationEvent] = ()
+        if state.active_turn is not None and state.active_turn.command_id == command.id:
+            result = fail_turn(
+                state,
+                now=now,
+                error_code=exc.code.value,
+                message=public_message(exc.code),
+            )
+            state, events = result.state, result.events
+        elif state.queued_turn is not None and state.queued_turn.command_id == command.id:
+            result = cancel_queued_prompt(state, now=now)
+            state, events = result.state, result.events
+        settled = self._settled(state.commands.get(command.id, command), now=now)
+        commands = dict(state.commands)
+        commands[settled.id] = settled
+        state = state.model_copy(update={"commands": commands})
+        get_observability().record_command(kind=command.kind, outcome="failed")
+        committed = await self._persistence.commit_turn_batch(
+            command.conversation_id,
+            base_version,
+            state,
+            events,
+            (settled,),
+            **self._fence_kwargs(command.conversation_id),
+        )
+        await self._safe_publish(committed, state=state)
 
     def _settled(self, command: Command, *, now: datetime) -> Command:
         return command.model_copy(
@@ -808,7 +914,6 @@ class CommandProcessor:
                 owner_id=state.conversation.owner_id,
                 configuration=config,
                 native_session_id=native,
-                argv=(),
                 **self._fence_kwargs(state.conversation.id),
             )
         else:
@@ -816,7 +921,6 @@ class CommandProcessor:
                 conversation_id=state.conversation.id,
                 owner_id=state.conversation.owner_id,
                 configuration=config,
-                argv=(),
                 **self._fence_kwargs(state.conversation.id),
             )
 
@@ -1167,6 +1271,43 @@ class CommandProcessor:
                 lease_duration=self._lease_seconds,
                 fence=self._fences.get(command.conversation_id),
             )
+
+    def _spawn_lease_keepalive(self, command: Command) -> asyncio.Task[None] | None:
+        """Renew the command lease periodically while a long delivery step runs.
+
+        A renewal failure cancels the calling task: the lease is lost, so
+        continuing the delivery risks running alongside a new claimant.
+        """
+        if self._worker_id is None:
+            return None
+        worker_id = self._worker_id
+        conversation_id = command.conversation_id
+        parent_task = asyncio.current_task()
+
+        async def renew_loop() -> None:
+            while True:
+                await self._persistence.renew_command_lease(
+                    command.id,
+                    worker_id,
+                    lease_duration=self._lease_seconds,
+                    fence=self._fences.get(conversation_id),
+                )
+                await asyncio.sleep(max(0.01, self._lease_seconds / 3))
+
+        def stop_on_lost_lease(task: asyncio.Task[None]) -> None:
+            if not task.cancelled() and task.exception() is not None and parent_task is not None:
+                logger.warning("command lease renewal failed command=%s", command.id)
+                parent_task.cancel()
+
+        lease_task = asyncio.create_task(renew_loop(), name=f"lease-{command.id}")
+        lease_task.add_done_callback(stop_on_lost_lease)
+        return lease_task
+
+    async def _cancel_lease_keepalive(self, lease_task: asyncio.Task[None] | None) -> None:
+        if lease_task is None:
+            return
+        lease_task.cancel()
+        await asyncio.gather(lease_task, return_exceptions=True)
 
     async def _safe_publish(
         self,

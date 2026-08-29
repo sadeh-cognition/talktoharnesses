@@ -17,7 +17,7 @@ ci_static() {
   uv run ruff format --check .
   uv run pyright
   uv run pytest tests/test_migration_drift.py -q --tb=short
-  uv run python -m talktoharnesses.providers.render_supported --validate development --check
+  uv run python scripts/render_supported.py --check
 }
 
 ci_coverage() {
@@ -36,9 +36,11 @@ ci_coverage() {
 }
 
 ci_providers() {
+  # Harness providers live in the top-level tth-<kind> split projects; this gate keeps
+  # the proxy-side adapter/remote contract suites.
   uv run pytest \
     tests/contract \
-    tests/unit/providers \
+    tests/unit/remote \
     -q --tb=short
 }
 
@@ -56,7 +58,6 @@ ci_postgres() {
     tests/unit/application/test_worker_coordinator.py \
     tests/unit/domain/test_interaction_answers.py \
     tests/unit/domain/test_approval_matching.py \
-    tests/unit/providers/grok/test_permission_fixtures.py \
     -q --tb=short
 }
 
@@ -80,7 +81,7 @@ ci_stable_gate() {
   uv run ruff format --check .
   uv run pyright
   uv run pytest tests/test_migration_drift.py -q --tb=short
-  uv run python -m talktoharnesses.providers.render_supported --validate stable --check
+  uv run python scripts/render_supported.py --validate stable --check
   ci_coverage --cov-fail-under=91
   ci_providers
   ci_performance

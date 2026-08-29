@@ -10,8 +10,8 @@ tags:
   - capability/http
   - capability/conversations
   - status/implemented
-last_verified: 2026-08-21
-verified_against_commit: 7cb2e2c82909ebe01fc3eb68220d7764adab64bd
+last_verified: 2026-08-30
+verified_against_commit: 2920f5820783245bd5b871e61edd44642ebfe56a
 ---
 
 # Host Django and Run a Conversation
@@ -20,7 +20,7 @@ This journey traces host composition through token issuance, harness probe, conv
 
 ## 1. Compose the host
 
-The host adds `talktoharnesses.django`, sets `TALKTOHARNESSES_JWT_SIGNING_KEY`, includes `/api/v1/`, wraps ASGI with `talktoharnesses_lifespan`, and runs migrations. Requirement: [Host Django ASGI with readiness](../requirements/host-django-asgi-with-readiness.md).
+The host adds `talktoharnesses.django`, sets `TALKTOHARNESSES_JWT_SIGNING_KEY`, includes `/api/v1/`, wraps ASGI with `talktoharnesses_lifespan`, and runs migrations; harness kinds need no enablement configuration because the proxy spawns each kind's managed Docker sandbox on demand. Requirement: [Host Django ASGI with readiness](../requirements/host-django-asgi-with-readiness.md).
 
 ## 2. Authenticate
 
@@ -31,7 +31,7 @@ admin-issued token appears only on the immediate result page. Clients send
 
 ## 3. Create and probe a harness
 
-The client creates a harness with kind and working directory, then probes. Models and modes come from the live CLI. Requirement: [Probe and configure harnesses](../requirements/probe-and-configure-harnesses.md).
+The client creates a harness with kind and working directory, then probes. The proxy calls the configured split, which reports models and modes from its live CLI or SDK. Requirement: [Probe and configure harnesses](../requirements/probe-and-configure-harnesses.md).
 
 ## 4. Create a conversation and submit a turn
 

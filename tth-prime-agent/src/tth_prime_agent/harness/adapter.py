@@ -1,0 +1,476 @@
+"""Prime Agent HarnessAdapter over its JSONL RPC mode."""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import json
+from collections.abc import AsyncIterator
+from dataclasses import dataclass
+from typing import Any, Literal, cast
+from uuid import UUID, uuid4
+
+from tth_types.adapter import (
+    HarnessInteractionRequest,
+    HarnessSession,
+    ResumeSessionRequest,
+    StartSessionRequest,
+    SteerRequest,
+    TurnRequest,
+)
+from tth_types.enums import ErrorCode, HarnessKind
+from tth_types.errors import DomainError
+from tth_types.events import HarnessEvent, InteractionRequestedPayload
+from tth_types.harness import (
+    CanonicalQuestion,
+    HarnessCapabilities,
+    HarnessConfiguration,
+    InteractionAnswer,
+)
+
+from tth_prime_agent.acp.framing import FrameDecodeError, iter_json_frames
+from tth_prime_agent.harness.argv import build_prime_agent_argv
+from tth_prime_agent.harness.compatibility import (
+    PrimeAgentReleaseRecord,
+    enforce_published_operation,
+)
+from tth_prime_agent.harness.normalizer import PrimeAgentNormalizer
+from tth_prime_agent.harness.probe import probe_prime_agent
+from tth_prime_agent.runtime.handle import ProcessHandle
+from tth_prime_agent.shared.questions import canonical_answer_values, canonical_questions
+
+
+def _mapping(value: object) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    return {str(key): item for key, item in cast(dict[object, object], value).items()}
+
+
+_HOST_QUESTION = "talktoharnesses/structured-question"
+_HOST_ANSWER = "talktoharnesses/structured-answer"
+
+_PROMPT_BUSY_TIMEOUT = 30.0
+_PROMPT_BUSY_POLL_INTERVAL = 1.0
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingExtensionUi:
+    request_id: str
+    method: str
+    questions: tuple[CanonicalQuestion, ...]
+    response_values: dict[str, str]
+    structured: bool = False
+
+
+class PrimeAgentAdapter:
+    """One supervised Prime Agent RPC client per conversation runtime."""
+
+    kind: HarnessKind = HarnessKind.PRIME_AGENT
+
+    def __init__(self) -> None:
+        self._process: ProcessHandle | None = None
+        self._release: PrimeAgentReleaseRecord | None = None
+        self._normalizer = PrimeAgentNormalizer()
+        self._session: HarnessSession | None = None
+        self._current_model: str | None = None
+        self._event_q: asyncio.Queue[HarnessEvent | HarnessInteractionRequest | None] = (
+            asyncio.Queue()
+        )
+        self._pending: dict[str, asyncio.Future[dict[str, Any]]] = {}
+        self._pending_interactions: dict[UUID, _PendingExtensionUi] = {}
+        self._router_task: asyncio.Task[None] | None = None
+        self._write_lock = asyncio.Lock()
+        self._closed = False
+
+    def bind_process(self, process: ProcessHandle) -> None:
+        self._process = process
+
+    def set_redaction_patterns(self, patterns: tuple[str, ...]) -> None:
+        self._normalizer.set_redaction_patterns(patterns)
+
+    def build_argv(self, config: HarnessConfiguration) -> tuple[str, ...]:
+        if config.mode is not None:
+            raise DomainError(
+                ErrorCode.PROVIDER_INCOMPATIBLE,
+                "Prime Agent mode no longer represents thinking; recreate the harness with effort",
+                details={"mode": config.mode},
+            )
+        return build_prime_agent_argv(model=config.model, effort=config.effort)
+
+    async def probe(self, config: HarnessConfiguration) -> HarnessCapabilities:
+        capabilities, release = await probe_prime_agent(config)
+        self._release = release
+        return capabilities
+
+    def preflight_operation(self, mode: Literal["create", "resume"]) -> None:
+        if self._release is None:
+            raise DomainError(
+                ErrorCode.INVALID_STATE,
+                "prime agent adapter must be probed before operation",
+            )
+        enforce_published_operation(self._release, mode=mode)
+
+    async def start(self, request: StartSessionRequest) -> HarnessSession:
+        self.preflight_operation("create")
+        state = await self._request("get_state")
+        native_session_id = self._session_file(state)
+        session = HarnessSession(
+            conversation_id=request.conversation_id,
+            binding_id=request.binding_id,
+            kind=HarnessKind.PRIME_AGENT,
+            native_session_id=native_session_id,
+            model=request.configuration.model,
+            mode=request.configuration.mode,
+            effort=request.configuration.effort,
+            metadata={"session_id": str(state.get("sessionId") or "")},
+        )
+        self._session = session
+        self._current_model = session.model
+        return session
+
+    async def resume(self, request: ResumeSessionRequest) -> HarnessSession:
+        self.preflight_operation("resume")
+        await self._request("switch_session", sessionPath=request.native_session_id)
+        state = await self._request("get_state")
+        native_session_id = self._session_file(state)
+        if native_session_id != request.native_session_id:
+            raise DomainError(
+                ErrorCode.PROTOCOL_ERROR,
+                "prime agent resumed a different session",
+                details={"expected": request.native_session_id, "got": native_session_id},
+            )
+        session = HarnessSession(
+            conversation_id=request.conversation_id,
+            binding_id=request.binding_id,
+            kind=HarnessKind.PRIME_AGENT,
+            native_session_id=native_session_id,
+            model=request.configuration.model,
+            mode=request.configuration.mode,
+            effort=request.configuration.effort,
+            metadata={"session_id": str(state.get("sessionId") or "")},
+        )
+        self._session = session
+        self._current_model = session.model
+        return session
+
+    async def submit(self, session: HarnessSession, request: TurnRequest) -> None:
+        self._require_session(session)
+        desired_model = request.model or session.model
+        if desired_model and desired_model != self._current_model:
+            provider, model_id = self._split_model(desired_model)
+            await self._request("set_model", provider=provider, modelId=model_id)
+            self._current_model = desired_model
+        self._normalizer.begin_turn(request.turn_id)
+        try:
+            await self._submit_prompt(request.prompt)
+        except Exception:
+            for event in self._normalizer.on_outcome_unknown("prime agent rejected the prompt"):
+                await self._event_q.put(event)
+            raise
+
+    async def _submit_prompt(self, prompt: str) -> None:
+        # A finished turn can leave the agent transiently busy (e.g. residual
+        # processing after a steered reply); wait it out instead of failing the
+        # new turn, since TTH turns are strictly sequential per conversation.
+        deadline = asyncio.get_running_loop().time() + _PROMPT_BUSY_TIMEOUT
+        while True:
+            try:
+                await self._request("prompt", message=prompt)
+                return
+            except DomainError as exc:
+                busy = "already processing" in str(exc.message)
+                if not busy or asyncio.get_running_loop().time() >= deadline:
+                    raise
+            await asyncio.sleep(_PROMPT_BUSY_POLL_INTERVAL)
+
+    async def steer(self, session: HarnessSession, request: SteerRequest) -> bool:
+        self._require_session(session)
+        if self._release is None or not self._release.capabilities.supports_steer:
+            return False
+        enforce_published_operation(self._release, mode="steer")
+        if not self._normalizer.turn_active:
+            return False
+        await self._request("steer", message=request.prompt)
+        return True
+
+    async def interrupt(self, session: HarnessSession) -> None:
+        self._require_session(session)
+        if self._release is not None and self._release.capabilities.supports_interrupt:
+            enforce_published_operation(self._release, mode="interrupt")
+        for interaction_id, pending in list(self._pending_interactions.items()):
+            await self._write_extension_response(pending.request_id, cancelled=True)
+            del self._pending_interactions[interaction_id]
+        if self._normalizer.turn_active:
+            self._normalizer.note_interrupt_requested()
+            await self._request("abort")
+
+    async def answer_interaction(
+        self,
+        session: HarnessSession,
+        answer: InteractionAnswer,
+    ) -> None:
+        self._require_session(session)
+        pending = self._pending_interactions.get(answer.interaction_id)
+        if pending is None:
+            raise DomainError(
+                ErrorCode.INVALID_STATE,
+                "prime agent has no pending interaction",
+                details={"interaction_id": str(answer.interaction_id)},
+            )
+        values = canonical_answer_values(answer, pending.questions)
+        selected_values = values[pending.questions[0].id]
+        if pending.structured:
+            await self._write_extension_response(
+                pending.request_id,
+                value=json.dumps(
+                    {"type": _HOST_ANSWER, "values": selected_values},
+                    separators=(",", ":"),
+                ),
+            )
+        elif pending.method == "confirm":
+            await self._write_extension_response(
+                pending.request_id,
+                confirmed=selected_values[0] == "yes",
+            )
+        else:
+            await self._write_extension_response(
+                pending.request_id,
+                value=pending.response_values.get(selected_values[0], selected_values[0]),
+            )
+        del self._pending_interactions[answer.interaction_id]
+
+    def events(
+        self,
+        session: HarnessSession,
+    ) -> AsyncIterator[HarnessEvent | HarnessInteractionRequest]:
+        self._require_session(session)
+
+        async def _gen() -> AsyncIterator[HarnessEvent | HarnessInteractionRequest]:
+            while True:
+                item = await self._event_q.get()
+                if item is None:
+                    return
+                yield item
+
+        return _gen()
+
+    async def close(self, session: HarnessSession) -> None:
+        del session
+        if self._closed:
+            return
+        self._closed = True
+        if self._process is not None:
+            close_stdin = getattr(self._process, "close_stdin", None)
+            if callable(close_stdin):
+                result = close_stdin()
+                if asyncio.iscoroutine(result):
+                    await result
+        if self._router_task is not None and self._router_task is not asyncio.current_task():
+            with contextlib.suppress(Exception):
+                await self._router_task
+        self._fail_pending("prime agent adapter closed")
+        with contextlib.suppress(asyncio.QueueFull):
+            self._event_q.put_nowait(None)
+
+    async def _request(self, command: str, **params: object) -> dict[str, Any]:
+        await self._ensure_router()
+        assert self._process is not None
+        request_id = str(uuid4())
+        future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
+        self._pending[request_id] = future
+        frame = json.dumps({"id": request_id, "type": command, **params}, separators=(",", ":"))
+        try:
+            async with self._write_lock:
+                await self._process.write_stdin((frame + "\n").encode("utf-8"))
+            response = await future
+        finally:
+            self._pending.pop(request_id, None)
+        if response.get("success") is not True:
+            raise DomainError(
+                ErrorCode.PROTOCOL_ERROR,
+                f"prime agent {command} failed: {response.get('error') or 'unknown error'}",
+            )
+        return _mapping(response.get("data"))
+
+    async def _ensure_router(self) -> None:
+        if self._process is None:
+            raise DomainError(
+                ErrorCode.INVALID_STATE,
+                "PrimeAgentAdapter has no bound process; RuntimeManager must bind_process first",
+            )
+        if self._router_task is None:
+            self._router_task = asyncio.create_task(self._router_loop(), name="prime-agent-rpc")
+
+    async def _router_loop(self) -> None:
+        assert self._process is not None
+        error_message: str | None = None
+        try:
+            async for frame in iter_json_frames(self._process.stdout()):
+                if frame.get("type") == "response":
+                    request_id = frame.get("id")
+                    pending = self._pending.get(str(request_id))
+                    if pending is None:
+                        raise DomainError(
+                            ErrorCode.PROTOCOL_ERROR,
+                            "prime agent response has unknown request id",
+                        )
+                    if frame.get("command") == "prompt" and frame.get("success") is True:
+                        # Ack in frame order: stream events that follow this
+                        # response belong to the just-accepted turn.
+                        self._normalizer.prompt_accepted()
+                    if not pending.done():
+                        pending.set_result(frame)
+                    continue
+                if frame.get("type") == "extension_ui_request":
+                    await self._handle_extension_ui(frame)
+                    continue
+                for event in self._normalizer.on_event(frame):
+                    await self._event_q.put(event)
+        except asyncio.CancelledError:
+            raise
+        except (FrameDecodeError, DomainError) as exc:
+            error_message = str(exc)
+        except Exception as exc:  # noqa: BLE001
+            error_message = str(exc)
+        finally:
+            if error_message is None and not self._closed:
+                error_message = "prime agent RPC stream closed"
+            if error_message is not None:
+                self._fail_pending(error_message)
+                for event in self._normalizer.on_outcome_unknown(error_message):
+                    await self._event_q.put(event)
+            if not self._closed:
+                await self._event_q.put(None)
+
+    def _fail_pending(self, message: str) -> None:
+        for future in self._pending.values():
+            if not future.done():
+                future.set_exception(DomainError(ErrorCode.PROTOCOL_ERROR, message))
+
+    async def _handle_extension_ui(self, request: dict[str, Any]) -> None:
+        if request.get("method") not in {"select", "confirm", "input", "editor"}:
+            return
+        request_id = request.get("id")
+        if not isinstance(request_id, str) or not request_id:
+            raise DomainError(
+                ErrorCode.PROTOCOL_ERROR,
+                "prime agent extension UI request missing id",
+            )
+        method = str(request["method"])
+        title = str(request.get("title") or request.get("message") or "Question").strip()
+        raw_options: list[dict[str, str]] = []
+        response_values: dict[str, str] = {}
+        structured = False
+        questions: tuple[CanonicalQuestion, ...] | None = None
+        if method == "select":
+            options = request.get("options")
+            if isinstance(options, list):
+                option_items = cast(list[object], options)
+                if len(option_items) == 1:
+                    try:
+                        envelope = _mapping(json.loads(str(option_items[0])))
+                    except json.JSONDecodeError:
+                        envelope = {}
+                    question = envelope.get("question")
+                    if envelope.get("type") == _HOST_QUESTION and isinstance(question, dict):
+                        questions = canonical_questions([_mapping(cast(object, question))])
+                        structured = True
+                for option in option_items:
+                    if structured:
+                        break
+                    native_value = str(option)
+                    try:
+                        decoded = _mapping(json.loads(native_value))
+                    except json.JSONDecodeError:
+                        decoded = {}
+                    if decoded.get("label") and decoded.get("value"):
+                        canonical_option = {
+                            "label": str(decoded["label"]),
+                            "value": str(decoded["value"]),
+                        }
+                        if decoded.get("description"):
+                            canonical_option["description"] = str(decoded["description"])
+                    else:
+                        canonical_option = {"label": native_value, "value": native_value}
+                    raw_options.append(canonical_option)
+                    response_values[canonical_option["value"]] = native_value
+        elif method == "confirm":
+            raw_options = [
+                {"label": "Yes", "value": "yes"},
+                {"label": "No", "value": "no"},
+            ]
+        if questions is None:
+            questions = canonical_questions(
+                [
+                    {
+                        "id": request_id,
+                        "question": str(request.get("message") or title),
+                        "header": title,
+                        "options": raw_options,
+                        "multiSelect": False,
+                    }
+                ]
+            )
+        interaction_id = uuid4()
+        self._pending_interactions[interaction_id] = _PendingExtensionUi(
+            request_id=request_id,
+            method=method,
+            questions=questions,
+            response_values=response_values,
+            structured=structured,
+        )
+        for event in self._normalizer.on_question(
+            questions,
+            interaction_id=interaction_id,
+        ):
+            if isinstance(event, InteractionRequestedPayload):
+                await self._event_q.put(
+                    HarnessInteractionRequest(
+                        payload=event,
+                        provider_correlation={"extension_ui_request_id": request_id},
+                    )
+                )
+            else:
+                await self._event_q.put(event)
+
+    async def _write_extension_response(self, request_id: str, **payload: object) -> None:
+        assert self._process is not None
+        frame = json.dumps(
+            {"type": "extension_ui_response", "id": request_id, **payload},
+            separators=(",", ":"),
+        )
+        async with self._write_lock:
+            await self._process.write_stdin((frame + "\n").encode("utf-8"))
+
+    def _require_session(self, session: HarnessSession) -> None:
+        # Compare by conversation_id like the other splits: the split service
+        # stores a metadata-augmented copy of the session it hands back.
+        if self._session is None or session.conversation_id != self._session.conversation_id:
+            raise DomainError(ErrorCode.INVALID_STATE, "prime agent session is not active")
+
+    @staticmethod
+    def _session_file(state: dict[str, Any]) -> str:
+        session_file = state.get("sessionFile")
+        if not isinstance(session_file, str) or not session_file:
+            raise DomainError(
+                ErrorCode.PROTOCOL_ERROR,
+                "prime agent state missing persisted sessionFile",
+            )
+        return session_file
+
+    @staticmethod
+    def _split_model(model: str) -> tuple[str, str]:
+        if "/" not in model:
+            raise DomainError(
+                ErrorCode.PROVIDER_INCOMPATIBLE,
+                "prime agent per-turn model must be provider/model",
+                details={"model": model},
+            )
+        provider, model_id = model.split("/", 1)
+        if not provider or not model_id:
+            raise DomainError(
+                ErrorCode.PROVIDER_INCOMPATIBLE,
+                "prime agent per-turn model must be provider/model",
+                details={"model": model},
+            )
+        return provider, model_id

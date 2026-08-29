@@ -9,6 +9,7 @@ from typing import Protocol
 from uuid import UUID
 
 from talktoharnesses.application.handoff import HandoffDocument
+from talktoharnesses.domain.enums import CommandStatus
 from talktoharnesses.domain.events import ConversationEvent
 from talktoharnesses.domain.models import (
     ActivityProjection,
@@ -38,6 +39,62 @@ from talktoharnesses.domain.models import (
     TurnProjection,
 )
 from talktoharnesses.domain.transitions import ConversationState
+
+TERMINAL_COMMAND_STATUSES = frozenset(
+    {
+        CommandStatus.SETTLED,
+        CommandStatus.COALESCED,
+        CommandStatus.OUTCOME_UNKNOWN,
+    }
+)
+# Statuses a writer sets deliberately (terminal outcomes plus the explicit
+# release back to ACCEPTED used by failed-steer fallback); these overwrite the
+# stored command rather than merge with it.
+EXPLICIT_COMMAND_WRITE_STATUSES = TERMINAL_COMMAND_STATUSES | {CommandStatus.ACCEPTED}
+_INFLIGHT_COMMAND_RANK = {
+    CommandStatus.ACCEPTED: 0,
+    CommandStatus.CLAIMED: 1,
+    CommandStatus.DELIVERY_STARTED: 2,
+    CommandStatus.DELIVERED: 3,
+}
+
+
+def merge_command_progress(stored: Command, incoming: Command) -> Command:
+    """Merge an incoming command write with the stored copy so delivery
+    progress (attempts, delivery_started_at, delivered_at) is never regressed
+    by a writer holding a stale snapshot. delivery_started_at is what keeps
+    claim_commands from re-claiming in-flight work, so losing it re-opens the
+    double-delivery race."""
+    if incoming.status is CommandStatus.ACCEPTED and incoming.attempts < stored.attempts:
+        # A deliberate release back to ACCEPTED derives from the stored row
+        # and carries its attempts count; a lower count marks a stale
+        # pre-claim copy whose write must not erase claim/delivery progress.
+        return stored
+    if incoming.status in EXPLICIT_COMMAND_WRITE_STATUSES:
+        if incoming.attempts >= stored.attempts:
+            return incoming
+        return incoming.model_copy(update={"attempts": stored.attempts})
+    if stored.status in TERMINAL_COMMAND_STATUSES:
+        return stored
+    status = incoming.status
+    if _INFLIGHT_COMMAND_RANK.get(stored.status, 0) > _INFLIGHT_COMMAND_RANK.get(status, 0):
+        status = stored.status
+    leases = [
+        lease
+        for lease in (stored.lease_expires_at, incoming.lease_expires_at)
+        if lease is not None
+    ]
+    return incoming.model_copy(
+        update={
+            "status": status,
+            "attempts": max(stored.attempts, incoming.attempts),
+            "delivery_started_at": incoming.delivery_started_at or stored.delivery_started_at,
+            "delivered_at": incoming.delivered_at or stored.delivered_at,
+            "target_turn_id": incoming.target_turn_id or stored.target_turn_id,
+            "lease_expires_at": max(leases) if leases else None,
+            "worker_id": incoming.worker_id or stored.worker_id,
+        }
+    )
 
 
 @dataclass(frozen=True, slots=True)

@@ -1,8 +1,8 @@
 # Supported Harnesses
 
-This document is generated from packaged compatibility data.
+This document is generated from compatibility data owned by the split projects.
 Do not edit provider tables by hand; regenerate via
-`python -m talktoharnesses.providers.render_supported`.
+`uv run python scripts/render_supported.py`.
 
 Each harness publishes a **floor** (minimum identity and platforms) and
 adapter-owned capability flags. Models, modes, and efforts are discovered
@@ -43,7 +43,7 @@ accepted; `latest_verified` is advisory only.
 
 ### Notes
 
-- Live create/resume, permissions, model-family selection, parameter selection, and Agent/Plan/Ask selection proven on linux. Interrupt and multi-interaction are published for the same linux gate.
+- Live create/resume, permissions, model-family selection, parameter selection, and Agent/Plan/Ask selection proven on linux. Interrupt and multi-interaction are published for the same linux gate. Tested Cursor Agent releases 2026.08.04, 2026.08.11, and 2026.08.25 omit token usage from ACP, so the mandatory token-usage live assertion currently fails.
 
 ## Codex
 
@@ -60,7 +60,7 @@ accepted; `latest_verified` is advisory only.
 
 ### Notes
 
-- Broker-compatible approvals use public CodexClient(approval_handler=...) with ApprovalsReviewer.user. Live create/resume/interaction proven on linux. Steer and interrupt are published for the same linux gate. SDK and runtime remain the extra pin.
+- Broker-compatible approvals use public CodexClient(approval_handler=...) with ApprovalsReviewer.user. Live create/resume/interaction proven on linux. Steer and interrupt are published for the same linux gate. SDK and runtime remain pinned split dependencies.
 
 ## Claude Code
 
@@ -77,7 +77,7 @@ accepted; `latest_verified` is advisory only.
 
 ### Notes
 
-- Live create/resume/interaction proven on linux with SDK-bundled Claude Code CLI. Interrupt and multi-interaction are published for the same linux gate. Nested activity is not published: adapters do not emit activity_started. SDK identity remains the extra pin; explicit CLI paths at or above the floor are accepted.
+- Live create/resume/interaction proven on linux with SDK-bundled Claude Code CLI. Interrupt and multi-interaction are published for the same linux gate. Nested activity is not published: adapters do not emit activity_started. The SDK remains a pinned split dependency; explicit CLI paths at or above the floor are accepted.
 
 ## OpenCode
 

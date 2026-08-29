@@ -10,7 +10,8 @@ authors = [{ name = "talktoharnesses contributors" }]
 dependencies = [
     "opentelemetry-api>=1,<2",
     "pydantic>=2",
-    "pywin32==312; sys_platform == 'win32'",
+    "httpx>=0.28,<0.29",
+    "tth-types",
 ]
 
 [project.optional-dependencies]
@@ -20,6 +21,7 @@ django = [
     "loguru",
     "PyJWT>=2.8",
     "uvicorn",
+    "docker>=7,<8",
 ]
 postgres = [
     "psycopg[binary]>=3.2,<4",
@@ -27,20 +29,8 @@ postgres = [
 client = [
     "httpx>=0.28,<0.29",
 ]
-grok = []
-cursor = []
-codex = [
-    "openai-codex==0.144.4",
-]
-claude = [
-    "claude-agent-sdk==0.1.53",
-]
-opencode = [
-    "talktoharnesses[client]",
-]
-prime-agent = []
 all = [
-    "talktoharnesses[django,postgres,grok,cursor,codex,claude,opencode,prime-agent,client]",
+    "talktoharnesses[django,postgres,client]",
 ]
 
 [dependency-groups]
@@ -57,6 +47,9 @@ dev = [
     "django-stubs",
     "types-pywin32==312.*; sys_platform == 'win32'",
     "opentelemetry-sdk>=1,<2",
+    "opentelemetry-exporter-otlp-proto-http>=1,<2",
+    "opentelemetry-instrumentation-django",
+    "opentelemetry-instrumentation-httpx",
 ]
 
 [build-system]
@@ -67,8 +60,12 @@ build-backend = "uv_build"
 package = true
 default-groups = ["dev"]
 
+[tool.uv.sources]
+tth-types = { path = "tth-types", editable = true }
+
 [tool.uv.workspace]
 members = []
+exclude = ["tth-*"]
 
 [tool.ruff]
 target-version = "py311"

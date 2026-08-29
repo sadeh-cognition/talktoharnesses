@@ -2,13 +2,27 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import contextlib
+from collections.abc import Awaitable, Callable
+from typing import cast
 
 from talktoharnesses.domain.enums import ErrorCode, HarnessKind
 from talktoharnesses.domain.errors import DomainError
 from talktoharnesses.providers.adapter import HarnessAdapter
 
 AdapterFactory = Callable[[], HarnessAdapter]
+
+
+async def release_probe_adapter(adapter: HarnessAdapter) -> None:
+    """Release a probe-only adapter's resources (duck-typed ``aclose``).
+
+    Probe callers never create a session, so ``close(session)`` does not
+    apply; without this, each probe leaks the remote adapter's HTTP client.
+    """
+    aclose = getattr(adapter, "aclose", None)
+    if callable(aclose):
+        with contextlib.suppress(Exception):
+            await cast("Callable[[], Awaitable[None]]", aclose)()
 
 
 class AdapterRegistry:

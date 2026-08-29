@@ -7,7 +7,7 @@ audiences:
   - developer
 tags:
   - type/index
-last_verified: 2026-08-21
+last_verified: 2026-08-29
 ---
 
 # Wiki Index
@@ -20,7 +20,7 @@ Use this catalog to route into the maintained knowledge graph. Obsidian users sh
 - [Developer overview](maps/developer-overview.md): architecture, interfaces, decisions, operations, and evidence.
 - [Requirements by status](maps/requirements-by-status.md): plugin-free delivery view.
 - [Architecture and integrations](maps/architecture-and-integrations.md): system structure and external boundaries.
-- [Compatibility and adapters](maps/compatibility-and-adapters.md): floors, probes, and provider adapters.
+- [Compatibility and adapters](maps/compatibility-and-adapters.md): split-owned floors, probes, and provider adapters.
 - [HTTP API map](maps/http-api.md): authenticated HTTP/SSE clusters.
 
 ## Capabilities
@@ -76,6 +76,7 @@ Use this catalog to route into the maintained knowledge graph. Obsidian users sh
 - [Persistence decision](decisions/persistence.md)
 - [Event sequencing decision](decisions/event-sequencing.md)
 - [Runtime isolation decision](decisions/runtime-isolation.md)
+- [Split services decision](decisions/split-services.md): proxy and per-kind runtime ownership.
 - [Strict compatibility decision](decisions/strict-compatibility.md)
 - [JWT authentication decision](decisions/jwt-authentication.md)
 - [Retention decision](decisions/retention.md)

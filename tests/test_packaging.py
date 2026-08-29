@@ -11,62 +11,58 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-COMPAT_FILES = (
-    "grok.json",
-    "cursor.json",
-    "codex.json",
-    "claude.json",
-    "opencode.json",
-    "prime_agent.json",
-)
 MIGRATIONS = ("0001_initial.py",)
 REQUIRED_EXTRAS = (
     "django",
     "postgres",
     "client",
-    "grok",
-    "cursor",
-    "codex",
-    "claude",
-    "opencode",
-    "prime-agent",
     "all",
 )
+
+
+# The wheel depends on tth-types (a local path dependency, not on PyPI), so
+# isolated installs resolve it from the dist dir via --find-links.
+TTH_TYPES_ROOT = ROOT / "tth-types"
 
 
 @pytest.fixture(scope="module")
 def dist_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
     out = tmp_path_factory.mktemp("dist")
-    result = subprocess.run(
-        ["uv", "build", "--no-sources", "--out-dir", str(out)],
-        cwd=ROOT,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 0, result.stdout + result.stderr
+    for project_root in (ROOT, TTH_TYPES_ROOT):
+        result = subprocess.run(
+            ["uv", "build", "--no-sources", "--out-dir", str(out)],
+            cwd=project_root,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
     return out
 
 
 def _wheel(dist_dir: Path) -> Path:
-    wheels = list(dist_dir.glob("*.whl"))
+    wheels = list(dist_dir.glob("talktoharnesses-*.whl"))
     assert len(wheels) == 1, wheels
     return wheels[0]
 
 
 def _sdist(dist_dir: Path) -> Path:
-    sdists = list(dist_dir.glob("*.tar.gz"))
+    sdists = list(dist_dir.glob("talktoharnesses-*.tar.gz"))
     assert len(sdists) == 1, sdists
     return sdists[0]
 
 
-def _run_isolated(requirement: str, code: str, *, cwd: Path | None = None) -> None:
+def _run_isolated(
+    requirement: str, code: str, *, find_links: Path, cwd: Path | None = None
+) -> None:
     result = subprocess.run(
         [
             "uv",
             "run",
             "--isolated",
             "--no-project",
+            "--find-links",
+            str(find_links),
             "--with",
             requirement,
             "--",
@@ -97,10 +93,6 @@ def test_wheel_contains_package_metadata_and_py_typed(dist_dir: Path) -> None:
         for extra in REQUIRED_EXTRAS:
             assert f"Provides-Extra: {extra}" in metadata
         assert "Provides-Extra: otel" not in metadata
-        for name in COMPAT_FILES:
-            assert any(n.endswith(f"talktoharnesses/data/compatibility/{name}") for n in names), (
-                name
-            )
         for name in MIGRATIONS:
             assert any(n.endswith(f"talktoharnesses/django/migrations/{name}") for n in names), name
         forbidden_fragments = (
@@ -122,8 +114,6 @@ def test_sdist_contains_license_readme_and_package_data(dist_dir: Path) -> None:
         assert any(n.endswith("README.md") for n in names)
         assert any(n.endswith("pyproject.toml") for n in names)
         assert any("py.typed" in n for n in names)
-        for name in COMPAT_FILES:
-            assert any(n.endswith(f"data/compatibility/{name}") for n in names), name
         for name in MIGRATIONS:
             assert any(n.endswith(f"django/migrations/{name}") for n in names), name
 
@@ -145,17 +135,13 @@ assert find_spec("django") is None
 assert find_spec("jwt") is None
 assert find_spec("ninja") is None
 assert find_spec("psycopg") is None
-assert find_spec("httpx") is None
 assert find_spec("openai_codex") is None
 assert find_spec("claude_agent_sdk") is None
 
-try:
-    import talktoharnesses.client  # noqa: F401
-except ModuleNotFoundError as exc:
-    assert "talktoharnesses[client]" in str(exc)
-else:
-    raise AssertionError("expected ModuleNotFoundError for talktoharnesses.client")
+# httpx is a core dependency now (remote adapters); the client imports cleanly.
+import talktoharnesses.client  # noqa: F401
 """,
+        find_links=dist_dir,
     )
 
 
@@ -184,6 +170,7 @@ async def _run() -> None:
 
 asyncio.run(_run())
 """,
+        find_links=dist_dir,
     )
 
 
@@ -214,10 +201,11 @@ assert find_spec("psycopg") is None
 assert find_spec("openai_codex") is None
 assert find_spec("claude_agent_sdk") is None
 """,
+        find_links=dist_dir,
     )
 
 
-def test_all_extra_installs_providers_and_postgres_driver(dist_dir: Path) -> None:
+def test_all_extra_installs_remote_stack_and_postgres_driver(dist_dir: Path) -> None:
     wheel = _wheel(dist_dir)
     _run_isolated(
         f"talktoharnesses[all] @ {wheel.as_uri()}",
@@ -225,18 +213,10 @@ def test_all_extra_installs_providers_and_postgres_driver(dist_dir: Path) -> Non
 from importlib.util import find_spec
 import django
 from django.conf import settings
-from talktoharnesses.providers.claude import ClaudeAdapter
-from talktoharnesses.providers.codex import CodexAdapter
-from talktoharnesses.providers.cursor import CursorAdapter
-from talktoharnesses.providers.grok import GrokAdapter
-from talktoharnesses.providers.opencode import OpenCodeAdapter
-from talktoharnesses.providers.prime_agent import PrimeAgentAdapter
-from talktoharnesses.providers.claude.compatibility import load_claude_compatibility
-from talktoharnesses.providers.codex.compatibility import load_codex_compatibility
-from talktoharnesses.providers.cursor.compatibility import load_cursor_compatibility
-from talktoharnesses.providers.grok.compatibility import load_grok_compatibility
-from talktoharnesses.providers.opencode.compatibility import load_opencode_compatibility
-from talktoharnesses.providers.prime_agent.compatibility import load_prime_agent_compatibility
+from talktoharnesses.remote.adapter import RemoteHarnessAdapter
+from talktoharnesses.remote.registry import build_remote_adapter_registry
+from talktoharnesses.remote.sandbox import SandboxConfig, SandboxManager
+from tth_types.enums import HarnessKind
 
 settings.configure(
     SECRET_KEY="test-not-for-production",
@@ -248,17 +228,12 @@ settings.configure(
     DATABASES={"default": {"ENGINE": "django.db.backends.sqlite3", "NAME": ":memory:"}},
 )
 django.setup()
-assert all(
-    (ClaudeAdapter, CodexAdapter, CursorAdapter, GrokAdapter, OpenCodeAdapter, PrimeAgentAdapter)
-)
-assert load_grok_compatibility().floor.version
-assert load_cursor_compatibility().floor.version
-assert load_codex_compatibility().floor.version
-assert load_claude_compatibility().floor.version
-assert load_opencode_compatibility().floor.version
-assert load_prime_agent_compatibility().floor.version
+registry = build_remote_adapter_registry(SandboxManager(SandboxConfig.from_env({})))
+assert isinstance(registry.create(HarnessKind.CLAUDE), RemoteHarnessAdapter)
 assert find_spec("psycopg") is not None
+assert find_spec("docker") is not None
 """,
+        find_links=dist_dir,
     )
 
 
@@ -275,4 +250,5 @@ import talktoharnesses.runtime
 
 assert talktoharnesses.__version__
 """,
+        find_links=dist_dir,
     )

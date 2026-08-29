@@ -107,10 +107,18 @@ policies, exemptions, preview, ranked search, and transcript import/export.
 
 ## Observability
 
-`opentelemetry-api` is a core dependency and remains a no-op without host
-configuration. Install and configure your chosen SDK and exporters in the host
-process. Instrumentation stays secret-safe and low-cardinality; there is no
-package-owned SDK, exporter, collector, or `otel` extra.
+`opentelemetry-api` is a core dependency of the library, whose instrumentation
+remains a no-op without an SDK; the wheel carries no SDK, exporter, collector,
+or `otel` extra. The host process and the six split services, however, export
+traces, metrics, and logs by default via OTLP/HTTP: set
+`OTEL_EXPORTER_OTLP_ENDPOINT=false` (or `0`) to opt out, set it to a URL to
+pick the collector, or leave it unset for the SDK default
+(`http://localhost:4318`). The proxy passes the endpoint into sandboxed split
+containers, rewriting unset/localhost values to
+`http://host.docker.internal:4318` (with a `host-gateway` extra-hosts
+mapping); split images must be rebuilt after this change so the new
+dependencies and telemetry wiring are present. Instrumentation stays
+secret-safe and low-cardinality.
 
 ## Operator checks
 

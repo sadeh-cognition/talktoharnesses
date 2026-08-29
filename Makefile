@@ -13,5 +13,6 @@ backend:
 	@if curl --fail --silent --max-time 1 $(BACKEND_URL)/api/v1/health >/dev/null; then \
 		echo "Backend is already running at $(BACKEND_URL)"; \
 	else \
+		uv run python host/manage.py migrate && \
 		DJANGO_SETTINGS_MODULE=host.settings uv run uvicorn host.asgi:application --host $(BACKEND_HOST) --port $(BACKEND_PORT); \
 	fi

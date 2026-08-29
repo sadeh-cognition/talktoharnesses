@@ -1,14 +1,19 @@
 # talktoharnesses (TTH)
 
-TalkToHarnesses (TTH) is a unified coding-agent harness interface with an optional Django application
-surface. One distribution exposes six adapters (Grok, Cursor, Codex, Claude
-Code, OpenCode, Prime Agent), a persistence-backed asynchronous facade, and authenticated
-HTTP/SSE APIs.
+TalkToHarnesses (TTH) is the proxy service of a split architecture: a
+persistence-backed asynchronous facade with authenticated HTTP/SSE APIs that
+drives six harness kinds (Grok, Cursor, Codex, Claude Code, OpenCode, Prime
+Agent) through per-kind split services. Each split runs in a Docker sandbox the
+proxy spawns on demand and tracks in its database. Each split lives in
+its own top-level project directory (`tth-grok` … `tth-prime-agent`); shared
+wire schemas live in [`tth-types`](tth-types). See [`deploy/README.md`](deploy/README.md)
+for the canonical deployment and split-runtime guide.
 
 Accepted architectural decisions live under [`docs/adr/`](docs/adr/). Floor
-identities, adapter-owned capabilities, and last-verified notes are generated in
-[`SUPPORTED_HARNESSES.md`](SUPPORTED_HARNESSES.md). The Obsidian knowledge graph
-lives in [`llm-wiki/`](llm-wiki/). Operational detail lives in:
+identities, adapter-owned capabilities, and last-verified notes from all split
+projects are aggregated in [`SUPPORTED_HARNESSES.md`](SUPPORTED_HARNESSES.md).
+The Obsidian knowledge graph lives in [`llm-wiki/`](llm-wiki/). Operational
+detail lives in:
 
 - [`docs/deployment.md`](docs/deployment.md)
 - [`docs/upgrading.md`](docs/upgrading.md)
@@ -35,14 +40,6 @@ pip install "talktoharnesses[django,postgres]"
 # Official async HTTP client
 pip install "talktoharnesses[client]"
 
-# Individual provider extras
-pip install "talktoharnesses[grok]"      # marker only; external grok executable
-pip install "talktoharnesses[cursor]"    # marker only; external cursor executable
-pip install "talktoharnesses[codex]"     # pinned openai-codex SDK
-pip install "talktoharnesses[claude]"    # pinned claude-agent-sdk
-pip install "talktoharnesses[opencode]"  # httpx client; external opencode executable
-pip install "talktoharnesses[prime-agent]" # marker only; external prime-agent executable
-
 # Full surface
 pip install "talktoharnesses[all]"
 ```
@@ -55,18 +52,22 @@ uv add "talktoharnesses[django,postgres]"
 uv add "talktoharnesses[all]"
 ```
 
-Grok, Cursor, OpenCode, and Prime Agent executables are external. At probe and
-launch, TalkToHarnesses locates each conventional executable on its process
-PATH, after checking the matching `TALKTOHARNESSES_*_EXECUTABLE` environment
-override. Harness configuration does not accept an executable path. The
-package never installs, upgrades, or invents arbitrary flags for external
-CLIs. Provider SDK/executable versions are accepted when they meet the
-packaged compatibility floor for the current platform. Models, modes, and
-efforts come from the live CLI.
+Harness CLIs and SDKs belong to the split runtime, not the proxy. Managed
+Docker images install them; a split reached through a URL must provide them in
+its own environment. Inside a split, the conventional executable is located on
+PATH after checking the matching `TALKTOHARNESSES_*_EXECUTABLE` environment
+override. Harness configuration does not accept an executable path. The package
+never installs, upgrades, or invents arbitrary flags for external CLIs.
+Provider SDK/executable versions are accepted when they meet the packaged
+compatibility floor for the current platform. Models, modes, and efforts come
+from the live CLI.
 
-OpenTelemetry's API is a core dependency and is a no-op without host
-configuration. Install and configure your own SDK/exporter packages separately;
-there is no package-owned `otel` extra.
+OpenTelemetry's API is a core dependency of the library and is a no-op without
+an SDK; there is no package-owned `otel` extra. The host process and the split
+services, by contrast, export traces, metrics, and logs by default — set
+`OTEL_EXPORTER_OTLP_ENDPOINT=false` (or `0`) to opt out, any other value to
+choose the OTLP/HTTP collector endpoint (unset means
+`http://localhost:4318`).
 
 ## Quick start (Django)
 
@@ -188,8 +189,9 @@ active Django user and generate its client token. The raw token appears only on
 the immediate success page; copy it into the client's secret configuration
 before leaving the page.
 
-Authenticated submissions execute local harnesses with the Django OS user's
-workspace access. This is not a sandbox.
+Client authentication does not choose the split deployment boundary. Every
+kind's managed Docker sandbox is spawned on demand — no per-kind enablement
+configuration exists; see [`deploy/README.md`](deploy/README.md).
 
 ## Cursor model selectors
 

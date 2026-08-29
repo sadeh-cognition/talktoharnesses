@@ -59,9 +59,12 @@ installs, upgrades, or invents arbitrary flags for them. Provider SDK/executable
 versions are accepted when they meet the packaged compatibility floor for the
 current platform. Models, modes, and efforts come from the live CLI.
 
-OpenTelemetry's API is a core dependency and is a no-op without host
-configuration. Install and configure your own SDK/exporter packages separately;
-there is no package-owned `otel` extra.
+OpenTelemetry's API is a core dependency of the library and is a no-op without
+an SDK; there is no package-owned `otel` extra. The host process and the split
+services, by contrast, export traces, metrics, and logs by default — set
+`OTEL_EXPORTER_OTLP_ENDPOINT=false` (or `0`) to opt out, any other value to
+choose the OTLP/HTTP collector endpoint (unset means
+`http://localhost:4318`).
 
 ## Quick start (Django)
 

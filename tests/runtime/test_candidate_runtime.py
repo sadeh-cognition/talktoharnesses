@@ -12,7 +12,6 @@ from tests.runtime.conftest import (
     FakeAdapter,
     MemoryPersistence,
     SeedReply,
-    child_modes_path,
     conversation_id_of,
     make_state,
 )
@@ -35,10 +34,6 @@ def _registry(factory: Callable[[], FakeAdapter]) -> AdapterRegistry:
     return reg
 
 
-def _argv() -> tuple[str, ...]:
-    return (str(child_modes_path()), "silence", "5")
-
-
 @pytest.mark.asyncio
 async def test_candidate_starts_without_touching_live_state(
     persistence: MemoryPersistence,
@@ -57,7 +52,6 @@ async def test_candidate_starts_without_touching_live_state(
         owner_id="owner-1",
         binding_id=binding_id,
         configuration=state.binding.configuration,
-        argv=_argv(),
     )
 
     assert candidate.session.binding_id == binding_id
@@ -199,7 +193,6 @@ async def test_promotion_replaces_the_live_runtime(
         conversation_id=cid,
         owner_id="owner-1",
         configuration=config,
-        argv=_argv(),
     )
     previous = mgr.get_runtime(cid)
     assert previous is not None
@@ -210,7 +203,6 @@ async def test_promotion_replaces_the_live_runtime(
         owner_id="owner-1",
         binding_id=binding_id,
         configuration=config,
-        argv=_argv(),
     )
     promoted = await mgr.promote_candidate(cid, binding_id)
 
@@ -242,7 +234,6 @@ async def test_candidates_count_against_runtime_capacity(
         conversation_id=cid,
         owner_id="owner-1",
         configuration=config,
-        argv=_argv(),
     )
 
     with pytest.raises(DomainError) as exc:
@@ -251,7 +242,6 @@ async def test_candidates_count_against_runtime_capacity(
             owner_id="owner-1",
             binding_id=uuid4(),
             configuration=config,
-            argv=_argv(),
         )
     assert exc.value.code is ErrorCode.CONVERSATION_BUSY
 
@@ -273,7 +263,6 @@ async def test_stale_binding_closes_the_live_runtime(
         conversation_id=cid,
         owner_id="owner-1",
         configuration=state.binding.configuration,
-        argv=_argv(),
     )
 
     current = await persistence.get_worker_snapshot(cid)

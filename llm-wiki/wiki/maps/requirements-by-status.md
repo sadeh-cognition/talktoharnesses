@@ -9,20 +9,24 @@ tags:
   - type/map
   - audience/product
   - audience/developer
-last_verified: 2026-08-21
-verified_against_commit: c996cbcd23b7cbf4f6b4d70422ab17ce715661bf
+last_verified: 2026-08-30
+verified_against_commit: 78003994d9fe93108ce5a6bc3591ab2e2ef904d9
 ---
 
 # Requirements by Status
 
 Plugin-free delivery view of the public contracts documented in this vault.
 
+## Partially implemented
+
+- [Report harness token usage](../requirements/report-harness-token-usage.md):
+  Cursor Agent does not currently expose token usage through ACP.
+
 ## Implemented
 
 - [Probe and configure harnesses](../requirements/probe-and-configure-harnesses.md)
 - [Create and manage conversations](../requirements/create-and-manage-conversations.md)
 - [Submit turns and stream events](../requirements/submit-turns-and-stream-events.md)
-- [Report harness token usage](../requirements/report-harness-token-usage.md)
 - [Resolve approvals and structured questions](../requirements/resolve-approvals-and-structured-questions.md)
 - [Steer, interrupt, and switch harness](../requirements/steer-interrupt-and-switch-harness.md)
 - [Queue and edit prompts](../requirements/queue-and-edit-prompts.md)

@@ -9,15 +9,15 @@ audiences:
   - developer
 tags:
   - type/overview
-last_verified: 2026-08-21
-verified_against_commit: 3f90f85a37028a1ba0498cff641ef5c8a1bec6d7
+last_verified: 2026-08-29
+verified_against_commit: 47644027875773ba520cbfdd9f978d196a548802
 ---
 
 # TalkToHarnesses Overview
 
-TalkToHarnesses (TTH) is a Python 3.11+ package that unifies six coding-agent harnesses behind one adapter protocol, a persistence-backed asynchronous facade, and optional authenticated HTTP/SSE APIs.
+TalkToHarnesses (TTH) is a Python 3.11+ proxy that unifies six coding-agent harness split services behind one adapter protocol, a persistence-backed asynchronous facade, and optional authenticated HTTP/SSE APIs.
 
-One distribution exposes Grok, Cursor, Codex, Claude Code, OpenCode, and Prime Agent adapters. Hosts install optional extras for Django, PostgreSQL, the official HTTP client, and provider SDKs. External CLIs are located on PATH or a TalkToHarnesses process environment override; the package never installs or upgrades them.
+The proxy exposes Grok, Cursor, Codex, Claude Code, OpenCode, and Prime Agent through a generic remote adapter. Hosts install optional extras for Django, PostgreSQL, and the official HTTP client. Provider adapters, SDK dependencies, executable discovery, and compatibility data live in the per-kind split projects.
 
 ## Main capabilities
 
@@ -29,7 +29,7 @@ One distribution exposes Grok, Cursor, Codex, Claude Code, OpenCode, and Prime A
 
 ## Technical shape
 
-Domain models and events are provider-neutral. `TalkToHarnessesService` is the asynchronous facade over persistence, adapters, and durable commands. Django Ninja routes are thin HTTP adapters over that facade. One supervised runtime per active conversation executes harness work as the Django OS user. Compatibility is a packaged floor plus live probe; models, modes, and efforts come from the installed CLI.
+Domain models and events are provider-neutral. `TalkToHarnessesService` is the asynchronous facade over persistence, adapters, and durable commands. Django Ninja routes are thin HTTP adapters over that facade. One split-owned supervised runtime per active conversation executes harness work. Compatibility is a split-owned floor plus live probe; models, modes, and efforts come from the split's installed CLI or SDK.
 
 ## Related
 

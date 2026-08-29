@@ -7,18 +7,20 @@ audiences:
 tags:
   - type/architecture
   - audience/developer
-last_verified: 2026-08-20
-verified_against_commit: bb3d2b755500fc663816d6cbd1a7cd7947a8920b
+last_verified: 2026-08-29
+verified_against_commit: 47644027875773ba520cbfdd9f978d196a548802
 ---
 
 # Layered Architecture
 
 The package is layered so Django and provider SDKs do not leak inward.
 
-- `talktoharnesses.domain` — frozen models, events, enums, errors, transitions.
+- `tth_types` (top-level project) — shared wire schemas: base config, enums, errors, events, harness models, adapter protocol, process events, split API.
+- `talktoharnesses.domain` — proxy entities, projections, transitions (wire types re-exported from `tth_types`).
 - `talktoharnesses.application` — `TalkToHarnessesService`, persistence protocol, commands, broker, retention, search.
-- `talktoharnesses.providers` — `HarnessAdapter` protocol, default registry, per-kind adapters, compatibility floors.
-- `talktoharnesses.runtime` — process supervisor and runtime manager.
+- `talktoharnesses.providers` — adapter protocol re-export and registry (per-kind adapters live in top-level split projects).
+- `talktoharnesses.remote` — `RemoteHarnessAdapter`, `RemoteProcessHandle`, `SandboxManager`, remote registry.
+- `talktoharnesses.runtime` — runtime manager over remote sessions.
 - `talktoharnesses.django` — ORM, Ninja routes, JWT, ASGI lifespan, cleanup command.
 - `talktoharnesses.client` — optional async HTTP client.
 

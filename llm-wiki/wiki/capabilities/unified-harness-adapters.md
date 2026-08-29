@@ -9,8 +9,8 @@ tags:
   - type/capability
   - capability/adapters
   - status/implemented
-last_verified: 2026-08-21
-verified_against_commit: c996cbcd23b7cbf4f6b4d70422ab17ce715661bf
+last_verified: 2026-08-30
+verified_against_commit: 78003994d9fe93108ce5a6bc3591ab2e2ef904d9
 ---
 
 # Unified Harness Adapters
@@ -21,15 +21,17 @@ TalkToHarnesses drives Grok, Cursor, Codex, Claude Code, OpenCode, and Prime Age
 
 [Target users](../concepts/target-users.md) select a harness kind, working directory, and optional model, mode, and effort. The package accepts identities at or above the packaged floor for the current platform. Models, modes, and efforts come from the live CLI.
 
-Grok, Cursor, OpenCode, and Prime Agent executables are external CLIs located on PATH (or a TalkToHarnesses process environment override) at probe and launch. Codex and Claude extras pin SDKs. The package never installs, upgrades, or invents arbitrary flags.
+Each kind runs in a separate split service. Process-bound splits locate their external CLI on the split's PATH or from its `TALKTOHARNESSES_*_EXECUTABLE` override; Codex and Claude splits pin their SDK dependencies. The proxy never installs, upgrades, or constructs provider command lines.
 
 ## Current implementation
 
-Each provider implements `HarnessAdapter` with probe, start, resume, submit, steer, interrupt, answer_interaction, events, and close. A default registry constructs the six adapters. Cursor model selectors use the string `model` field (`model-id[key=value,...]`). `yolo: true` suppresses approval prompts through provider-native mechanisms.
+Each split implements `HarnessAdapter` with probe, start, resume, submit, steer, interrupt, answer_interaction, events, and close. The proxy registry constructs the same `RemoteHarnessAdapter` for all six kinds. Cursor model selectors use the string `model` field (`model-id[key=value,...]`). `yolo: true` suppresses approval prompts through provider-native mechanisms.
 
 Adapters map provider-reported token counts into the canonical `usage_updated`
 event before successful turn completion. Categories remain absent when the
-provider does not report them.
+provider does not report them. Cursor's ACP adapter supports the canonical
+mapping, but verified Cursor Agent releases currently omit the native usage
+data, so Cursor turns do not emit `usage_updated`.
 
 ## Requirements
 

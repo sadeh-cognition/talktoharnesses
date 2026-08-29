@@ -139,9 +139,14 @@ def make_state(
 
 
 class FakeAdapter:
-    """Recording adapter; each factory call yields a distinct instance."""
+    """Recording adapter; each factory call yields a distinct instance.
+
+    SDK-managed shape: the manager no longer spawns processes locally, so the
+    fake owns no subprocess (remote splits own spawn in production).
+    """
 
     kind = HarnessKind.OPENCODE
+    sdk_managed = True
     instances: list[FakeAdapter] = []
 
     def __init__(

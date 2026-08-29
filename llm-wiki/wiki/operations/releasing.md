@@ -7,15 +7,15 @@ audiences:
 tags:
   - type/operation
   - audience/developer
-last_verified: 2026-08-20
-verified_against_commit: bb3d2b755500fc663816d6cbd1a7cd7947a8920b
+last_verified: 2026-08-29
+verified_against_commit: 47644027875773ba520cbfdd9f978d196a548802
 ---
 
 # Releasing
 
 Versions use CalVer (`YYYY.M.PATCH`). Pre-releases remain `*.devN` until the stable publication gate passes. The checklist lives in repository `docs/releasing.md` and `scripts/ci/stable_cut_checklist.sh`.
 
-Gates include static checks, coverage, live create/resume/interaction proof against the packaged floor, and a floor/platform row for every adapter. The package never contains credentials or a mutable patch allowlist.
+Gates include static checks, coverage, live create/resume/interaction proof against each split-owned floor, and a floor/platform row for every adapter. `uv run python scripts/render_supported.py --validate stable --check` validates the workspace aggregate. The package never contains credentials or a mutable patch allowlist.
 
 ## Related
 

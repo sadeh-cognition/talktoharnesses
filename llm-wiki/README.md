@@ -30,5 +30,5 @@ Follow [WIKI_AGENTS.md](WIKI_AGENTS.md) when maintaining the vault. Validate
 with the wiki linter pointed at this root:
 
 ```bash
-uv run manage.py wiki_lint --root /path/to/talktoharnesses/llm-wiki
+uv run host/manage.py wiki_lint --root /path/to/talktoharnesses/llm-wiki
 ```

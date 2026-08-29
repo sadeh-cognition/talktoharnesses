@@ -7,17 +7,27 @@ audiences:
 tags:
   - type/architecture
   - audience/developer
-last_verified: 2026-08-21
-verified_against_commit: c996cbcd23b7cbf4f6b4d70422ab17ce715661bf
+last_verified: 2026-08-30
+verified_against_commit: 2920f5820783245bd5b871e61edd44642ebfe56a
 ---
 
 # Provider Adapters
 
-Each kind lives under `talktoharnesses.providers.<kind>` with adapter, probe, compatibility, and control modules. Several providers share ACP types under `providers/acp`.
+Each kind lives in its own split project (`tth-<kind>`) under `tth_<kind>.harness` with adapter, probe, compatibility, and control modules; Grok and Cursor carry their own copies of the ACP machinery. The proxy keeps the `HarnessAdapter` protocol re-export, registry, generic `RemoteHarnessAdapter`, and split lifecycle configuration.
 
-Adapters normalize native streams into `HarnessEvent` and `HarnessInteractionRequest`. Provider token accounting is normalized into turn-scoped `usage_updated` events without inventing omitted categories. Capability flags are adapter-owned and copied onto probed identities. The default registry constructs all six adapters.
+Adapters normalize native streams into `HarnessEvent` and
+`HarnessInteractionRequest`. Provider token accounting is normalized into
+turn-scoped `usage_updated` events without inventing omitted categories. The
+Cursor adapter accepts ACP usage shapes, but verified Cursor Agent releases do
+not emit them. Capability flags are adapter-owned and copied onto probed
+identities. The proxy registry constructs a remote adapter per kind; each split
+constructs its own adapter per session.
 
-Live gates prove create, resume, meaningful token usage, and advertised capabilities against the packaged floor through the official HTTP client.
+Live gates prove create, resume, meaningful token usage, and advertised
+capabilities against the packaged floor through the official HTTP client, with
+the kind's split running in its on-demand Docker sandbox. The
+Cursor gate currently exposes the upstream ACP token-usage gap rather than
+passing it.
 
 ## Related
 

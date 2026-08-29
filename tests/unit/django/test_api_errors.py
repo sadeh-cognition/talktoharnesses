@@ -71,6 +71,22 @@ def test_provider_version_mismatch_does_not_echo_untrusted_values() -> None:
     assert "SECRET" not in body["message"]
 
 
+def test_sandbox_path_not_mounted_maps_to_400_with_clear_message() -> None:
+    response = domain_error_response(
+        DomainError(
+            ErrorCode.SANDBOX_PATH_NOT_MOUNTED,
+            "/srv/elsewhere is not mounted into the grok sandbox",
+            details={"kind": "grok", "path": "/srv/elsewhere", "reason": "path_not_mounted"},
+        )
+    )
+    body = json.loads(response.content)
+    assert response.status_code == 400
+    assert body["code"] == "sandbox_path_not_mounted"
+    assert "not mounted into the harness sandbox" in body["message"]
+    # The raw path never leaks through the public message.
+    assert "/srv/elsewhere" not in body["message"]
+
+
 def test_not_found_and_auth_remain_stable() -> None:
     missing = domain_error_response(DomainError(ErrorCode.NOT_FOUND, "conversation xyz missing"))
     assert missing.status_code == 404

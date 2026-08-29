@@ -1,0 +1,66 @@
+[project]
+name = "tth-prime-agent"
+version = "0.1.0"
+description = "prime_agent harness split service for talktoharnesses"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{ name = "talktoharnesses contributors" }]
+dependencies = [
+    "tth-types",
+    "django>=5.2,<5.3",
+    "django-ninja",
+    "uvicorn",
+    "opentelemetry-sdk>=1,<2",
+    "opentelemetry-exporter-otlp-proto-http>=1,<2",
+    "opentelemetry-instrumentation-django",
+    "pywin32==312; sys_platform == 'win32'",
+]
+
+[dependency-groups]
+dev = [
+    "ruff",
+    "isort",
+    "pyright",
+    "pytest",
+    "pytest-asyncio",
+    "pytest-django",
+    "django-stubs",
+    "httpx",
+]
+
+[build-system]
+requires = ["uv_build>=0.9.18,<0.13"]
+build-backend = "uv_build"
+
+[tool.uv]
+package = true
+default-groups = ["dev"]
+
+[tool.uv.sources]
+tth-types = { path = "../tth-types", editable = true }
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.isort]
+profile = "black"
+line_length = 100
+src_paths = ["src"]
+
+[tool.pyright]
+typeCheckingMode = "strict"
+pythonVersion = "3.11"
+include = ["src", "tests"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+DJANGO_SETTINGS_MODULE = "tth_prime_agent.settings"
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"

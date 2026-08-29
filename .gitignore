@@ -21,3 +21,6 @@ host/db.sqlite3
 llm-wiki/.obsidian/workspace.json
 llm-wiki/.obsidian/workspace-mobile.json
 llm-wiki/.obsidian/cache
+
+# Sandbox deploy secrets
+deploy/.env

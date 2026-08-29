@@ -208,12 +208,15 @@ async def _wait_for_event(
     owner_id: str,
     conversation_id: UUID,
     event_type: str,
+    after_sequence: int = 0,
 ) -> list[Any]:
-    """Read committed history until the requested event appears."""
+    """Read committed history until the requested event appears after the floor."""
 
     for _ in range(100):
         events = list(await service.replay_events(owner_id, conversation_id, after_sequence=0))
-        if any(event.type == event_type for event in events):
+        if any(
+            event.type == event_type and event.sequence > after_sequence for event in events
+        ):
             assert [event.sequence for event in events] == sorted(
                 event.sequence for event in events
             )
@@ -230,6 +233,8 @@ async def _resolve_first_turn(
     command_id: UUID,
 ) -> list[Any]:
     """Exercise deferred approval, duplicate resolution, and successful completion."""
+    baseline = list(await service.replay_events(owner_id, conversation_id, after_sequence=0))
+    floor = baseline[-1].sequence if baseline else 0
     await _execute_command(
         service,
         conversation_id=conversation_id,
@@ -240,9 +245,12 @@ async def _resolve_first_turn(
         owner_id=owner_id,
         conversation_id=conversation_id,
         event_type="interaction_requested",
+        after_sequence=floor,
     )
     request_event = next(
-        event for event in reversed(requested) if event.type == "interaction_requested"
+        event
+        for event in reversed(requested)
+        if event.type == "interaction_requested" and event.sequence > floor
     )
     interaction_id = request_event.payload.interaction_id
     rule = ApprovalRule(
@@ -285,6 +293,7 @@ async def _resolve_first_turn(
         owner_id=owner_id,
         conversation_id=conversation_id,
         event_type="turn_completed",
+        after_sequence=floor,
     )
     assert adapter.answers[0].decision is ApprovalDecision.ALLOW_ONCE
     saved = completed[len(completed) // 2].sequence

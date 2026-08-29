@@ -8,13 +8,13 @@ audiences:
 tags:
   - type/domain
   - capability/adapters
-last_verified: 2026-08-21
-verified_against_commit: 3f90f85a37028a1ba0498cff641ef5c8a1bec6d7
+last_verified: 2026-08-29
+verified_against_commit: 47644027875773ba520cbfdd9f978d196a548802
 ---
 
 # Harness Instance
 
-A harness instance is an owner-owned named configuration: kind, working directory, workspace roots, and optional model, mode, effort, and yolo. Create and stored configuration reject executable paths. Process-bound kinds locate their conventional CLI at probe and launch; Codex and Claude use bundled SDKs. A `LaunchSnapshot` records the resolved executable that actually ran.
+A harness instance is an owner-owned named configuration: kind, working directory, workspace roots, and optional model, mode, effort, and yolo. Create and stored configuration reject executable paths. The proxy resolves the kind to a remote split; that split owns CLI or SDK discovery, probe, and launch. A `LaunchSnapshot` records the executable selected by the split.
 
 Probe produces `HarnessCapabilities` and a `VersionAdvisory`. Switching harnesses creates a new binding rather than mutating the old one.
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import shutil
 from collections.abc import Iterator
 from unittest.mock import AsyncMock, patch
 
@@ -18,7 +19,7 @@ from talktoharnesses.django.asgi import (
     reset_service_for_tests,
     talktoharnesses_lifespan,
 )
-from talktoharnesses.domain import DomainError, HarnessKind
+from talktoharnesses.domain import DomainError, ErrorCode, HarnessKind
 
 
 @pytest.fixture(autouse=True)
@@ -26,6 +27,12 @@ def clear_service() -> Iterator[None]:
     reset_service_for_tests()
     yield
     reset_service_for_tests()
+
+
+@pytest.fixture(autouse=True)
+def docker_cli_present(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unit tests must pass on Docker-less machines; stub the startup guard."""
+    monkeypatch.setattr(asgi_mod, "ensure_docker_cli_available", lambda: "/usr/bin/docker")
 
 
 @pytest.mark.django_db(transaction=True)
@@ -161,6 +168,23 @@ def test_default_registry_contains_all_phase7_adapters() -> None:
             HarnessKind.PRIME_AGENT,
         }
     )
+
+
+def test_build_service_fails_closed_without_docker_cli(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from talktoharnesses.remote.sandbox import ensure_docker_cli_available
+
+    def no_which(cmd: str) -> None:
+        return None
+
+    # Undo the autouse stub so the real guard runs against a missing CLI.
+    monkeypatch.setattr(asgi_mod, "ensure_docker_cli_available", ensure_docker_cli_available)
+    monkeypatch.setattr(shutil, "which", no_which)
+    with pytest.raises(DomainError) as excinfo:
+        asgi_mod._build_service()  # pyright: ignore[reportPrivateUsage]
+    assert excinfo.value.code is ErrorCode.SANDBOX_UNAVAILABLE
+    assert excinfo.value.details["reason"] == "docker_unavailable"
 
 
 def test_appconfig_ready_starts_nothing() -> None:

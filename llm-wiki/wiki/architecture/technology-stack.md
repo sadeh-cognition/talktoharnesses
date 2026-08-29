@@ -7,15 +7,15 @@ audiences:
 tags:
   - type/architecture
   - audience/developer
-last_verified: 2026-08-20
-verified_against_commit: bb3d2b755500fc663816d6cbd1a7cd7947a8920b
+last_verified: 2026-08-29
+verified_against_commit: 47644027875773ba520cbfdd9f978d196a548802
 ---
 
 # Technology Stack
 
-Python 3.11+ with Pydantic v2 domain models. Optional Django 5.2, Django Ninja, PyJWT, and Uvicorn. PostgreSQL via Psycopg 3; SQLite with FTS5. Official client via httpx. OpenTelemetry API is a core dependency.
+Python 3.11+ with Pydantic v2 domain models. Optional Django 5.2, Django Ninja, PyJWT, and Uvicorn. PostgreSQL via Psycopg 3; SQLite with FTS5. httpx is a core dependency (remote split adapters and the official client); the django extra adds docker-py for sandbox lifecycle. OpenTelemetry API is a core dependency. The shared `tth-types` package (pydantic-only) is a path dependency during development.
 
-Provider extras pin Codex (`openai-codex`) and Claude (`claude-agent-sdk`). Grok, Cursor, OpenCode, and Prime Agent extras are markers for external executables.
+Per-kind SDK pins live in the top-level split projects: `tth-codex` pins `openai-codex`, `tth-claude` pins `claude-agent-sdk`; Grok, Cursor, OpenCode, and Prime Agent splits install their external CLIs in their Docker images.
 
 Packaging uses uv. Versions are CalVer (`YYYY.M.PATCH`). Tests use pytest, pytest-django, pytest-asyncio, Hypothesis, and coverage gates.
 

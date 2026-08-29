@@ -7,25 +7,26 @@ audiences:
 tags:
   - type/architecture
   - audience/developer
-last_verified: 2026-08-20
-verified_against_commit: bb3d2b755500fc663816d6cbd1a7cd7947a8920b
+last_verified: 2026-08-30
+verified_against_commit: 2920f5820783245bd5b871e61edd44642ebfe56a
 ---
 
 # System Context
 
-TalkToHarnesses is a library-plus-optional-Django-app that sits between a host process and local coding-agent CLIs.
+TalkToHarnesses (tth-proxy) sits between HTTP clients and per-kind harness split services. The split architecture landed in commit `4764402`.
 
 ## Components
 
 - Host Django (or a custom persistence host) owns settings, users, database, and the ASGI/worker process.
 - `TalkToHarnessesService` is the in-process facade.
-- Provider adapters talk to Grok, Cursor, Codex, Claude Code, OpenCode, or Prime Agent.
+- A generic `RemoteHarnessAdapter` per conversation drives one split service (`tth-grok` … `tth-prime-agent`) over HTTP+SSE; `SandboxManager` resolves an explicit URL or boots and reuses one Docker container per enabled kind.
+- The `tth-types` package carries the shared wire schemas between proxy and splits.
 - The relational database is canonical for conversations, events, and commands.
-- Optional HTTP clients call `/api/v1`.
+- Optional HTTP clients call `/api/v1` (unchanged by the split).
 
 ## Boundaries
 
-Harness processes run as the host OS user. The package does not sandbox, install CLIs, or manage host middleware. OpenTelemetry is a no-op without a host SDK.
+Harness CLIs run in their split service, not in the proxy runtime. Every split runs in a proxy-managed container spawned on demand. The proxy adapter is provider-neutral and installs no CLIs, while sandbox lifecycle includes limited provider credential setup such as Grok auth seeding. OpenTelemetry is a no-op without a host SDK.
 
 ## Related
 

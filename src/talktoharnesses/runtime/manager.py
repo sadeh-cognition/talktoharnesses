@@ -5,10 +5,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Literal, cast
+from typing import Protocol, cast
 from uuid import UUID, uuid4
 
 from talktoharnesses.application.faults import FaultCallback, FaultPoint, checkpoint
@@ -44,7 +44,6 @@ from talktoharnesses.domain.transitions import (
     resume_session,
     start_session,
 )
-from talktoharnesses.providers._sdk_managed import SdkManagedAdapter
 from talktoharnesses.providers.adapter import (
     HarnessAdapter,
     HarnessInteractionRequest,
@@ -61,14 +60,8 @@ from talktoharnesses.runtime.events import (
     ProcessSilenceWarningEvent,
     ProcessStderrTruncatedEvent,
 )
-from talktoharnesses.runtime.handle import ProcessHandle
-from talktoharnesses.runtime.paths import (
-    resolve_directory,
-    resolve_kind_executable,
-)
+from talktoharnesses.runtime.paths import resolve_directory
 from talktoharnesses.runtime.policy import RuntimePolicy
-from talktoharnesses.runtime.spec import ProcessSpec
-from talktoharnesses.runtime.supervisor import ProcessSupervisor
 
 logger = logging.getLogger(__name__)
 
@@ -81,17 +74,80 @@ def _empty_tasks() -> list[asyncio.Task[None]]:
     return []
 
 
-def _is_sdk_managed(adapter: HarnessAdapter) -> bool:
-    return isinstance(adapter, SdkManagedAdapter) or getattr(adapter, "sdk_managed", False) is True
+class SupervisedProcess(Protocol):
+    """Surface RuntimeManager reads from a supervised process.
+
+    Satisfied by the local ``ProcessHandle`` and by ``RemoteProcessHandle``
+    (a mirror of a split-service-supervised process).
+    """
+
+    @property
+    def pid(self) -> int | None: ...
+
+    @property
+    def returncode(self) -> int | None: ...
+
+    @property
+    def redacted_stderr_tail(self) -> str: ...
+
+    @property
+    def forced(self) -> bool: ...
+
+    @property
+    def forced_reason(self) -> str | None: ...
+
+    @property
+    def stderr_truncated(self) -> bool: ...
+
+    @property
+    def retained_stderr_bytes(self) -> int: ...
+
+    def events(self) -> AsyncIterator[ProcessEvent]: ...
+
+    async def close(self) -> None: ...
+
+    async def force_terminate(self, *, reason: str | None = "forced") -> None: ...
 
 
-def _preflight_process_operation(
+def _remote_process_handle(adapter: HarnessAdapter) -> SupervisedProcess | None:
+    """A remote adapter exposes the split-supervised process after start/resume."""
+    handle = getattr(adapter, "process_handle", None)
+    if handle is None:
+        return None
+    return cast(SupervisedProcess, handle)
+
+
+async def _await_start_resume(
     adapter: HarnessAdapter,
-    mode: Literal["create", "resume"],
+    operation: Awaitable[HarnessSession],
+    *,
+    timeout: float,
+) -> HarnessSession:
+    """Let remote splits apply their staged probe/spawn/start budgets."""
+    if getattr(adapter, "remote", False) is True:
+        return await operation
+    return await asyncio.wait_for(operation, timeout=timeout)
+
+
+def _import_remote_seen(
+    adapter: HarnessAdapter,
+    seen_native_ids: frozenset[str],
+    seen_stream_offsets: frozenset[str],
 ) -> None:
-    preflight = getattr(adapter, "preflight_operation", None)
-    if callable(preflight):
-        preflight(mode)
+    """Seed a remote adapter's dedupe state before session create.
+
+    The split must import seen sets before ``resume`` so replayed native events
+    are deduplicated at the source; local adapters keep today's pump-time
+    import untouched.
+    """
+    if getattr(adapter, "remote", False) is not True:
+        return
+    import_seen = getattr(adapter, "import_seen", None)
+    if callable(import_seen):
+        cast(
+            Callable[[frozenset[str], frozenset[str]], None],
+            import_seen,
+        )(seen_native_ids, seen_stream_offsets)
 
 
 def _map_resume_reason(exc: DomainError) -> RecoveryReasonCode:
@@ -107,12 +163,9 @@ def _map_resume_reason(exc: DomainError) -> RecoveryReasonCode:
 
 @dataclass(frozen=True)
 class _LaunchPlan:
-    """Adapter and resolved spawn inputs shared by live and candidate starts."""
+    """Adapter prepared for a live or candidate start (remote splits own spawn)."""
 
     adapter: HarnessAdapter
-    sdk_managed: bool
-    executable_path: str | None
-    argv: tuple[str, ...]
 
 
 @dataclass
@@ -121,7 +174,7 @@ class ManagedRuntime:
     owner_id: str
     adapter: HarnessAdapter
     session: HarnessSession
-    process: ProcessHandle | None
+    process: SupervisedProcess | None
     process_record: ProcessRecord
     launch: LaunchSnapshot
     worker_id: str | None = None
@@ -145,7 +198,6 @@ class RuntimeManager:
         registry: AdapterRegistry,
         *,
         policy: RuntimePolicy | None = None,
-        supervisor: ProcessSupervisor | None = None,
         clock: Callable[[], datetime] | None = None,
         redaction_patterns: tuple[str, ...] = (),
         fault_callback: FaultCallback = None,
@@ -153,10 +205,6 @@ class RuntimeManager:
         self._persistence = persistence
         self._registry = registry
         self._policy = policy or RuntimePolicy()
-        self._supervisor = supervisor or ProcessSupervisor(
-            self._policy,
-            redaction_patterns=redaction_patterns,
-        )
         self._clock = clock or _utc_now
         self._redaction_patterns = redaction_patterns
         self._fault_callback = fault_callback
@@ -189,17 +237,15 @@ class RuntimeManager:
         conversation_id: UUID,
         owner_id: str,
         configuration: HarnessConfiguration,
-        argv: tuple[str, ...],
         adapter_version: str = "0",
         worker_id: str | None = None,
         fence: int | None = None,
     ) -> HarnessSession:
-        """Create adapter, spawn process, start session, persist lifecycle."""
+        """Create adapter, start the remote session, persist lifecycle."""
         return await self._start_request(
             conversation_id=conversation_id,
             owner_id=owner_id,
             configuration=configuration,
-            argv=argv,
             adapter_version=adapter_version,
             resume_native_id=None,
             worker_id=worker_id,
@@ -213,7 +259,6 @@ class RuntimeManager:
         owner_id: str,
         configuration: HarnessConfiguration,
         native_session_id: str,
-        argv: tuple[str, ...],
         adapter_version: str = "0",
         worker_id: str | None = None,
         fence: int | None = None,
@@ -222,7 +267,6 @@ class RuntimeManager:
             conversation_id=conversation_id,
             owner_id=owner_id,
             configuration=configuration,
-            argv=argv,
             adapter_version=adapter_version,
             resume_native_id=native_session_id,
             worker_id=worker_id,
@@ -233,14 +277,10 @@ class RuntimeManager:
         self,
         configuration: HarnessConfiguration,
         *,
-        argv: tuple[str, ...] = (),
         adapter_version: str = "0",
     ) -> LaunchSnapshot:
         """Probe and build a prospective launch snapshot without mutating bindings."""
-        plan = self._plan_launch(
-            configuration=configuration,
-            argv=argv,
-        )
+        plan = self._plan_launch(configuration=configuration)
         return await self._probe_and_build_launch(
             plan,
             configuration=configuration,
@@ -258,7 +298,6 @@ class RuntimeManager:
         fence: int,
         expected_binding_kind: HarnessKind,
         previous_launch: LaunchSnapshot | None,
-        argv: tuple[str, ...] = (),
         adapter_version: str = "0",
     ) -> tuple[ManagedRuntime, RecoveryReasonCode]:
         """Create a fresh local runtime and native-resume under a fence.
@@ -296,7 +335,6 @@ class RuntimeManager:
                     worker_id=worker_id,
                     fence=fence,
                     previous_launch=previous_launch,
-                    argv=argv,
                     adapter_version=adapter_version,
                 )
         finally:
@@ -313,16 +351,17 @@ class RuntimeManager:
         worker_id: str,
         fence: int,
         previous_launch: LaunchSnapshot | None,
-        argv: tuple[str, ...],
         adapter_version: str,
     ) -> tuple[ManagedRuntime, RecoveryReasonCode]:
         state = await self._persistence.get_worker_snapshot(conversation_id)
         if state.binding is None:
             raise DomainError(ErrorCode.INVALID_STATE, "conversation has no binding")
         binding = state.binding
-        plan = self._plan_launch(
-            configuration=configuration,
-            argv=argv,
+        plan = self._plan_launch(configuration=configuration)
+        _import_remote_seen(
+            plan.adapter,
+            state.seen_native_ids,
+            state.seen_stream_offsets,
         )
         try:
             launch = await self._probe_and_build_launch(
@@ -330,7 +369,6 @@ class RuntimeManager:
                 configuration=configuration,
                 adapter_version=adapter_version,
             )
-            _preflight_process_operation(plan.adapter, "resume")
         except DomainError as exc:
             raise DomainError(
                 ErrorCode.PROVIDER_INCOMPATIBLE,
@@ -373,20 +411,12 @@ class RuntimeManager:
         )
         state = await self._persistence.get_worker_snapshot(conversation_id)
 
-        handle: ProcessHandle | None = None
+        handle: SupervisedProcess | None = None
         try:
-            if not plan.sdk_managed:
-                handle = await self._spawn_process(
-                    plan,
-                    conversation_id=conversation_id,
-                    binding_id=binding.id,
-                    process_id=process_id,
-                    launch=launch,
-                )
             process_record = process_record.model_copy(
                 update={
                     "status": ProcessStatus.RUNNING,
-                    "pid": handle.pid if handle is not None else None,
+                    "pid": None,
                     "started_at": self._clock(),
                 }
             )
@@ -407,7 +437,8 @@ class RuntimeManager:
             state = await self._persistence.get_worker_snapshot(conversation_id)
 
             try:
-                session = await asyncio.wait_for(
+                session = await _await_start_resume(
+                    plan.adapter,
                     plan.adapter.resume(
                         ResumeSessionRequest(
                             conversation_id=conversation_id,
@@ -432,6 +463,12 @@ class RuntimeManager:
                     mapped.value,
                     details={"conversation_id": str(conversation_id)},
                 ) from exc
+
+            if handle is None:
+                remote_handle = _remote_process_handle(plan.adapter)
+                if remote_handle is not None:
+                    handle = remote_handle
+                    process_record = process_record.model_copy(update={"pid": remote_handle.pid})
 
             result = resume_session(
                 state,
@@ -476,13 +513,12 @@ class RuntimeManager:
             if handle is not None:
                 with contextlib.suppress(Exception):
                     await handle.force_terminate(reason="recovery_resume_failure")
-            elif plan.sdk_managed:
-                await self._rollback_sdk_startup(
-                    plan.adapter,
-                    conversation_id=conversation_id,
-                    binding_id=binding.id,
-                    configuration=configuration,
-                )
+            await self._rollback_adapter_startup(
+                plan.adapter,
+                conversation_id=conversation_id,
+                binding_id=binding.id,
+                configuration=configuration,
+            )
             raise
 
     async def recovery_handoff_fallback(
@@ -536,7 +572,6 @@ class RuntimeManager:
         conversation_id: UUID,
         owner_id: str,
         configuration: HarnessConfiguration,
-        argv: tuple[str, ...],
         adapter_version: str,
         resume_native_id: str | None,
         worker_id: str | None,
@@ -564,7 +599,6 @@ class RuntimeManager:
                     conversation_id=conversation_id,
                     owner_id=owner_id,
                     configuration=configuration,
-                    argv=argv,
                     adapter_version=adapter_version,
                     resume_native_id=resume_native_id,
                     worker_id=worker_id,
@@ -580,7 +614,6 @@ class RuntimeManager:
         conversation_id: UUID,
         owner_id: str,
         configuration: HarnessConfiguration,
-        argv: tuple[str, ...],
         adapter_version: str,
         resume_native_id: str | None,
         worker_id: str | None,
@@ -591,12 +624,9 @@ class RuntimeManager:
             raise DomainError(ErrorCode.INVALID_STATE, "conversation has no binding")
 
         binding = state.binding
-        plan = self._plan_launch(
-            configuration=configuration,
-            argv=argv,
-        )
+        plan = self._plan_launch(configuration=configuration)
         adapter = plan.adapter
-        sdk_managed = plan.sdk_managed
+        _import_remote_seen(adapter, state.seen_native_ids, state.seen_stream_offsets)
 
         process_id = uuid4()
         process_record = ProcessRecord(
@@ -605,8 +635,8 @@ class RuntimeManager:
             binding_id=binding.id,
             status=ProcessStatus.STARTING,
         )
-        # Persist STARTING before spawn so no unrecorded process survives a crash
-        # after successful spawn but before RUNNING is committed.
+        # Persist STARTING before the remote session create so a crash between
+        # the split-side spawn and the RUNNING commit still leaves a record.
         try:
             await self._commit_process(
                 state=state,
@@ -620,7 +650,7 @@ class RuntimeManager:
         except DomainError:
             raise
 
-        handle: ProcessHandle | None = None
+        handle: SupervisedProcess | None = None
         launch: LaunchSnapshot | None = None
         try:
             launch = await self._probe_and_build_launch(
@@ -628,23 +658,10 @@ class RuntimeManager:
                 configuration=configuration,
                 adapter_version=adapter_version,
             )
-            _preflight_process_operation(
-                adapter,
-                "create" if resume_native_id is None else "resume",
-            )
-            if not sdk_managed:
-                handle = await self._spawn_process(
-                    plan,
-                    conversation_id=conversation_id,
-                    binding_id=binding.id,
-                    process_id=process_id,
-                    launch=launch,
-                )
-
             process_record = process_record.model_copy(
                 update={
                     "status": ProcessStatus.RUNNING,
-                    "pid": handle.pid if handle is not None else None,
+                    "pid": None,
                     "started_at": self._clock(),
                 }
             )
@@ -662,105 +679,40 @@ class RuntimeManager:
             )
             state = await self._persistence.get_snapshot(conversation_id, owner_id)
 
-            startup_retried = False
-            while True:
-                try:
-                    if resume_native_id is None:
-                        operation = adapter.start(
-                            StartSessionRequest(
-                                conversation_id=conversation_id,
-                                binding_id=binding.id,
-                                configuration=configuration,
-                                launch=launch,
-                            )
-                        )
-                    else:
-                        operation = adapter.resume(
-                            ResumeSessionRequest(
-                                conversation_id=conversation_id,
-                                binding_id=binding.id,
-                                configuration=configuration,
-                                native_session_id=resume_native_id,
-                                launch=launch,
-                            )
-                        )
-                    session = await asyncio.wait_for(
-                        operation,
-                        timeout=self._policy.start_resume_timeout,
-                    )
-                    break
-                except DomainError as exc:
-                    retry_startup_obj = getattr(adapter, "retry_startup", None)
-                    if startup_retried or not callable(retry_startup_obj) or handle is None:
-                        raise
-                    retry_startup = cast(
-                        Callable[[DomainError], Awaitable[tuple[str, ...] | None]],
-                        retry_startup_obj,
-                    )
-                    retry_argv_obj = await retry_startup(exc)
-                    if retry_argv_obj is None:
-                        raise
-                    startup_retried = True
-                    await handle.force_terminate(reason="startup_bind_retry")
-                    failed_record = process_record.model_copy(
-                        update={
-                            "status": ProcessStatus.FAILED,
-                            "exited_at": self._clock(),
-                            "exit_code": handle.returncode,
-                            "redacted_stderr_tail": handle.redacted_stderr_tail,
-                        }
-                    )
-                    await self._commit_process(
-                        state=state,
-                        process=failed_record,
-                        launch_history_entry=None,
-                        events=(),
-                        worker_id=worker_id,
-                        fence=fence,
-                    )
-                    state = await self._persistence.get_snapshot(conversation_id, owner_id)
-                    process_id = uuid4()
-                    process_record = ProcessRecord(
-                        id=process_id,
+            # The split performs its own preflight, spawn, and startup retry
+            # inside session create.
+            if resume_native_id is None:
+                operation = adapter.start(
+                    StartSessionRequest(
                         conversation_id=conversation_id,
                         binding_id=binding.id,
-                        status=ProcessStatus.STARTING,
-                    )
-                    await self._commit_process(
-                        state=state,
-                        process=process_record,
-                        launch_history_entry=None,
-                        events=(),
-                        worker_id=worker_id,
-                        fence=fence,
-                    )
-                    state = await self._persistence.get_snapshot(conversation_id, owner_id)
-                    retry_argv = tuple(str(part) for part in retry_argv_obj)
-                    handle = None
-                    handle = await self._spawn_process(
-                        plan,
-                        conversation_id=conversation_id,
-                        binding_id=binding.id,
-                        process_id=process_id,
+                        configuration=configuration,
                         launch=launch,
-                        argv=retry_argv,
                     )
-                    process_record = process_record.model_copy(
-                        update={
-                            "status": ProcessStatus.RUNNING,
-                            "pid": handle.pid,
-                            "started_at": self._clock(),
-                        }
+                )
+            else:
+                operation = adapter.resume(
+                    ResumeSessionRequest(
+                        conversation_id=conversation_id,
+                        binding_id=binding.id,
+                        configuration=configuration,
+                        native_session_id=resume_native_id,
+                        launch=launch,
                     )
-                    await self._commit_process(
-                        state=state,
-                        process=process_record,
-                        launch_history_entry=None,
-                        events=(),
-                        worker_id=worker_id,
-                        fence=fence,
-                    )
-                    state = await self._persistence.get_snapshot(conversation_id, owner_id)
+                )
+            session = await _await_start_resume(
+                adapter,
+                operation,
+                timeout=self._policy.start_resume_timeout,
+            )
+
+            if handle is None:
+                remote_handle = _remote_process_handle(adapter)
+                if remote_handle is not None:
+                    # The split spawned the process during session create; adopt
+                    # its supervised mirror and record the containerized pid.
+                    handle = remote_handle
+                    process_record = process_record.model_copy(update={"pid": remote_handle.pid})
 
             if resume_native_id is None:
                 result = start_session(
@@ -812,51 +764,36 @@ class RuntimeManager:
             return session
 
         except asyncio.CancelledError:
-            if sdk_managed:
-                await asyncio.shield(
-                    self._rollback_sdk_startup(
-                        adapter,
-                        conversation_id=conversation_id,
-                        binding_id=binding.id,
-                        configuration=configuration,
-                    )
-                )
-            if handle is not None:
-                await asyncio.shield(handle.force_terminate(reason="startup_cancelled"))
-                await asyncio.shield(
-                    self._persist_failure(
-                        conversation_id,
-                        owner_id,
-                        process_record,
-                        handle,
-                        ErrorCode.RUNTIME_TIMEOUT.value,
-                        "session startup cancelled during shutdown",
-                        worker_id=worker_id,
-                        fence=fence,
-                    )
-                )
-            elif sdk_managed:
-                await asyncio.shield(
-                    self._persist_failure(
-                        conversation_id,
-                        owner_id,
-                        process_record,
-                        None,
-                        ErrorCode.RUNTIME_TIMEOUT.value,
-                        "session startup cancelled during shutdown",
-                        worker_id=worker_id,
-                        fence=fence,
-                    )
-                )
-            raise
-        except TimeoutError as exc:
-            if sdk_managed:
-                await self._rollback_sdk_startup(
+            await asyncio.shield(
+                self._rollback_adapter_startup(
                     adapter,
                     conversation_id=conversation_id,
                     binding_id=binding.id,
                     configuration=configuration,
                 )
+            )
+            if handle is not None:
+                await asyncio.shield(handle.force_terminate(reason="startup_cancelled"))
+            await asyncio.shield(
+                self._persist_failure(
+                    conversation_id,
+                    owner_id,
+                    process_record,
+                    handle,
+                    ErrorCode.RUNTIME_TIMEOUT.value,
+                    "session startup cancelled during shutdown",
+                    worker_id=worker_id,
+                    fence=fence,
+                )
+            )
+            raise
+        except TimeoutError as exc:
+            await self._rollback_adapter_startup(
+                adapter,
+                conversation_id=conversation_id,
+                binding_id=binding.id,
+                configuration=configuration,
+            )
             if handle is not None:
                 await handle.force_terminate(reason="start_resume_timeout")
             await self._persist_failure(
@@ -875,13 +812,12 @@ class RuntimeManager:
                 details={"conversation_id": str(conversation_id)},
             ) from exc
         except DomainError as exc:
-            if sdk_managed:
-                await self._rollback_sdk_startup(
-                    adapter,
-                    conversation_id=conversation_id,
-                    binding_id=binding.id,
-                    configuration=configuration,
-                )
+            await self._rollback_adapter_startup(
+                adapter,
+                conversation_id=conversation_id,
+                binding_id=binding.id,
+                configuration=configuration,
+            )
             if handle is not None:
                 await handle.force_terminate(reason="startup_failure")
             await self._persist_failure(
@@ -896,13 +832,12 @@ class RuntimeManager:
             )
             raise
         except Exception:
-            if sdk_managed:
-                await self._rollback_sdk_startup(
-                    adapter,
-                    conversation_id=conversation_id,
-                    binding_id=binding.id,
-                    configuration=configuration,
-                )
+            await self._rollback_adapter_startup(
+                adapter,
+                conversation_id=conversation_id,
+                binding_id=binding.id,
+                configuration=configuration,
+            )
             if handle is not None:
                 await handle.force_terminate(reason="startup_failure")
             await self._persist_failure(
@@ -917,7 +852,7 @@ class RuntimeManager:
             )
             raise
 
-    async def _rollback_sdk_startup(
+    async def _rollback_adapter_startup(
         self,
         adapter: HarnessAdapter,
         *,
@@ -925,6 +860,7 @@ class RuntimeManager:
         binding_id: UUID,
         configuration: HarnessConfiguration,
     ) -> None:
+        """Close any adapter-side session state left over from a failed start."""
         provisional = HarnessSession(
             conversation_id=conversation_id,
             binding_id=binding_id,
@@ -944,7 +880,7 @@ class RuntimeManager:
         conversation_id: UUID,
         owner_id: str,
         process_record: ProcessRecord,
-        handle: ProcessHandle | None,
+        handle: SupervisedProcess | None,
         error_code: str,
         message: str,
         *,
@@ -1014,36 +950,13 @@ class RuntimeManager:
         self,
         *,
         configuration: HarnessConfiguration,
-        argv: tuple[str, ...],
     ) -> _LaunchPlan:
-        """Create the adapter and resolve the executable/argv it will launch with."""
+        """Create the adapter for one runtime; splits own executables and spawn."""
         adapter = self._registry.create(configuration.kind)
         set_redaction_patterns = getattr(adapter, "set_redaction_patterns", None)
         if callable(set_redaction_patterns):
             set_redaction_patterns(self._redaction_patterns)
-        sdk_managed = _is_sdk_managed(adapter)
-        exe = None if sdk_managed else str(resolve_kind_executable(configuration.kind))
-
-        # Process-bound adapters may construct argv when the caller passes empty.
-        effective_argv: tuple[str, ...] = argv
-        build_argv = getattr(adapter, "build_argv", None)
-        if callable(build_argv) and not effective_argv:
-            built_obj = build_argv(configuration)
-            if isinstance(built_obj, tuple):
-                effective_argv = tuple(str(part) for part in cast(tuple[object, ...], built_obj))
-            elif isinstance(built_obj, list):
-                effective_argv = tuple(str(part) for part in cast(list[object], built_obj))
-            else:
-                raise DomainError(
-                    ErrorCode.INVALID_STATE,
-                    "build_argv must return a sequence of strings",
-                )
-        return _LaunchPlan(
-            adapter=adapter,
-            sdk_managed=sdk_managed,
-            executable_path=exe,
-            argv=effective_argv,
-        )
+        return _LaunchPlan(adapter=adapter)
 
     async def _probe_and_build_launch(
         self,
@@ -1056,19 +969,14 @@ class RuntimeManager:
             plan.adapter.probe(configuration),
             timeout=self._policy.start_resume_timeout,
         )
-        if plan.sdk_managed:
-            return self._build_sdk_launch_snapshot(
-                working_directory=configuration.working_directory,
-                workspace_roots=configuration.workspace_roots,
-                capabilities=caps,
-                model=configuration.model,
-                mode=configuration.mode,
-                adapter_version=adapter_version,
-                effort=configuration.effort,
-            )
-        assert plan.executable_path is not None
-        return self._supervisor.build_launch_snapshot(
-            executable_path=plan.executable_path,
+        launch_getter = getattr(plan.adapter, "last_probe_launch", None)
+        if callable(launch_getter):
+            remote_launch = launch_getter()
+            if isinstance(remote_launch, LaunchSnapshot):
+                # Remote adapters return the split-resolved snapshot (container
+                # paths, split-side executable resolution).
+                return remote_launch
+        return self._build_local_launch_snapshot(
             working_directory=configuration.working_directory,
             workspace_roots=configuration.workspace_roots,
             capabilities=caps,
@@ -1077,31 +985,6 @@ class RuntimeManager:
             adapter_version=adapter_version,
             effort=configuration.effort,
         )
-
-    async def _spawn_process(
-        self,
-        plan: _LaunchPlan,
-        *,
-        conversation_id: UUID,
-        binding_id: UUID,
-        process_id: UUID,
-        launch: LaunchSnapshot,
-        argv: tuple[str, ...] | None = None,
-    ) -> ProcessHandle:
-        handle = await self._supervisor.spawn(
-            ProcessSpec(
-                conversation_id=conversation_id,
-                binding_id=binding_id,
-                process_id=process_id,
-                launch=launch,
-                argv=plan.argv if argv is None else argv,
-            ),
-            redaction_patterns=self._redaction_patterns,
-        )
-        bind_process = getattr(plan.adapter, "bind_process", None)
-        if callable(bind_process):
-            bind_process(handle)
-        return handle
 
     # ------------------------------------------------------------------
     # Candidate runtimes (durable switching and post-retention rotation)
@@ -1117,7 +1000,6 @@ class RuntimeManager:
         owner_id: str,
         binding_id: UUID,
         configuration: HarnessConfiguration,
-        argv: tuple[str, ...] = (),
         adapter_version: str = "0",
         worker_id: str | None = None,
         fence: int | None = None,
@@ -1139,29 +1021,18 @@ class RuntimeManager:
                 )
             self._require_capacity()
 
-        plan = self._plan_launch(
-            configuration=configuration,
-            argv=argv,
-        )
+        plan = self._plan_launch(configuration=configuration)
         process_id = uuid4()
-        handle: ProcessHandle | None = None
+        handle: SupervisedProcess | None = None
         try:
             launch = await self._probe_and_build_launch(
                 plan,
                 configuration=configuration,
                 adapter_version=adapter_version,
             )
-            _preflight_process_operation(plan.adapter, "create")
-            if not plan.sdk_managed:
-                handle = await self._spawn_process(
-                    plan,
-                    conversation_id=conversation_id,
-                    binding_id=binding_id,
-                    process_id=process_id,
-                    launch=launch,
-                )
             # Candidates always create a new native session; never resume.
-            session = await asyncio.wait_for(
+            session = await _await_start_resume(
+                plan.adapter,
                 plan.adapter.start(
                     StartSessionRequest(
                         conversation_id=conversation_id,
@@ -1196,6 +1067,9 @@ class RuntimeManager:
                 )
             )
             raise
+
+        if handle is None:
+            handle = _remote_process_handle(plan.adapter)
 
         managed = ManagedRuntime(
             conversation_id=conversation_id,
@@ -1377,24 +1251,23 @@ class RuntimeManager:
     async def _abort_candidate_startup(
         self,
         plan: _LaunchPlan,
-        handle: ProcessHandle | None,
+        handle: SupervisedProcess | None,
         *,
         conversation_id: UUID,
         binding_id: UUID,
         configuration: HarnessConfiguration,
     ) -> None:
-        if plan.sdk_managed:
-            await self._rollback_sdk_startup(
-                plan.adapter,
-                conversation_id=conversation_id,
-                binding_id=binding_id,
-                configuration=configuration,
-            )
+        await self._rollback_adapter_startup(
+            plan.adapter,
+            conversation_id=conversation_id,
+            binding_id=binding_id,
+            configuration=configuration,
+        )
         if handle is not None:
             with contextlib.suppress(Exception):
                 await handle.force_terminate(reason="candidate_startup_failure")
 
-    def _build_sdk_launch_snapshot(
+    def _build_local_launch_snapshot(
         self,
         *,
         working_directory: str,
@@ -1405,7 +1278,7 @@ class RuntimeManager:
         adapter_version: str,
         effort: str | None = None,
     ) -> LaunchSnapshot:
-        """Resolve cwd/roots for an SDK-managed runtime."""
+        """Resolve cwd/roots locally for adapters without a probe snapshot."""
         workdir = resolve_directory(
             working_directory,
             error_code=ErrorCode.WORKING_DIRECTORY_NOT_FOUND,

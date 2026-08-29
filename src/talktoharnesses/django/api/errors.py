@@ -31,12 +31,15 @@ _CONFLICT_CODES = frozenset(
         ErrorCode.QUEUED_PROMPT_NOT_EDITABLE,
         ErrorCode.NO_ACTIVE_TURN,
         ErrorCode.NO_QUEUED_PROMPT,
+        ErrorCode.SANDBOX_PREPARING,
+        ErrorCode.SANDBOX_UNAVAILABLE,
     }
 )
 
 _BAD_REQUEST_CODES = frozenset(
     {
         ErrorCode.INVALID_SEARCH_QUERY,
+        ErrorCode.SANDBOX_PATH_NOT_MOUNTED,
     }
 )
 

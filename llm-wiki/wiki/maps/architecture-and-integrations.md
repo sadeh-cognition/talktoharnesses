@@ -7,22 +7,22 @@ audiences:
 tags:
   - type/map
   - audience/developer
-last_verified: 2026-08-20
-verified_against_commit: bb3d2b755500fc663816d6cbd1a7cd7947a8920b
+last_verified: 2026-08-29
+verified_against_commit: 47644027875773ba520cbfdd9f978d196a548802
 ---
 
 # Architecture and Integrations
 
-TalkToHarnesses sits between host applications and local coding-agent CLIs.
+TalkToHarnesses sits between host applications and per-kind coding-agent split services.
 
 ## Internal layers
 
-[Layered architecture](../architecture/layered-architecture.md) keeps domain models free of Django and provider SDKs. The application facade coordinates persistence, commands, and adapters. Django is an optional HTTP surface.
+[Layered architecture](../architecture/layered-architecture.md) keeps domain models free of Django and provider SDKs. The application facade coordinates persistence, commands, and generic remote adapters. Django is an optional HTTP surface.
 
 ## External boundaries
 
 - Host Django settings, ASGI process, database, and JWT users.
-- Six provider CLIs or SDKs, each behind [adapter protocol](../interfaces/adapter-protocol.md).
+- Six split services, each owning its provider CLI or SDK behind [adapter protocol](../interfaces/adapter-protocol.md).
 - Optional OpenTelemetry SDK/exporter installed by the host.
 - Official HTTP client for remote consumers.
 

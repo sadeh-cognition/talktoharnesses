@@ -33,6 +33,7 @@ from talktoharnesses.domain.enums import (
     CommandKind,
     CommandStatus,
     ErrorCode,
+    HarnessKind,
     InteractionStatus,
 )
 from talktoharnesses.domain.errors import DomainError
@@ -69,6 +70,7 @@ from talktoharnesses.domain.models import (
     Turn,
     TurnProjection,
     UserRuleScope,
+    VersionAdvisory,
 )
 from talktoharnesses.domain.transcripts import (
     TranscriptDocument,
@@ -95,7 +97,7 @@ from talktoharnesses.domain.transitions import (
     unsnooze_conversation,
 )
 from talktoharnesses.providers.effort import validate_effort
-from talktoharnesses.providers.registry import AdapterRegistry
+from talktoharnesses.providers.registry import AdapterRegistry, release_probe_adapter
 from talktoharnesses.runtime.manager import RuntimeManager
 
 logger = logging.getLogger(__name__)
@@ -126,14 +128,14 @@ def _turn_projection(turn: Turn) -> TurnProjection:
     )
 
 
-def _with_version_advisory(projection: HarnessProbeProjection) -> HarnessProbeProjection:
-    if projection.version_advisory is not None:
-        return projection
-    from talktoharnesses.providers.compatibility import advisory_for_capabilities
-
-    return projection.model_copy(
-        update={"version_advisory": advisory_for_capabilities(projection.capabilities)}
-    )
+def _adapter_probe_advisory(adapter: object) -> VersionAdvisory | None:
+    """Advisory computed by the split against its packaged floor, if any."""
+    getter = getattr(adapter, "last_probe_advisory", None)
+    if callable(getter):
+        advisory = getter()
+        if isinstance(advisory, VersionAdvisory):
+            return advisory
+    return None
 
 
 class TalkToHarnessesService:
@@ -152,12 +154,15 @@ class TalkToHarnessesService:
         runtime_manager: RuntimeManager,
         *,
         fault_callback: FaultCallback = None,
+        readiness_spawn_gate: Callable[[HarnessKind], Awaitable[bool]] | None = None,
     ) -> None:
         self._persistence = persistence
         self._registry = registry
         self._publisher = publisher
         self._clock = clock
         self._runtime = runtime_manager
+        # Split-computed version advisories from the most recent in-process probe.
+        self._probe_advisories: dict[UUID, VersionAdvisory] = {}
         # Propagate into a pre-built runtime (production ASGI constructs it first).
         runtime_manager._fault_callback = fault_callback  # pyright: ignore[reportPrivateUsage]
         self._broker = InteractionBroker(persistence, publisher, clock=clock)
@@ -179,7 +184,9 @@ class TalkToHarnessesService:
             runtime_manager._policy,  # pyright: ignore[reportPrivateUsage]
             fault_callback=fault_callback,
         )
-        self._readiness = ReadinessProbeMonitor(persistence, registry, clock)
+        self._readiness = ReadinessProbeMonitor(
+            persistence, registry, clock, spawn_gate=readiness_spawn_gate
+        )
         self._started = False
         self._worker_id: str | None = None
 
@@ -340,6 +347,8 @@ class TalkToHarnessesService:
                 "harness probe failed",
                 details={"harness_id": str(harness_id)},
             ) from exc
+        finally:
+            await release_probe_adapter(adapter)
         probed_at = self._clock()
         projection = await self._persistence.save_harness_probe(
             harness_id,
@@ -348,14 +357,23 @@ class TalkToHarnessesService:
             probed_at=probed_at,
         )
         self._readiness.notify_success(probed_at, harness_id)
-        return _with_version_advisory(projection)
+        advisory = _adapter_probe_advisory(adapter)
+        if advisory is not None:
+            self._probe_advisories[harness_id] = advisory
+            projection = projection.model_copy(update={"version_advisory": advisory})
+        return projection
 
     async def get_harness_capabilities(
         self, owner_id: str, harness_id: UUID
     ) -> HarnessProbeProjection:
-        return _with_version_advisory(
-            await self._persistence.get_harness_probe(harness_id, owner_id)
-        )
+        projection = await self._persistence.get_harness_probe(harness_id, owner_id)
+        if projection.version_advisory is None:
+            # Advisories come from the split at probe time; reads reuse the last
+            # in-process probe result (None after a proxy restart until re-probe).
+            advisory = self._probe_advisories.get(harness_id)
+            if advisory is not None:
+                projection = projection.model_copy(update={"version_advisory": advisory})
+        return projection
 
     async def get_harness_models(
         self, owner_id: str, harness_id: UUID

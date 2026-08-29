@@ -113,7 +113,7 @@ Do not link to files outside this vault. Cite repository paths as prose.
 Run the wiki linter after every maintenance pass:
 
 ```bash
-uv run manage.py wiki_lint --root /path/to/talktoharnesses/llm-wiki
+uv run host/manage.py wiki_lint --root /path/to/talktoharnesses/llm-wiki
 ```
 
 The deterministic linter checks metadata, titles, links, duplicate titles,

@@ -1,0 +1,255 @@
+"""Grok permission fixtures: typed actions, manual-only, options, correlation."""
+
+from __future__ import annotations
+
+from types import SimpleNamespace
+from uuid import uuid4
+
+import pytest
+from tth_types.adapter import HarnessInteractionRequest, HarnessSession
+from tth_types.enums import ApprovalDecision, FileOperation
+from tth_types.events import InteractionRequestedPayload
+from tth_types.harness import (
+    ApprovalRequestPayload,
+    CommandApprovalAction,
+    FileApprovalAction,
+    InteractionAnswer,
+    NetworkApprovalAction,
+)
+
+from tth_grok.acp.pending import PendingAcpApproval
+from tth_grok.harness.adapter import GrokAdapter
+from tth_grok.harness.normalizer import GrokNormalizer
+
+
+def _options(*kinds: str) -> list[dict[str, str]]:
+    return [{"optionId": f"opt-{k}", "kind": k} for k in kinds]
+
+
+@pytest.mark.asyncio
+async def test_grok_ask_user_question_blocks_until_canonical_answer() -> None:
+    adapter = GrokAdapter()
+    session = HarnessSession(
+        conversation_id=uuid4(),
+        binding_id=uuid4(),
+        kind=adapter.kind,
+        native_session_id="s",
+    )
+    adapter._session = session  # pyright: ignore[reportPrivateUsage]
+    adapter._normalizer.set_session("s")  # pyright: ignore[reportPrivateUsage]
+    adapter._normalizer.begin_turn(uuid4())  # pyright: ignore[reportPrivateUsage]
+    responses: list[tuple[object, object]] = []
+
+    async def respond(request_id: object, result: object) -> None:
+        responses.append((request_id, result))
+
+    adapter._connection = SimpleNamespace(respond=respond)  # type: ignore[assignment]
+    await adapter._on_question_request(  # pyright: ignore[reportPrivateUsage]
+        SimpleNamespace(
+            id="rpc-question",
+            params={
+                "sessionId": "s",
+                "toolCallId": "tool-question",
+                "questions": [
+                    {
+                        "id": "style",
+                        "question": "Choose a style",
+                        "options": [
+                            {"label": "Brief", "description": "Short"},
+                            {"label": "Detailed", "description": "Long"},
+                        ],
+                        "multiSelect": False,
+                    }
+                ],
+                "mode": "default",
+            },
+        )
+    )
+    interaction = adapter._event_q.get_nowait()  # pyright: ignore[reportPrivateUsage]
+    assert isinstance(interaction, HarnessInteractionRequest)
+    await adapter.answer_interaction(
+        session,
+        InteractionAnswer(
+            interaction_id=interaction.payload.interaction_id,
+            answers={"style": ["Brief"]},
+        ),
+    )
+    assert responses == [
+        (
+            "rpc-question",
+            {
+                "outcome": "accepted",
+                "answers": {"Choose a style": "Brief"},
+                "annotations": {},
+            },
+        )
+    ]
+
+
+def test_permission_command_argv_action() -> None:
+    n = GrokNormalizer()
+    n.set_session("s")
+    n.begin_turn(uuid4())
+    events = n.on_permission_request(
+        {
+            "sessionId": "s",
+            "toolCall": {
+                "title": "Bash",
+                "rawInput": {"command": ["tool", "a", "b"]},
+            },
+            "options": _options("allow_once", "reject_once"),
+        },
+        interaction_id=uuid4(),
+    )
+    payload = events[0]
+    assert isinstance(payload, InteractionRequestedPayload)
+    assert isinstance(payload.request, ApprovalRequestPayload)
+    assert isinstance(payload.request.action, CommandApprovalAction)
+    assert payload.request.action.argv == ("tool", "a", "b")
+    assert ApprovalDecision.ALLOW_ONCE in payload.request.available_decisions
+    assert ApprovalDecision.DENY in payload.request.available_decisions
+    assert ApprovalDecision.CANCEL in payload.request.available_decisions
+
+
+def test_permission_file_action() -> None:
+    n = GrokNormalizer()
+    n.set_session("s")
+    n.begin_turn(uuid4())
+    events = n.on_permission_request(
+        {
+            "toolCall": {
+                "rawInput": {"path": "/tmp/x.py", "operation": "read"},
+            },
+            "options": _options("allow_once", "deny_once"),
+        },
+        interaction_id=uuid4(),
+    )
+    payload = events[0]
+    assert isinstance(payload, InteractionRequestedPayload)
+    assert isinstance(payload.request, ApprovalRequestPayload)
+    request = payload.request
+    assert isinstance(request.action, FileApprovalAction)
+    assert request.action.path == "/tmp/x.py"
+    assert request.action.operation is FileOperation.READ
+
+
+def test_permission_network_top_level() -> None:
+    n = GrokNormalizer()
+    n.set_session("s")
+    n.begin_turn(uuid4())
+    events = n.on_permission_request(
+        {"networkAccess": True, "options": _options("allow_once", "reject_once")},
+        interaction_id=uuid4(),
+    )
+    payload = events[0]
+    assert isinstance(payload, InteractionRequestedPayload)
+    assert isinstance(payload.request, ApprovalRequestPayload)
+    assert isinstance(payload.request.action, NetworkApprovalAction)
+
+
+def test_permission_network_via_raw_input() -> None:
+    n = GrokNormalizer()
+    n.set_session("s")
+    n.begin_turn(uuid4())
+    events = n.on_permission_request(
+        {
+            "toolCall": {"rawInput": {"network": True}},
+            "options": _options("allow_once"),
+        },
+        interaction_id=uuid4(),
+    )
+    payload = events[0]
+    assert isinstance(payload, InteractionRequestedPayload)
+    assert isinstance(payload.request, ApprovalRequestPayload)
+    assert isinstance(payload.request.action, NetworkApprovalAction)
+
+
+def test_manual_only_when_no_typed_action() -> None:
+    n = GrokNormalizer()
+    n.set_session("s")
+    n.begin_turn(uuid4())
+    events = n.on_permission_request(
+        {"description": "please approve this", "options": _options("allow_once")},
+        interaction_id=uuid4(),
+    )
+    payload = events[0]
+    assert isinstance(payload, InteractionRequestedPayload)
+    assert isinstance(payload.request, ApprovalRequestPayload)
+    request = payload.request
+    assert request.action is None
+    assert request.summary == "please approve this"
+
+
+def test_unknown_fields_on_permission_rejected_by_schema() -> None:
+    from tth_grok.acp.schemas.base import is_allowlisted_permission_request
+
+    assert is_allowlisted_permission_request(
+        {
+            "sessionId": "s",
+            "toolCall": {"rawInput": {"command": ["echo"], "timeout": 60_000}},
+            "options": [],
+        }
+    )
+    assert not is_allowlisted_permission_request(
+        {
+            "sessionId": "s",
+            "toolCall": {"rawInput": {"command": ["echo"], "shell": True}},
+            "options": [],
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_adapter_answer_rejects_unmapped_decision() -> None:
+    adapter = GrokAdapter()
+    adapter._normalizer.set_session("s")  # pyright: ignore[reportPrivateUsage]
+    adapter._normalizer.begin_turn(uuid4())  # pyright: ignore[reportPrivateUsage]
+    interaction_id = uuid4()
+    adapter._pending_interactions[interaction_id] = PendingAcpApproval(  # pyright: ignore[reportPrivateUsage]
+        rpc_id="rpc-1",
+        options=({"optionId": "only-allow", "kind": "allow_once"},),
+    )
+    from tth_types.adapter import HarnessSession
+    from tth_types.errors import DomainError
+    from tth_types.harness import InteractionAnswer
+
+    session = HarnessSession(
+        conversation_id=uuid4(),
+        binding_id=uuid4(),
+        kind=adapter.kind,
+        native_session_id="s",
+    )
+    adapter._session = session  # pyright: ignore[reportPrivateUsage]
+    adapter._connection = SimpleNamespace(respond=lambda *a, **k: None)  # type: ignore[assignment]
+    adapter._closed = False  # pyright: ignore[reportPrivateUsage]
+
+    with pytest.raises(DomainError):
+        await adapter.answer_interaction(
+            session,
+            InteractionAnswer(
+                interaction_id=interaction_id,
+                decision=ApprovalDecision.ALLOW_SESSION,
+            ),
+        )
+    # Waiter not popped on rejection.
+    assert interaction_id in adapter._pending_interactions  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_permission_requests_keep_distinct_waiters() -> None:
+    adapter = GrokAdapter()
+    adapter._normalizer.set_session("s")  # pyright: ignore[reportPrivateUsage]
+    adapter._normalizer.begin_turn(uuid4())  # pyright: ignore[reportPrivateUsage]
+    await adapter._on_permission_request(  # pyright: ignore[reportPrivateUsage]
+        SimpleNamespace(id="rpc-1", params={"options": [], "toolCall": {"toolCallId": "t1"}})
+    )
+    await adapter._on_permission_request(  # pyright: ignore[reportPrivateUsage]
+        SimpleNamespace(id="rpc-2", params={"options": [], "toolCall": {"toolCallId": "t2"}})
+    )
+    assert len(adapter._pending_interactions) == 2  # pyright: ignore[reportPrivateUsage]
+    e1 = adapter._event_q.get_nowait()  # pyright: ignore[reportPrivateUsage]
+    e2 = adapter._event_q.get_nowait()  # pyright: ignore[reportPrivateUsage]
+    assert isinstance(e1, HarnessInteractionRequest)
+    assert isinstance(e2, HarnessInteractionRequest)
+    assert e1.provider_correlation["json_rpc_request_id"] == "rpc-1"
+    assert e2.provider_correlation["json_rpc_request_id"] == "rpc-2"

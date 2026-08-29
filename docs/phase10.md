@@ -241,17 +241,16 @@ Normal development CI runs structural validation and permits empty matrices whil
 Replace the pre-adapter README status with a concise stable overview and link to detailed operator
 documents. Keep the quick start executable and cover:
 
-- Python 3.11+, core-only installation, Django/SQLite, Django/PostgreSQL, individual provider
-  extras, and `all`;
-- the fact that Grok, Cursor, and OpenCode executables are external and are never discovered,
-  installed, upgraded, or given arbitrary package-owned flags;
+- Python 3.11+, core-only installation, Django/SQLite, Django/PostgreSQL, and `all`;
+- the fact that provider executables and SDKs belong to the split runtimes rather than the proxy;
 - provider SDK/executable versions being accepted only when listed in the generated compatibility
   matrix for the current operation and platform;
 - host Django `INSTALLED_APPS`, URL inclusion, ASGI lifespan wrapper, migrations, and Uvicorn
   invocation on `127.0.0.1`;
 - required JWT signing-key rules and trusted in-process `issue_token(user)` issuance; and
-- the security boundary: authenticated submissions execute local harnesses with the Django OS
-  user's workspace access and are not a sandbox.
+- the security boundary: authenticated submissions execute in configured split services, reached
+  by URL or run in managed Docker sandboxes; managed containers receive only the configured
+  project-directory mount.
 
 Do not duplicate the complete support tables or operational guide in README. Link to
 `SUPPORTED_HARNESSES.md` and the detailed documents.
@@ -411,7 +410,7 @@ enforce a second coverage number.
 Refactor `.github/workflows/ci.yml` so every rule has one owning job:
 
 - `static`: locked sync/lock check, Ruff, format check, strict Pyright, migration drift, strict
-  compatibility-data validation, and `render_supported --check`.
+  compatibility-data validation, and `scripts/render_supported.py --check`.
 - `coverage`: the complete non-live SQLite suite and 91% aggregate coverage gate.
 - `providers`: shared adapter contracts plus all provider fixture/schema/normalizer tests on Linux.
 - `postgres`: PostgreSQL persistence, search, fencing/failover, recovery, interaction, and HTTP/SSE

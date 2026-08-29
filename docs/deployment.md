@@ -1,8 +1,10 @@
 # Deployment and operations
 
-Single operational guide for hosting `talktoharnesses` behind a Django ASGI
-process. This package documents integration points only; it does not ship
-containers, systemd units, Helm charts, or reverse-proxy templates.
+Operational guide for hosting the `talktoharnesses` proxy behind a Django ASGI
+process. Every enabled harness kind also needs a reachable split service. See
+the canonical [`deploy/README.md`](../deploy/README.md) for URL overrides,
+building the six split images, and proxy-managed Docker sandboxes. The project
+does not provide systemd units, Helm charts, or reverse-proxy templates.
 
 ## Host settings
 
@@ -70,16 +72,32 @@ without a worker. Use:
 
 Graceful termination drains owned runtimes within the shared shutdown budget.
 
-## Capacity and harness configuration
+## Split services and capacity
 
 Runtime capacity is fixed at 20 concurrent managed runtimes per process. Create
-owner-scoped harness configurations through the public API/facade. Executable
-paths and working directories / additional roots are ownership-checked. Provider
-authentication is inherited from the service OS environment; the package does
-not store provider credentials.
+owner-scoped harness configurations through the public API/facade. Harness
+configuration rejects executable paths. The proxy spawns every kind's Docker
+sandbox on demand the first time its endpoint is resolved: a missing image is
+built locally from the repository's per-kind build context, the container is
+started and health-checked, and the sandbox is recorded in the
+`talktoharnesses_sandbox` table (kind, container, image, port, base URL, split
+token, status). After a proxy restart the persisted token lets the proxy
+reattach to its running containers instead of recreating them. Pre-building
+images with `deploy/build-splits.sh` avoids the first-use build wait; while a
+build or boot is still in progress a request fails with `sandbox_preparing`
+(retry shortly), and unrecoverable sandbox failures surface as
+`sandbox_unavailable` with an actionable message (Docker unreachable, build
+failed, missing credential file, port in use, or health timeout). Background
+readiness probing never spawns or builds — it only reattaches to sandboxes
+that are already running.
 
-Grok, Cursor, and OpenCode require explicit executable paths. Codex and Claude
-use their pinned SDK extras; Claude may use a bundled or explicit CLI path.
+The per-sandbox split token is stored in the clear in the proxy database; it
+guards loopback-only traffic between the proxy and its containers, which share
+the same trust domain.
+
+CLI and SDK discovery belongs to the split service. The sandbox image contains
+the CLI or SDK and the proxy forwards the configured credential environment.
+The proxy does not store provider credentials.
 
 ## Authentication
 
@@ -93,8 +111,9 @@ use their pinned SDK extras; Claude may use a bundled or explicit CLI path.
 - One active token per user; rotation/revocation invalidate prior JTIs.
 - Do not commit signing keys. Do not add login, OAuth, or credential-storage flows
   in this package.
-- Authenticated submissions execute local harnesses as the Django OS user and are
-  not a sandbox.
+- Client authentication is separate from proxy-to-split authentication. URL
+  override isolation is owned by the split operator; managed Docker splits use
+  the restrictions documented in [`deploy/README.md`](../deploy/README.md).
 
 ## Retention cleanup
 
@@ -125,7 +144,8 @@ package-owned SDK, exporter, collector, or `otel` extra.
 - Configured harness probes succeed for intended platforms
 - Logs/metrics destination owned by the host
 - Backup of the relational database before upgrades
-- Process termination leaves no owned child processes
+- Proxy shutdown drains owned tasks; managed split containers intentionally
+  remain running for reuse
 
 ## Recovery limits
 

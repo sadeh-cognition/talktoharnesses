@@ -9,8 +9,8 @@ tags:
   - type/glossary
   - audience/product
   - audience/developer
-last_verified: 2026-08-21
-verified_against_commit: 3f90f85a37028a1ba0498cff641ef5c8a1bec6d7
+last_verified: 2026-08-29
+verified_against_commit: 47644027875773ba520cbfdd9f978d196a548802
 ---
 
 # Glossary
@@ -45,7 +45,7 @@ The Django user identifier used for every domain query. Globally unique ids neve
 
 ## Probe
 
-Live inspection of an installed CLI against the packaged floor, returning capabilities, models, modes, efforts, and a version advisory.
+Live inspection by a split service of its installed CLI or SDK against the split-owned floor, returning capabilities, models, modes, efforts, and a version advisory.
 
 ## SSE
 

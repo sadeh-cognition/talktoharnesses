@@ -1,0 +1,837 @@
+"""Cursor HarnessAdapter — ACP stdio over a RuntimeManager-bound process."""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import logging
+from collections.abc import AsyncIterator
+from dataclasses import dataclass
+from typing import Any, Literal, cast
+from uuid import UUID, uuid4
+
+from tth_types.adapter import (
+    HarnessInteractionRequest,
+    HarnessSession,
+    ResumeSessionRequest,
+    StartSessionRequest,
+    SteerRequest,
+    TurnRequest,
+)
+from tth_types.enums import ErrorCode, HarnessKind
+from tth_types.errors import DomainError
+from tth_types.events import HarnessEvent, InteractionRequestedPayload
+from tth_types.harness import (
+    HarnessCapabilities,
+    HarnessConfiguration,
+    InteractionAnswer,
+)
+
+from tth_cursor.acp.connection import AcpConnection
+from tth_cursor.acp.jsonrpc import JsonRpcRemoteError, ProtocolCloseError
+from tth_cursor.acp.pending import (
+    PendingAcpApproval,
+    PendingAcpInteraction,
+    PendingAcpQuestion,
+)
+from tth_cursor.acp.protocol import cursor_acp_protocol
+from tth_cursor.acp.schemas.cursor_ext import (
+    CURSOR_CONTROL_NOTIFICATIONS,
+    CursorSelectConfigOption,
+    parse_cursor_config_options,
+)
+from tth_cursor.harness.argv import build_cursor_argv
+from tth_cursor.harness.compatibility import (
+    CursorReleaseRecord,
+    enforce_published_operation,
+)
+from tth_cursor.harness.control import (
+    find_cursor_config_option,
+    initialize_cursor,
+    set_cursor_config_option,
+)
+from tth_cursor.harness.normalizer import CursorNormalizer
+from tth_cursor.harness.probe import probe_cursor
+from tth_cursor.runtime.handle import ProcessHandle
+from tth_cursor.shared.questions import canonical_answer_values, canonical_questions
+
+logger = logging.getLogger(__name__)
+
+_MODEL_PARAMETER_CATEGORIES: frozenset[str] = frozenset({"model_config", "thought_level"})
+
+
+def _map_dict(value: object) -> dict[str, Any]:
+    # Accept partially-unknown JSON dicts under strict Pyright.
+    if not isinstance(value, dict):
+        return {}
+    raw = cast(dict[object, object], cast(object, value))
+    return {str(k): v for k, v in raw.items()}
+
+
+@dataclass(frozen=True, slots=True)
+class _CursorModelSelection:
+    model_id: str
+    parameters: tuple[tuple[str, str], ...] = ()
+
+
+class CursorAdapter:
+    """Process-bound Cursor adapter. One instance per conversation runtime."""
+
+    kind: HarnessKind = HarnessKind.CURSOR
+
+    def __init__(self) -> None:
+        self._process: ProcessHandle | None = None
+        self._connection: AcpConnection | None = None
+        self._normalizer = CursorNormalizer()
+        self._release: CursorReleaseRecord | None = None
+        self._capabilities: HarnessCapabilities | None = None
+        self._session: HarnessSession | None = None
+        self._event_q: asyncio.Queue[HarnessEvent | HarnessInteractionRequest | None] = (
+            asyncio.Queue()
+        )
+        self._prompt_task: asyncio.Task[None] | None = None
+        self._pending_interactions: dict[UUID, PendingAcpInteraction] = {}
+        self._closed = False
+        self._active_turn_id: UUID | None = None
+        self._config_options: tuple[CursorSelectConfigOption, ...] = ()
+        self._session_model_selection: _CursorModelSelection | None = None
+        self._current_model_selection: _CursorModelSelection | None = None
+
+    def bind_process(self, process: ProcessHandle) -> None:
+        self._process = process
+
+    def set_redaction_patterns(self, patterns: tuple[str, ...]) -> None:
+        self._normalizer.set_redaction_patterns(patterns)
+
+    def import_seen(
+        self,
+        native_ids: frozenset[str],
+        stream_offsets: frozenset[str],
+    ) -> None:
+        self._normalizer.import_seen(native_ids, stream_offsets)
+
+    def export_seen(self) -> tuple[frozenset[str], frozenset[str]]:
+        return self._normalizer.export_seen()
+
+    def build_argv(self, config: HarnessConfiguration) -> tuple[str, ...]:
+        return build_cursor_argv(yolo=config.yolo)
+
+    async def probe(self, config: HarnessConfiguration) -> HarnessCapabilities:
+        caps, release = await probe_cursor(config)
+        self._capabilities = caps
+        self._release = release
+        return caps
+
+    def preflight_operation(self, mode: Literal["create", "resume"]) -> None:
+        if self._release is None:
+            raise DomainError(
+                ErrorCode.INVALID_STATE, "cursor adapter must be probed before operation"
+            )
+        enforce_published_operation(self._release, mode=mode)
+
+    async def start(self, request: StartSessionRequest) -> HarnessSession:
+        self.preflight_operation("create")
+        await self._ensure_connection()
+        assert self._connection is not None
+        await self._initialize()
+        cwd = request.launch.working_directory or request.configuration.working_directory
+        future, _delivered = await self._connection.request(
+            "session/new",
+            {"cwd": cwd, "mcpServers": []},
+        )
+        result = await future
+        session_id = _require_session_id(result)
+        await self._apply_session_configuration(
+            session_id=session_id,
+            session_result=result,
+            configured_model=request.configuration.model,
+            configured_mode=request.configuration.mode,
+            configured_effort=request.configuration.effort,
+        )
+        self._normalizer.set_session(session_id, resync=False)
+        session = HarnessSession(
+            conversation_id=request.conversation_id,
+            binding_id=request.binding_id,
+            kind=HarnessKind.CURSOR,
+            native_session_id=session_id,
+            model=request.configuration.model,
+            mode=request.configuration.mode,
+            effort=request.configuration.effort,
+        )
+        self._session = session
+        return session
+
+    async def resume(self, request: ResumeSessionRequest) -> HarnessSession:
+        self.preflight_operation("resume")
+        await self._ensure_connection()
+        assert self._connection is not None
+        init_result = await self._initialize()
+        if _map_dict(init_result.get("agentCapabilities")).get("loadSession") is not True:
+            raise DomainError(
+                ErrorCode.PROVIDER_INCOMPATIBLE,
+                "initialize result does not advertise session loading",
+                details={"release_id": self._release.id if self._release is not None else None},
+            )
+        cwd = request.launch.working_directory or request.configuration.working_directory
+        self._normalizer.set_session(request.native_session_id, resync=True)
+        future, _delivered = await self._connection.request(
+            "session/load",
+            {
+                "sessionId": request.native_session_id,
+                "cwd": cwd,
+                "mcpServers": [],
+            },
+        )
+        result = await future
+        session_id = _session_id_or_none(result) or request.native_session_id
+        if not session_id:
+            raise DomainError(ErrorCode.PROTOCOL_ERROR, "session result missing sessionId")
+        await self._apply_session_configuration(
+            session_id=session_id,
+            session_result=result,
+            configured_model=request.configuration.model,
+            configured_mode=request.configuration.mode,
+            configured_effort=request.configuration.effort,
+        )
+        self._normalizer.set_session(session_id, resync=False)
+        session = HarnessSession(
+            conversation_id=request.conversation_id,
+            binding_id=request.binding_id,
+            kind=HarnessKind.CURSOR,
+            native_session_id=session_id,
+            model=request.configuration.model,
+            mode=request.configuration.mode,
+            effort=request.configuration.effort,
+        )
+        self._session = session
+        return session
+
+    async def submit(self, session: HarnessSession, request: TurnRequest) -> None:
+        self._require_session(session)
+        assert self._connection is not None
+        if not session.native_session_id:
+            raise DomainError(ErrorCode.INVALID_STATE, "session has no native_session_id")
+        if self._prompt_task is not None and not self._prompt_task.done():
+            # A second session/prompt would make the agent cancel the one in
+            # flight, so duplicates for the same turn are acknowledged as
+            # already submitted and anything else is rejected.
+            if request.turn_id == self._active_turn_id:
+                return
+            raise DomainError(
+                ErrorCode.CONVERSATION_BUSY,
+                "turn already active",
+                details={
+                    "active_turn_id": str(self._active_turn_id),
+                    "requested_turn_id": str(request.turn_id),
+                },
+            )
+        await self._apply_turn_model_selection(
+            session_id=session.native_session_id,
+            request_model=request.model,
+        )
+        self._normalizer.begin_turn(request.turn_id)
+        self._active_turn_id = request.turn_id
+        future, _delivered = await self._connection.request(
+            "session/prompt",
+            {
+                "sessionId": session.native_session_id,
+                "prompt": [{"type": "text", "text": request.prompt}],
+            },
+        )
+        # Return after frame drain (request() already drained). Watch response.
+        self._prompt_task = asyncio.create_task(
+            self._watch_prompt(future),
+            name=f"cursor-prompt-{request.turn_id}",
+        )
+
+    async def steer(self, session: HarnessSession, request: SteerRequest) -> bool:
+        self._require_session(session)
+        # Interject extension not proven for 1.0.0 fixtures yet.
+        if self._release is None or not self._release.capabilities.supports_steer:
+            return False
+        enforce_published_operation(self._release, mode="steer")
+        return False
+
+    async def interrupt(self, session: HarnessSession) -> None:
+        self._require_session(session)
+        if self._release is not None and self._release.capabilities.supports_interrupt:
+            enforce_published_operation(self._release, mode="interrupt")
+        assert self._connection is not None
+        # Cancel pending permission waiters as cancelled outcomes.
+        for interaction_id, pending in list(self._pending_interactions.items()):
+            with contextlib.suppress(Exception):
+                await self._connection.respond(
+                    pending.rpc_id,
+                    {"outcome": {"outcome": "cancelled"}},
+                )
+            del self._pending_interactions[interaction_id]
+        if session.native_session_id:
+            await self._connection.notify(
+                "session/cancel",
+                {"sessionId": session.native_session_id},
+            )
+
+    async def answer_interaction(
+        self,
+        session: HarnessSession,
+        answer: InteractionAnswer,
+    ) -> None:
+        self._require_session(session)
+        assert self._connection is not None
+        pending = self._pending_interactions.get(answer.interaction_id)
+        if pending is None:
+            raise DomainError(
+                ErrorCode.INVALID_STATE,
+                "no pending interaction for answer",
+                details={"interaction_id": str(answer.interaction_id)},
+            )
+        if isinstance(pending, PendingAcpQuestion):
+            values = canonical_answer_values(answer, pending.questions)
+            del self._pending_interactions[answer.interaction_id]
+            await self._connection.respond(
+                pending.rpc_id,
+                {
+                    "outcome": {
+                        "outcome": "answered",
+                        "answers": [
+                            {
+                                "questionId": question.id,
+                                "selectedOptionIds": values[question.id],
+                            }
+                            for question in pending.questions
+                        ],
+                    }
+                },
+            )
+            return
+        result = self._normalizer.map_approval_decision(answer.decision, pending.options)
+        outcome = result.get("outcome")
+        outcome_map = _map_dict(outcome)
+        # Reject unmapped decisions before popping the native waiter.
+        if (
+            answer.decision is not None
+            and outcome_map.get("outcome") == "cancelled"
+            and answer.decision.value != "cancel"
+        ):
+            raise DomainError(
+                ErrorCode.INVALID_STATE,
+                f"decision {answer.decision.value} not available on native request",
+                details={"interaction_id": str(answer.interaction_id)},
+            )
+        del self._pending_interactions[answer.interaction_id]
+        await self._connection.respond(pending.rpc_id, result)
+
+    def events(
+        self,
+        session: HarnessSession,
+    ) -> AsyncIterator[HarnessEvent | HarnessInteractionRequest]:
+        self._require_session(session)
+
+        async def _gen() -> AsyncIterator[HarnessEvent | HarnessInteractionRequest]:
+            while True:
+                item = await self._event_q.get()
+                if item is None:
+                    return
+                yield item
+
+        return _gen()
+
+    async def close(self, session: HarnessSession) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        if (
+            self._prompt_task is not None
+            and self._prompt_task is not asyncio.current_task()
+            and not self._prompt_task.done()
+        ):
+            self._prompt_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await self._prompt_task
+        if self._connection is not None:
+            await self._connection.close()
+            self._connection = None
+        with contextlib.suppress(asyncio.QueueFull):
+            self._event_q.put_nowait(None)
+
+    async def _ensure_connection(self) -> None:
+        if self._process is None:
+            raise DomainError(
+                ErrorCode.INVALID_STATE,
+                "CursorAdapter has no bound process; RuntimeManager must bind_process first",
+            )
+        if self._connection is None:
+            conn = AcpConnection(self._process, protocol=cursor_acp_protocol())
+            conn.set_notification_handler("session/update", self._on_session_update)
+            for method in CURSOR_CONTROL_NOTIFICATIONS:
+                conn.set_notification_handler(method, self._on_control_notification)
+            conn.set_request_handler(
+                "session/request_permission",
+                self._on_permission_request,
+            )
+            conn.set_request_handler("cursor/ask_question", self._on_question_request)
+            conn.set_request_handler("cursor/update_todos", self._on_update_todos_request)
+            await conn.start()
+            self._connection = conn
+
+    async def _initialize(self) -> dict[str, Any]:
+        assert self._connection is not None
+        assert self._release is not None
+        return await initialize_cursor(self._connection, self._release)
+
+    async def _apply_session_configuration(
+        self,
+        *,
+        session_id: str,
+        session_result: object,
+        configured_model: str | None,
+        configured_mode: str | None,
+        configured_effort: str | None,
+    ) -> None:
+        options = parse_cursor_config_options(session_result)
+        model_opt = find_cursor_config_option(options, "model")
+        mode_opt = find_cursor_config_option(options, "mode")
+        if model_opt is None or mode_opt is None:
+            raise DomainError(
+                ErrorCode.PROVIDER_INCOMPATIBLE,
+                "Cursor session did not advertise required model and mode configuration options",
+                details={
+                    "has_model": model_opt is not None,
+                    "has_mode": mode_opt is not None,
+                },
+            )
+
+        selection = _parse_model_selector(configured_model) if configured_model else None
+        if selection is not None:
+            options = await self._apply_model_selection(
+                session_id=session_id,
+                selection=selection,
+                options=options,
+                complete=False,
+            )
+
+        if configured_effort is not None:
+            thought_options = tuple(
+                option for option in options if option.category == "thought_level"
+            )
+            if len(thought_options) != 1:
+                raise DomainError(
+                    ErrorCode.PROVIDER_INCOMPATIBLE,
+                    "Cursor model does not advertise exactly one thought-level option",
+                    details={"advertised_count": len(thought_options)},
+                )
+            thought_option = thought_options[0]
+            if selection is not None and any(
+                parameter_id == thought_option.id for parameter_id, _value in selection.parameters
+            ):
+                raise DomainError(
+                    ErrorCode.PROVIDER_INCOMPATIBLE,
+                    "Cursor effort conflicts with a thought-level model parameter",
+                    details={"config_id": thought_option.id},
+                )
+            options = await self._set_config_option(
+                session_id=session_id,
+                config_id=thought_option.id,
+                value=configured_effort,
+                options=options,
+            )
+
+        if configured_mode is not None:
+            options = await self._set_config_option(
+                session_id=session_id,
+                config_id="mode",
+                value=configured_mode,
+                options=options,
+            )
+
+        captured = self._record_config_options(options)
+        self._session_model_selection = captured
+
+    async def _apply_turn_model_selection(
+        self,
+        *,
+        session_id: str,
+        request_model: str | None,
+    ) -> None:
+        if request_model is not None:
+            selection = _parse_model_selector(request_model)
+            options = await self._apply_model_selection(
+                session_id=session_id,
+                selection=selection,
+                options=self._config_options,
+                complete=False,
+            )
+            self._record_config_options(options)
+            return
+
+        baseline = self._session_model_selection
+        if baseline is None:
+            return
+        if self._current_model_selection == baseline:
+            return
+        options = await self._apply_model_selection(
+            session_id=session_id,
+            selection=baseline,
+            options=self._config_options,
+            complete=True,
+        )
+        self._record_config_options(options)
+
+    def _record_config_options(
+        self,
+        options: tuple[CursorSelectConfigOption, ...],
+    ) -> _CursorModelSelection:
+        current = _capture_model_selection(options)
+        self._config_options = options
+        self._current_model_selection = current
+        return current
+
+    async def _apply_model_selection(
+        self,
+        *,
+        session_id: str,
+        selection: _CursorModelSelection,
+        options: tuple[CursorSelectConfigOption, ...],
+        complete: bool,
+    ) -> tuple[CursorSelectConfigOption, ...]:
+        """Apply a parsed model selection.
+
+        When ``complete`` is True, ``selection.parameters`` is the full desired
+        parameter set (session baseline restore). When False, only explicit
+        selector parameters are set; other parameters keep Cursor defaults after
+        the model change.
+        """
+        if complete:
+            current = _capture_model_selection(options)
+            if current == selection:
+                return options
+
+        model_opt = find_cursor_config_option(options, "model")
+        if model_opt is None:
+            raise DomainError(
+                ErrorCode.PROVIDER_INCOMPATIBLE,
+                "Cursor session has no model configuration option",
+            )
+        if model_opt.currentValue != selection.model_id:
+            options = await self._set_config_option(
+                session_id=session_id,
+                config_id="model",
+                value=selection.model_id,
+                options=options,
+            )
+        elif not complete and not selection.parameters:
+            # Model already active and no explicit parameters — nothing to set.
+            return options
+
+        for param_id, value in selection.parameters:
+            option = find_cursor_config_option(options, param_id)
+            if option is None:
+                raise DomainError(
+                    ErrorCode.PROVIDER_INCOMPATIBLE,
+                    "Cursor model parameter is not advertised for the selected model",
+                    details={"parameter_id": param_id, "model_id": selection.model_id},
+                )
+            if option.category not in _MODEL_PARAMETER_CATEGORIES:
+                raise DomainError(
+                    ErrorCode.PROVIDER_INCOMPATIBLE,
+                    "configuration option is not a model parameter",
+                    details={
+                        "parameter_id": param_id,
+                        "category": option.category,
+                    },
+                )
+            if option.currentValue == value:
+                continue
+            options = await self._set_config_option(
+                session_id=session_id,
+                config_id=param_id,
+                value=value,
+                options=options,
+            )
+        return options
+
+    async def _set_config_option(
+        self,
+        *,
+        session_id: str,
+        config_id: str,
+        value: str,
+        options: tuple[CursorSelectConfigOption, ...],
+    ) -> tuple[CursorSelectConfigOption, ...]:
+        assert self._connection is not None
+        new_options = await set_cursor_config_option(
+            self._connection,
+            session_id=session_id,
+            config_id=config_id,
+            value=value,
+            options=options,
+        )
+        self._record_config_options(new_options)
+        return new_options
+
+    async def _watch_prompt(self, future: asyncio.Future[Any]) -> None:
+        try:
+            result = await future
+        except asyncio.CancelledError:
+            return
+        except ProtocolCloseError as exc:
+            await self._emit_prompt_outcome_unknown_and_close(exc.message)
+            return
+        except JsonRpcRemoteError as exc:
+            events = self._normalizer.on_prompt_terminal(
+                "error",
+                error_message=exc.message,
+            )
+            await self._emit_many(events)
+            return
+        except DomainError as exc:
+            await self._emit_prompt_outcome_unknown_and_close(exc.message)
+            return
+        except Exception as exc:
+            events = self._normalizer.on_prompt_terminal("error", error_message=str(exc))
+            await self._emit_many(events)
+            return
+
+        stop_reason = "end_turn"
+        usage: object = None
+        if isinstance(result, dict):
+            result_map = _map_dict(cast(object, result))
+            raw = result_map.get("stopReason") or result_map.get("stop_reason")
+            if isinstance(raw, str):
+                stop_reason = raw
+            usage = result_map.get("usage")
+        events = self._normalizer.on_prompt_terminal(stop_reason, usage=usage)
+        await self._emit_many(events)
+
+    async def _emit_prompt_outcome_unknown_and_close(self, message: str) -> None:
+        # These errors come from an ACP connection that has already stopped
+        # accepting writes. Persist the uncertain outcome before closing only
+        # this adapter's event stream.
+        events = self._normalizer.on_prompt_outcome_unknown(message)
+        await self._emit_many(events)
+        await self._event_q.put(None)
+
+    async def _on_session_update(self, notification: Any) -> None:
+        params = _map_dict(cast(object, notification.params))
+        events = self._normalizer.on_session_update(params)
+        await self._emit_many(events)
+
+    async def _on_control_notification(self, notification: Any) -> None:
+        # Strictly decoded at the connection layer; intentionally ignored for transcript.
+        logger.debug("ignoring Cursor control notification %s", notification.method)
+
+    async def _on_permission_request(self, request: Any) -> Any | None:
+        params = _map_dict(request.params)
+        interaction_id = uuid4()
+        options_obj = params.get("options")
+        options: list[dict[str, Any]] = []
+        if isinstance(options_obj, list):
+            for item in cast(list[object], options_obj):
+                mapped = _map_dict(item)
+                if mapped:
+                    options.append(mapped)
+        self._pending_interactions[interaction_id] = PendingAcpApproval(
+            rpc_id=request.id,
+            options=tuple(options),
+        )
+        events = self._normalizer.on_permission_request(
+            params,
+            interaction_id=interaction_id,
+        )
+        correlation = {"json_rpc_request_id": str(request.id)}
+        tool_call = _map_dict(params.get("toolCall"))
+        tool_call_id = tool_call.get("toolCallId")
+        if isinstance(tool_call_id, str):
+            correlation["tool_call_id"] = tool_call_id
+        session_id = params.get("sessionId")
+        if isinstance(session_id, str):
+            correlation["native_session_id"] = session_id
+        for event in events:
+            if isinstance(event, InteractionRequestedPayload):
+                await self._event_q.put(
+                    HarnessInteractionRequest(
+                        payload=event,
+                        provider_correlation=correlation,
+                    )
+                )
+            else:
+                await self._event_q.put(event)
+        # Respond later via answer_interaction.
+        return None
+
+    async def _on_question_request(self, request: Any) -> Any | None:
+        params = _map_dict(request.params)
+        questions_obj = params.get("questions")
+        questions: list[dict[str, Any]] = []
+        if isinstance(questions_obj, list):
+            for item in cast(list[object], questions_obj):
+                raw = _map_dict(item)
+                options: list[dict[str, Any]] = []
+                options_obj = raw.get("options")
+                if isinstance(options_obj, list):
+                    for option_obj in cast(list[object], options_obj):
+                        option = _map_dict(option_obj)
+                        if option:
+                            options.append(
+                                {"label": option.get("label"), "value": option.get("id")}
+                            )
+                questions.append(
+                    {
+                        "id": raw.get("id"),
+                        "question": raw.get("prompt"),
+                        "header": params.get("title"),
+                        "options": options,
+                        "multiSelect": raw.get("allowMultiple"),
+                    }
+                )
+        canonical = canonical_questions(questions)
+        interaction_id = uuid4()
+        self._pending_interactions[interaction_id] = PendingAcpQuestion(
+            rpc_id=request.id,
+            questions=canonical,
+        )
+        events = self._normalizer.on_question(canonical, interaction_id=interaction_id)
+        for event in events:
+            if isinstance(event, InteractionRequestedPayload):
+                await self._event_q.put(
+                    HarnessInteractionRequest(
+                        payload=event,
+                        provider_correlation={
+                            "json_rpc_request_id": str(request.id),
+                            "tool_call_id": str(params.get("toolCallId") or ""),
+                        },
+                    )
+                )
+            else:
+                await self._event_q.put(event)
+        return None
+
+    async def _on_update_todos_request(self, request: Any) -> Any | None:
+        # Todo progress already reaches the transcript via session/update
+        # tool_call events; this extension request only needs an ack.
+        logger.debug("acknowledging cursor/update_todos request %s", request.id)
+        return {}
+
+    async def _emit_many(self, events: list[HarnessEvent]) -> None:
+        for event in events:
+            await self._event_q.put(event)
+
+    def _require_session(self, session: HarnessSession) -> None:
+        if self._session is None:
+            raise DomainError(ErrorCode.INVALID_STATE, "adapter has no active session")
+        if self._closed:
+            raise DomainError(ErrorCode.INVALID_STATE, "adapter is closed")
+
+
+def _parse_model_selector(value: str) -> _CursorModelSelection:
+    selector = value.strip()
+    if not selector:
+        raise DomainError(
+            ErrorCode.PROVIDER_INCOMPATIBLE,
+            "Cursor model selector is empty",
+        )
+
+    if "[" not in selector:
+        model_id = selector
+        if not model_id:
+            raise DomainError(
+                ErrorCode.PROVIDER_INCOMPATIBLE,
+                "Cursor model selector is missing a model ID",
+            )
+        if model_id == "auto":
+            model_id = "default"
+        return _CursorModelSelection(model_id=model_id)
+
+    if selector.count("[") != 1:
+        raise DomainError(
+            ErrorCode.PROVIDER_INCOMPATIBLE,
+            "Cursor model selector may contain at most one parameter section",
+            details={"selector": selector},
+        )
+    open_idx = selector.index("[")
+    if selector.count("]") != 1 or not selector.endswith("]"):
+        raise DomainError(
+            ErrorCode.PROVIDER_INCOMPATIBLE,
+            "Cursor model selector must contain exactly one closing bracket",
+            details={"selector": selector},
+        )
+    # After strip, ] must be the final character (no trailing content).
+    model_id = selector[:open_idx].strip()
+    if not model_id:
+        raise DomainError(
+            ErrorCode.PROVIDER_INCOMPATIBLE,
+            "Cursor model selector is missing a model ID",
+            details={"selector": selector},
+        )
+    params_body = selector[open_idx + 1 : -1]
+    parameters: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    if params_body.strip():
+        for raw_entry in params_body.split(","):
+            entry = raw_entry.strip()
+            if not entry:
+                raise DomainError(
+                    ErrorCode.PROVIDER_INCOMPATIBLE,
+                    "Cursor model selector has an empty parameter entry",
+                    details={"selector": selector},
+                )
+            if entry.count("=") != 1:
+                raise DomainError(
+                    ErrorCode.PROVIDER_INCOMPATIBLE,
+                    "Cursor model selector parameter must contain exactly one '='",
+                    details={"selector": selector, "entry": entry},
+                )
+            raw_id, raw_value = entry.split("=", 1)
+            param_id = raw_id.strip()
+            param_value = raw_value.strip()
+            if not param_id or not param_value:
+                raise DomainError(
+                    ErrorCode.PROVIDER_INCOMPATIBLE,
+                    "Cursor model selector parameter ID and value must be non-empty",
+                    details={"selector": selector},
+                )
+            if param_id in seen:
+                raise DomainError(
+                    ErrorCode.PROVIDER_INCOMPATIBLE,
+                    "Cursor model selector has a duplicate parameter ID",
+                    details={"selector": selector, "parameter_id": param_id},
+                )
+            seen.add(param_id)
+            parameters.append((param_id, param_value))
+
+    if model_id == "auto":
+        model_id = "default"
+    return _CursorModelSelection(model_id=model_id, parameters=tuple(parameters))
+
+
+def _capture_model_selection(
+    options: tuple[CursorSelectConfigOption, ...],
+) -> _CursorModelSelection:
+    model_opt = find_cursor_config_option(options, "model")
+    if model_opt is None:
+        raise DomainError(
+            ErrorCode.PROVIDER_INCOMPATIBLE,
+            "Cursor session has no model configuration option",
+        )
+    parameters: list[tuple[str, str]] = []
+    for option in options:
+        if option.category in _MODEL_PARAMETER_CATEGORIES:
+            parameters.append((option.id, option.currentValue))
+    return _CursorModelSelection(model_id=model_opt.currentValue, parameters=tuple(parameters))
+
+
+def _session_id_or_none(result: Any) -> str | None:
+    if not isinstance(result, dict):
+        return None
+    result_map = _map_dict(cast(object, result))
+    session_id = result_map.get("sessionId") or result_map.get("session_id")
+    if isinstance(session_id, str) and session_id:
+        return session_id
+    return None
+
+
+def _require_session_id(result: Any) -> str:
+    session_id = _session_id_or_none(result)
+    if session_id is None:
+        raise DomainError(ErrorCode.PROTOCOL_ERROR, "session result missing sessionId")
+    return session_id

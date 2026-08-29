@@ -10,22 +10,23 @@ tags:
   - capability/http
   - capability/runtime
   - status/implemented
-last_verified: 2026-08-20
-verified_against_commit: bb3d2b755500fc663816d6cbd1a7cd7947a8920b
+last_verified: 2026-08-30
+verified_against_commit: 2920f5820783245bd5b871e61edd44642ebfe56a
 sources:
   - raw/engineering/deployment.md
   - raw/product/readme.md
+  - raw/product/split-service-runtime-ownership.md
 ---
 
 # Host Django ASGI with Readiness
 
 ## Intent
 
-A host application can compose Django settings, URL includes, and ASGI lifespan so one worker owns service startup, readiness, and shutdown. The package does not ship containers or auto-run migrations.
+A host application can compose Django settings, URL includes, and ASGI lifespan so one worker owns proxy startup, readiness, and shutdown. The host configures reachable split services separately. The project provides split Dockerfiles but does not auto-run migrations.
 
 ## Current behavior
 
-Hosts add `talktoharnesses.django`, set `TALKTOHARNESSES_JWT_SIGNING_KEY`, include `/api/v1/`, and wrap ASGI with `talktoharnesses_lifespan`. `GET /health` returns ok. `GET /ready` checks the database and process-local service. SQLite is single-supervisor. PostgreSQL is the multi-worker profile. Migrations run once via the host.
+Hosts add `talktoharnesses.django`, set `TALKTOHARNESSES_JWT_SIGNING_KEY`, include `/api/v1/`, and wrap ASGI with `talktoharnesses_lifespan`. Harness kinds need no enablement configuration; the proxy spawns each kind's managed Docker sandbox on demand. `GET /health` returns ok. `GET /ready` checks the database and process-local proxy service. SQLite is single-supervisor. PostgreSQL is the multi-worker profile. Migrations run once via the host.
 
 ## Gap
 
@@ -58,3 +59,4 @@ No gap remains against the documented host integration. Mixed-version rolling up
 - [Django HTTP and SSE surface](../capabilities/django-http-sse.md)
 - [Isolated harness runtimes](../capabilities/isolated-harness-runtimes.md)
 - [Engineering deployment source](../../raw/engineering/deployment.md)
+- [Approved split runtime ownership](../../raw/product/split-service-runtime-ownership.md)

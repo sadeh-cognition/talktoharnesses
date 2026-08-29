@@ -1,19 +1,20 @@
 ---
 type: requirement
 title: Report Harness Token Usage
-status: implemented
+status: partially-implemented
 audiences:
   - product
   - developer
 tags:
   - type/requirement
   - capability/adapters
-  - status/implemented
-last_verified: 2026-08-21
-verified_against_commit: c996cbcd23b7cbf4f6b4d70422ab17ce715661bf
+  - status/partially-implemented
+last_verified: 2026-08-30
+verified_against_commit: 78003994d9fe93108ce5a6bc3591ab2e2ef904d9
 sources:
   - raw/product/harness-token-usage-requirements.md
   - raw/engineering/live-testing-token-usage.md
+  - raw/engineering/cursor-acp-token-usage-limitation.md
 ---
 
 # Report Harness Token Usage
@@ -25,20 +26,36 @@ turns from every supported harness without interpreting native provider events.
 
 ## Current behavior
 
-Grok and Cursor normalize their native completion or ACP usage events. Codex
-normalizes the per-turn portion of its thread token update. Claude aggregates
-per-model usage with a top-level fallback. OpenCode aggregates unique
-`step-finish` parts and reconciles message history before terminal. Prime Agent
-aggregates assistant-message usage. All six produce the existing canonical
+Grok normalizes its native ACP usage events. Codex normalizes the per-turn
+portion of its thread token update. Claude aggregates per-model usage with a
+top-level fallback. OpenCode aggregates unique `step-finish` parts and
+reconciles message history before terminal. Prime Agent aggregates
+assistant-message usage. These five providers produce the existing canonical
 `usage_updated` payload before a successful turn terminal.
 
+The Cursor adapter recognizes ACP `usage_update` notifications and
+`PromptResponse.usage` terminal data, but verified Cursor Agent releases do not
+send either form. Cursor turns therefore complete without a canonical usage
+event.
+
 The shared live gate requires meaningful usage for each provider's create and
-resume turns. Categories omitted by a provider remain absent, and existing
-transcripts are not backfilled.
+resume turns. The Cursor gate currently fails that assertion. Categories
+omitted by a provider remain absent, and existing transcripts are not
+backfilled.
 
 ## Gap
 
-No gap remains against the approved harness token-usage contract.
+Cursor Agent's ACP transport does not currently populate
+`PromptResponse.usage` or emit `usage_update`. Cursor staff confirmed the
+missing response data as a bug for `2026.05.09-0afadcc` and the missing session
+update as a feature gap for `2026.07.09-a3815c0`. TalkToHarnesses live checks
+observed the same limitation on `2026.08.04-aaa8809`,
+`2026.08.11-e8db854`, and `2026.08.25-3e8eec8`.
+
+Headless `stream-json` token totals are not an ACP substitute for the existing
+Cursor adapter. Because TalkToHarnesses does not synthesize provider-omitted
+values, successful Cursor turns cannot yet satisfy the approved cross-provider
+usage requirement.
 
 ## Acceptance criteria
 
@@ -54,23 +71,28 @@ No gap remains against the approved harness token-usage contract.
 
 ## Implementation evidence
 
-- `src/talktoharnesses/providers/` usage normalizers for ACP, Grok, Codex,
+- `tth-*/src/tth_*/harness/` usage normalizers for Grok, Cursor, Codex,
   Claude, OpenCode, and Prime Agent
+- `tth-cursor/src/tth_cursor/acp/normalizer.py` (Cursor ACP usage mapping)
+- `tth-cursor/src/tth_cursor/harness/adapter.py` (terminal response usage)
 - `src/talktoharnesses/domain/events.py` (`UsageUpdatedPayload`)
 - `tests/live/helpers.py` (shared create/resume usage gate)
 
 ## Test evidence
 
-- `tests/unit/providers/acp/test_normalizer.py`
-- `tests/unit/providers/grok/test_normalizer.py`
-- `tests/unit/providers/codex/test_adapter.py`
-- `tests/unit/providers/claude/test_normalizer.py`
-- `tests/unit/providers/opencode/`
-- `tests/unit/providers/prime_agent/`
+- `tth-grok/tests/harness/test_normalizer.py`
+- `tth-cursor/tests/acp/test_normalizer.py`
+- `tth-codex/tests/harness/test_adapter.py`
+- `tth-claude/tests/harness/test_normalizer.py`
+- `tth-opencode/tests/harness/`
+- `tth-prime-agent/tests/harness/`
 - `tests/unit/live/test_helpers.py`
 - `tests/live/test_grok_live.py`, `test_cursor_live.py`, `test_codex_live.py`,
   `test_claude_live.py`, `test_opencode_live.py`, and
   `test_prime_agent_live.py`
+- Cursor live verification on `2026.08.04-aaa8809`,
+  `2026.08.11-e8db854`, and `2026.08.25-3e8eec8` fails at the shared
+  pre-terminal `usage_updated` assertion.
 
 ## Related
 
@@ -79,3 +101,4 @@ No gap remains against the approved harness token-usage contract.
 - [Conversation event](../domain/conversation-event.md)
 - [Testing guidelines](../operations/testing-guidelines.md)
 - [Compatibility and adapters](../maps/compatibility-and-adapters.md)
+- [Cursor ACP token-usage limitation](../../raw/engineering/cursor-acp-token-usage-limitation.md)

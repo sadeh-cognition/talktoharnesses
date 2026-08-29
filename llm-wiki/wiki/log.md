@@ -7,13 +7,87 @@ audiences:
   - developer
 tags:
   - type/log
-last_verified: 2026-08-21
-verified_against_commit: c996cbcd23b7cbf4f6b4d70422ab17ce715661bf
+last_verified: 2026-08-30
+verified_against_commit: 78003994d9fe93108ce5a6bc3591ab2e2ef904d9
 ---
 
 # Wiki Log
 
 Entries are appended using `## [YYYY-MM-DD] operation | Title`.
+
+## [2026-08-30] ingest | On-demand sandbox provisioning
+
+- Added the approved product source `raw/product/on-demand-sandbox-provisioning.md`
+  (approved 2026-08-30), superseding the operator-configuration and fail-closed
+  statements of `raw/product/split-service-runtime-ownership.md`.
+- The proxy now spawns each kind's Docker sandbox on demand, builds a missing
+  image locally, records sandboxes with their split tokens in the database,
+  reattaches after restart, and returns `sandbox_preparing` /
+  `sandbox_unavailable` errors; `TTH_SANDBOX_KINDS` and `TTH_SPLIT_<KIND>_URL`
+  are removed, and readiness probing never spawns or builds.
+- Updated probe-and-configure-harnesses, deployment, testing-guidelines,
+  provider-adapters, system-context, runtime-isolation,
+  isolated-harness-runtimes, split-services, compatibility-and-adapters,
+  host-django journey/requirement, and target-users pages.
+- Verified against baseline `2920f5820783245bd5b871e61edd44642ebfe56a` plus the
+  on-demand sandbox work present in the working tree.
+
+## [2026-08-30] implement | Add the local wiki lint command
+
+- Copied Agentbahn's deterministic wiki metadata, link, title, requirement
+  section, and orphan checks into `talktoharnesses.wiki_lint`.
+- Added the `wiki_lint` Django management command using this project's existing
+  `host/manage.py` entry point and documented the local invocation.
+- Added focused lint-engine and command tests.
+- Verified against TalkToHarnesses baseline
+  `78003994d9fe93108ce5a6bc3591ab2e2ef904d9` plus the uncommitted command and
+  documentation recorded with this entry.
+
+## [2026-08-30] operation | Record Cursor ACP token-usage limitation
+
+- Preserved Cursor's upstream ACP reports and local live verification as the
+  engineering source
+  `raw/engineering/cursor-acp-token-usage-limitation.md`.
+- Corrected the cross-provider token-usage requirement from `implemented` to
+  `partially-implemented` without changing its approved intent or acceptance
+  criteria.
+- Recorded that Cursor's adapter accepts native usage but verified Cursor Agent
+  releases omit it from ACP, leaving the strict live gate failing rather than
+  synthesizing token values.
+- Verified against TalkToHarnesses baseline
+  `78003994d9fe93108ce5a6bc3591ab2e2ef904d9` plus the uncommitted Cursor usage
+  normalization and documentation corrections recorded with this entry.
+
+## [2026-08-29] operation | Align documentation with split runtime ownership
+
+- Preserved the pre-split product sources and added
+  `raw/product/split-service-runtime-ownership.md` to record their approved
+  supersession.
+- Updated architecture, operations, requirements, capabilities, domain, maps,
+  and journey pages to assign provider execution and executable discovery to
+  split services.
+- Recorded the workspace support-matrix aggregator and the live-gate requirement
+  for a reachable split.
+- Verified against split-services commit
+  `47644027875773ba520cbfdd9f978d196a548802` plus the uncommitted documentation
+  and release-check corrections recorded with this entry.
+
+## [2026-08-29] operation | Consolidate split projects
+
+- Moved all six per-kind split projects and the schemas-only `tth-types`
+  project into the TalkToHarnesses repository as top-level directories.
+- Preserved the independent package, HTTP API, lockfile, and Docker sandbox
+  boundaries; only repository-relative paths and documentation changed.
+
+## [2026-08-29] implement | Split services: tth-proxy, tth-types, per-kind splits
+
+- Split the monolith at the HarnessAdapter seam: the package becomes tth-proxy
+  (with one generic remote adapter); each kind moved to a tth-<kind> project as
+  a Django+Ninja HTTP+SSE split service reachable directly or in a Docker
+  sandbox; shared wire schemas moved to the schemas-only tth-types package.
+- Updated architecture pages (system context, runtime isolation, provider
+  adapters, layered architecture, technology stack) and added
+  [Split services decision](decisions/split-services.md).
 
 ## [2026-08-21] implement | Report harness token usage
 

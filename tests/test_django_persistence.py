@@ -160,6 +160,127 @@ async def test_claim_reclaims_only_expired_pre_delivery_command() -> None:
 
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
+async def test_command_progress_survives_stale_aggregate_commit() -> None:
+    """A commit_turn_batch carrying a stale command copy must not erase
+    delivery progress; delivery_started_at is what blocks re-claiming."""
+    now = datetime.now(UTC)
+    state = new_conversation_state(owner_id="owner", now=now)
+    queued = submit_turn(state, prompt="x", idempotency_key="progress", now=now)
+    assert queued.command is not None
+    persistence = DjangoPersistence()
+    await persistence.save_snapshot(queued.state)
+    await persistence.accept_command(queued.command)
+
+    progress = queued.command.model_copy(
+        update={
+            "status": CommandStatus.CLAIMED,
+            "worker_id": "worker-1",
+            "attempts": 1,
+            "lease_expires_at": now - timedelta(seconds=1),
+            "delivery_started_at": now,
+        }
+    )
+    await persistence.update_command(progress)
+
+    # A concurrent writer holding the pre-claim snapshot rewrites the rows.
+    await persistence.commit_turn_batch(
+        state.conversation.id,
+        queued.state.conversation.version,
+        queued.state,
+        (),
+        (queued.command,),
+    )
+
+    snapshot = await persistence.get_worker_snapshot(state.conversation.id)
+    stored = snapshot.commands[queued.command.id]
+    assert stored.status is CommandStatus.CLAIMED
+    assert stored.delivery_started_at is not None
+    assert stored.attempts == 1
+    assert stored.worker_id == "worker-1"
+
+    # The retained delivery_started_at keeps the expired-lease command from
+    # being handed out again.
+    claimed = await persistence.claim_commands("other-worker", 1, lease_duration=30.0)
+    assert claimed == ()
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_worker_snapshot_overlays_durable_command_rows() -> None:
+    now = datetime.now(UTC)
+    state = new_conversation_state(owner_id="owner", now=now)
+    queued = submit_turn(state, prompt="x", idempotency_key="overlay", now=now)
+    assert queued.command is not None
+    persistence = DjangoPersistence()
+    await persistence.save_snapshot(queued.state)
+    await persistence.accept_command(queued.command)
+
+    delivered = queued.command.model_copy(
+        update={
+            "status": CommandStatus.DELIVERED,
+            "worker_id": "worker-1",
+            "attempts": 1,
+            "delivery_started_at": now,
+            "delivered_at": now,
+        }
+    )
+    await persistence.update_command(delivered)
+
+    snapshot = await persistence.get_worker_snapshot(state.conversation.id)
+    stored = snapshot.commands[queued.command.id]
+    assert stored.status is CommandStatus.DELIVERED
+    assert stored.delivered_at is not None
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_explicit_settle_overwrites_delivery_progress() -> None:
+    now = datetime.now(UTC)
+    state = new_conversation_state(owner_id="owner", now=now)
+    queued = submit_turn(state, prompt="x", idempotency_key="settle", now=now)
+    assert queued.command is not None
+    persistence = DjangoPersistence()
+    await persistence.save_snapshot(queued.state)
+    await persistence.accept_command(queued.command)
+
+    progress = queued.command.model_copy(
+        update={
+            "status": CommandStatus.DELIVERED,
+            "worker_id": "worker-1",
+            "attempts": 1,
+            "delivery_started_at": now,
+            "delivered_at": now,
+            "lease_expires_at": now + timedelta(seconds=30),
+        }
+    )
+    await persistence.update_command(progress)
+
+    settled = progress.model_copy(
+        update={
+            "status": CommandStatus.SETTLED,
+            "settled_at": now,
+            "worker_id": None,
+            "lease_expires_at": None,
+        }
+    )
+    await persistence.commit_turn_batch(
+        state.conversation.id,
+        queued.state.conversation.version,
+        queued.state,
+        (),
+        (settled,),
+    )
+
+    snapshot = await persistence.get_worker_snapshot(state.conversation.id)
+    stored = snapshot.commands[queued.command.id]
+    assert stored.status is CommandStatus.SETTLED
+    assert stored.worker_id is None
+    assert stored.lease_expires_at is None
+    assert stored.settled_at is not None
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
 async def test_answer_release_merges_into_locked_newer_aggregate() -> None:
     now = datetime(2026, 8, 8, tzinfo=UTC)
     state = new_conversation_state(owner_id="owner", now=now)

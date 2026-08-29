@@ -6,7 +6,7 @@ import asyncio
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 from unittest.mock import AsyncMock
 from uuid import uuid4
 
@@ -14,7 +14,6 @@ import pytest
 from tests.runtime.conftest import (
     FakeAdapter,
     MemoryPersistence,
-    child_modes_path,
     conversation_id_of,
     make_state,
 )
@@ -32,20 +31,34 @@ from talktoharnesses.providers.adapter import (
     ResumeSessionRequest,
     StartSessionRequest,
 )
-from talktoharnesses.runtime import ProcessHandle, RuntimeManager, RuntimePolicy
-from talktoharnesses.runtime.supervisor import ProcessSupervisor
+from talktoharnesses.runtime import RuntimeManager, RuntimePolicy
+from talktoharnesses.runtime.manager import (
+    _await_start_resume,  # pyright: ignore[reportPrivateUsage]
+)
 
 
-def _argv(*modes: str) -> tuple[str, ...]:
-    return (str(child_modes_path()), *modes)
+@pytest.mark.asyncio
+async def test_remote_start_uses_split_owned_timeout_budget() -> None:
+    class Remote:
+        remote = True
 
+    expected = HarnessSession(
+        conversation_id=uuid4(),
+        binding_id=uuid4(),
+        kind=HarnessKind.CLAUDE,
+    )
 
-class _RejectingPreflightAdapter(FakeAdapter):
-    def preflight_operation(self, mode: Literal["create", "resume"]) -> None:
-        raise DomainError(
-            ErrorCode.PROVIDER_INCOMPATIBLE,
-            f"{mode} matrix rejected",
-        )
+    async def delayed() -> HarnessSession:
+        await asyncio.sleep(0.02)
+        return expected
+
+    actual = await _await_start_resume(
+        Remote(),  # type: ignore[arg-type]
+        delayed(),
+        timeout=0.001,
+    )
+
+    assert actual is expected
 
 
 @pytest.mark.asyncio
@@ -65,7 +78,6 @@ async def test_start_and_close(
         conversation_id=cid,
         owner_id="owner-1",
         configuration=config,
-        argv=_argv("exit_code", "0"),
     )
     assert session.native_session_id
     assert mgr.get_runtime(cid) is not None
@@ -78,33 +90,6 @@ async def test_start_and_close(
     assert "session_started" in types
     assert "session_closed" in types
     assert types & {"process_exited", "process_forced_termination"}
-
-
-@pytest.mark.asyncio
-async def test_process_matrix_preflight_rejects_before_spawn(
-    persistence: MemoryPersistence,
-    short_policy: RuntimePolicy,
-    owned_python: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    registry = AdapterRegistry()
-    registry.register(HarnessKind.OPENCODE, _RejectingPreflightAdapter)
-    mgr = RuntimeManager(persistence, registry, policy=short_policy)
-    spawn = AsyncMock()
-    monkeypatch.setattr(mgr, "_spawn_process", spawn)
-    cid = conversation_id_of(persistence)
-    config = persistence.states[cid].binding.configuration  # type: ignore[union-attr]
-
-    with pytest.raises(DomainError) as exc:
-        await mgr.start(
-            conversation_id=cid,
-            owner_id="owner-1",
-            configuration=config,
-            argv=_argv("silence", "1"),
-        )
-
-    assert exc.value.code is ErrorCode.PROVIDER_INCOMPATIBLE
-    spawn.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -123,7 +108,6 @@ async def test_concurrent_start_same_conversation(
             conversation_id=cid,
             owner_id="owner-1",
             configuration=config,
-            argv=_argv("silence", "2"),
         )
 
     results = await asyncio.gather(start_one(), start_one(), return_exceptions=True)
@@ -162,13 +146,11 @@ async def test_distinct_adapter_instances(
         conversation_id=s1.conversation.id,
         owner_id="o1",
         configuration=s1.binding.configuration,  # type: ignore[union-attr]
-        argv=_argv("silence", "1"),
     )
     await mgr.start(
         conversation_id=s2.conversation.id,
         owner_id="o2",
         configuration=s2.binding.configuration,  # type: ignore[union-attr]
-        argv=_argv("silence", "1"),
     )
     assert len(created) == 2
     assert created[0] is not created[1]
@@ -199,7 +181,6 @@ async def test_idle_reap_preserves_native_id(
         conversation_id=cid,
         owner_id="owner-1",
         configuration=config,
-        argv=_argv("silence", "5"),
     )
     native = session.native_session_id
     assert await mgr.reap_if_eligible(cid)
@@ -228,7 +209,6 @@ async def test_idle_reap_does_not_close_runtime_after_concurrent_prompt(
         conversation_id=cid,
         owner_id="owner-1",
         configuration=config,
-        argv=_argv("silence", "5"),
     )
     managed = mgr.get_runtime(cid)
     assert managed is not None
@@ -283,7 +263,6 @@ async def test_background_activity_suppresses_reap(
         conversation_id=cid,
         owner_id="owner-1",
         configuration=config,
-        argv=_argv("silence", "2"),
     )
     # Mark a running background activity on the aggregate.
     state = persistence.states[cid]
@@ -332,16 +311,17 @@ async def test_interrupt_timeout_escalates(
         conversation_id=cid,
         owner_id="owner-1",
         configuration=state.binding.configuration,  # type: ignore[union-attr]
-        argv=_argv("ignore_interrupt"),
     )
     with pytest.raises(DomainError) as ei:
         await mgr.interrupt(cid)
     assert ei.value.code is ErrorCode.RUNTIME_TIMEOUT
     assert mgr.get_runtime(cid) is None
     types = {event.type for event in store.events[cid]}
-    assert "process_forced_termination" in types
+    # No local supervised process: the timed-out runtime settles as an exit
+    # (the split-side process is terminated over HTTP by the remote handle).
+    assert "process_exited" in types
     process = next(iter(store.processes.values()))
-    assert process.status.value == "terminated"
+    assert process.status.value == "exited"
 
 
 @pytest.mark.asyncio
@@ -387,7 +367,6 @@ async def test_shutdown_idempotent(
         conversation_id=cid,
         owner_id="owner-1",
         configuration=config,
-        argv=_argv("ignore_interrupt"),
     )
     await mgr.shutdown()
     await mgr.shutdown()  # idempotent
@@ -397,7 +376,6 @@ async def test_shutdown_idempotent(
             conversation_id=cid,
             owner_id="owner-1",
             configuration=config,
-            argv=_argv("exit_code", "0"),
         )
 
 
@@ -432,7 +410,6 @@ async def test_fresh_adapter_after_reap_resume(
         conversation_id=cid,
         owner_id="owner-1",
         configuration=config,
-        argv=_argv("silence", "5"),
     )
     native = session.native_session_id
     assert native
@@ -444,7 +421,6 @@ async def test_fresh_adapter_after_reap_resume(
         owner_id="owner-1",
         configuration=config,
         native_session_id=native,
-        argv=_argv("exit_code", "0"),
     )
     assert len(created) == 2
     assert created[1] is not first
@@ -465,7 +441,6 @@ async def test_abnormal_exit_session_failed(
         conversation_id=cid,
         owner_id="owner-1",
         configuration=config,
-        argv=_argv("exit_code", "7"),
     )
     # Wait for process exit to be observed.
     for _ in range(50):
@@ -476,37 +451,6 @@ async def test_abnormal_exit_session_failed(
     types = {e.type for e in persistence.events[cid]}
     assert "process_exited" in types or "session_failed" in types
     await mgr.shutdown()
-
-
-@pytest.mark.asyncio
-async def test_injected_supervisor_uses_manager_redaction_patterns(
-    persistence: MemoryPersistence,
-    registry: AdapterRegistry,
-    short_policy: RuntimePolicy,
-    owned_python: Path,
-) -> None:
-    mgr = RuntimeManager(
-        persistence,
-        registry,
-        policy=short_policy,
-        supervisor=ProcessSupervisor(short_policy),
-        redaction_patterns=("SECRET",),
-    )
-    cid = conversation_id_of(persistence)
-    config = persistence.states[cid].binding.configuration  # type: ignore[union-attr]
-    await mgr.start(
-        conversation_id=cid,
-        owner_id="owner-1",
-        configuration=config,
-        argv=_argv("secret_stderr"),
-    )
-    for _ in range(50):
-        if any(process.status.value != "running" for process in persistence.processes.values()):
-            break
-        await asyncio.sleep(0.02)
-    process = next(iter(persistence.processes.values()))
-    assert "SECRET" not in process.redacted_stderr_tail
-    assert "[REDACTED]" in process.redacted_stderr_tail
 
 
 @pytest.mark.asyncio
@@ -528,7 +472,6 @@ async def test_launch_snapshot_survives_adapter_start_timeout(
             conversation_id=state.conversation.id,
             owner_id="owner-1",
             configuration=state.binding.configuration,  # type: ignore[union-attr]
-            argv=_argv("silence", "5"),
         )
     assert exc_info.value.code is ErrorCode.RUNTIME_TIMEOUT
     stored = store.states[state.conversation.id]
@@ -569,65 +512,9 @@ async def test_sdk_client_is_closed_when_start_fails(
             conversation_id=state.conversation.id,
             owner_id="owner-1",
             configuration=state.binding.configuration,  # type: ignore[union-attr]
-            argv=(),
         )
     assert exc_info.value.code is ErrorCode.PROTOCOL_ERROR
     assert created[0].closed is True
-
-
-@pytest.mark.asyncio
-async def test_process_adapter_retries_one_pre_session_bind_failure(
-    short_policy: RuntimePolicy,
-    owned_python: Path,
-    workdir: Path,
-    now: datetime,
-) -> None:
-    class RetryAdapter(FakeAdapter):
-        def __init__(self) -> None:
-            super().__init__()
-            self.process: ProcessHandle | None = None
-            self.start_calls = 0
-            self.retry_calls = 0
-
-        def build_argv(self, config: HarnessConfiguration) -> tuple[str, ...]:
-            del config
-            return _argv("exit_code", "7")
-
-        def bind_process(self, process: ProcessHandle) -> None:
-            self.process = process
-
-        async def start(self, request: StartSessionRequest):
-            self.start_calls += 1
-            if self.start_calls == 1:
-                assert self.process is not None
-                await self.process.wait()
-                raise DomainError(ErrorCode.RUNTIME_TIMEOUT, "bind failed")
-            return await super().start(request)
-
-        async def retry_startup(self, error: DomainError) -> tuple[str, ...]:
-            assert error.code is ErrorCode.RUNTIME_TIMEOUT
-            self.retry_calls += 1
-            return _argv("silence", "2")
-
-    adapter = RetryAdapter()
-    store = MemoryPersistence()
-    state = make_state(now=now, workdir=workdir)
-    store.seed(state)
-    registry = AdapterRegistry()
-    registry.register(HarnessKind.OPENCODE, lambda: adapter)
-    manager = RuntimeManager(store, registry, policy=short_policy)
-    await manager.start(
-        conversation_id=state.conversation.id,
-        owner_id="owner-1",
-        configuration=state.binding.configuration,  # type: ignore[union-attr]
-        argv=(),
-    )
-    assert adapter.start_calls == 2
-    assert adapter.retry_calls == 1
-    records = list(store.processes.values())
-    assert len(records) == 2
-    assert any(record.status.value == "failed" for record in records)
-    await manager.shutdown()
 
 
 @pytest.mark.asyncio
@@ -648,7 +535,6 @@ async def test_shutdown_cancels_overlapping_start(
             conversation_id=state.conversation.id,
             owner_id="owner-1",
             configuration=state.binding.configuration,  # type: ignore[union-attr]
-            argv=_argv("silence", "5"),
         )
     )
     for _ in range(50):
@@ -687,7 +573,6 @@ async def test_lifecycle_conflict_is_retried(
         conversation_id=state.conversation.id,
         owner_id="owner-1",
         configuration=state.binding.configuration,  # type: ignore[union-attr]
-        argv=_argv("exit_code", "0"),
     )
     for _ in range(50):
         if any(event.type == "process_exited" for event in store.events[state.conversation.id]):
@@ -731,7 +616,6 @@ async def test_shutdown_force_phase_is_concurrent_and_within_budget(
             conversation_id=state.conversation.id,
             owner_id=f"owner-{index}",
             configuration=state.binding.configuration,  # type: ignore[union-attr]
-            argv=_argv("ignore_interrupt"),
         )
 
     started = time.monotonic()

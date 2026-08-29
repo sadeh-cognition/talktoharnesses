@@ -228,7 +228,6 @@ async def test_worker_switch_commits_new_binding_and_promotes_candidate(tmp_path
         conversation_id=cid,
         owner_id="owner",
         configuration=previous_binding.configuration,
-        argv=(),
     )
     previous_runtime = service._runtime.get_runtime(cid)  # pyright: ignore[reportPrivateUsage]
     assert previous_runtime is not None

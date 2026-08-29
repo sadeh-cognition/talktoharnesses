@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import os
-from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+import socket
+from collections.abc import AsyncIterator, Awaitable, Callable, Generator, Sequence
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -12,7 +14,7 @@ from uuid import UUID, uuid4
 import pytest
 
 from talktoharnesses.client import AsyncTalkToHarnessesClient, ConversationStreamItem
-from talktoharnesses.domain.enums import ApprovalDecision
+from talktoharnesses.domain.enums import ApprovalDecision, HarnessKind
 from talktoharnesses.domain.events import (
     ConversationEvent,
     InteractionRequestedPayload,
@@ -26,6 +28,7 @@ from talktoharnesses.domain.models import (
     HarnessConfiguration,
     HarnessProjection,
 )
+from talktoharnesses.remote.sandbox import SandboxManager
 
 TERMINAL_TYPES = frozenset(
     {"turn_completed", "turn_failed", "turn_interrupted", "turn_outcome_unknown"}
@@ -37,6 +40,78 @@ class LiveHttp:
     client: AsyncTalkToHarnessesClient
     workspace: Path
     close_runtime: Callable[[UUID], Awaitable[None]]
+
+
+def _available_port() -> int:
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        listener.bind(("127.0.0.1", 0))
+        return int(listener.getsockname()[1])
+    finally:
+        listener.close()
+
+
+@contextmanager
+def isolated_sandbox_environment(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path_factory: pytest.TempPathFactory,
+    *,
+    kind: HarnessKind,
+    auth_environment_variable: str,
+    default_auth_path: Path,
+    credential_environment_variable: str | None = None,
+) -> Generator[None]:
+    auth_file = os.environ.get(auth_environment_variable)
+    if auth_file is None:
+        home = os.environ.get("HOME")
+        if home is None:
+            pytest.fail(
+                f"{kind.value} sandbox live test requires HOME or {auth_environment_variable}"
+            )
+        auth_file = str(Path(home) / default_auth_path)
+    if not Path(auth_file).is_file():
+        pytest.fail(f"{kind.value} sandbox auth file was not found: {auth_file}")
+
+    kind_name = kind.value.upper()
+    # Image names use dashes (mirror SandboxManager._container_name):
+    # prime_agent builds as tth-prime-agent, never tth-prime_agent.
+    kind_slug = kind.value.replace("_", "-")
+    image_name = f"tth-{kind_slug}:latest"
+    container_name = f"tth-live-{kind_slug}-{uuid4().hex[:12]}"
+
+    def test_container_name(_manager: SandboxManager, _kind: HarnessKind) -> str:
+        return container_name
+
+    def test_image(_manager: SandboxManager, _kind: HarnessKind) -> str:
+        return image_name
+
+    mount_root = str(tmp_path_factory.getbasetemp())
+
+    def test_mount_roots(_manager: SandboxManager) -> tuple[str, ...]:
+        return (mount_root,)
+
+    if credential_environment_variable is not None:
+        monkeypatch.delenv(credential_environment_variable, raising=False)
+    monkeypatch.setenv(auth_environment_variable, auth_file)
+    monkeypatch.setenv(f"TTH_SPLIT_PORT_{kind_name}", str(_available_port()))
+    monkeypatch.setattr(SandboxManager, "_container_name", test_container_name)
+    monkeypatch.setattr(SandboxManager, "_image", test_image)
+    monkeypatch.setattr(SandboxManager, "_mount_roots", test_mount_roots)
+    try:
+        yield
+    finally:
+        import docker
+        from docker.errors import NotFound
+
+        client = docker.from_env()
+        try:
+            with suppress(NotFound):
+                client.containers.get(container_name).remove(force=True)
+            for suffix in ("home", "data"):
+                with suppress(NotFound):
+                    client.volumes.get(f"{container_name}-{suffix}").remove()
+        finally:
+            client.close()
 
 
 class LiveStream:
@@ -176,8 +251,8 @@ def unique_busy_prompt(prefix: str, *, use_shell: bool) -> str:
             "and request permission before running it. Do not finish until it completes."
         )
     return (
-        f"{prefix}. Count slowly from 1 to 400 in your reply, one number per line, "
-        "without using tools."
+        f"{prefix}. Count slowly from 1 to 800 in your reply, one number per line, "
+        "without using tools. Do not skip or summarize; write every number."
     )
 
 
@@ -192,13 +267,6 @@ def unique_nested_prompt(prefix: str) -> str:
 def unique_text_prompt(prefix: str) -> str:
     token = f"{prefix}-{uuid4().hex[:12]}"
     return f"Reply with exactly this token and do not use tools: {token}"
-
-
-def require_executable(env_name: str) -> str:
-    path = os.environ.get(env_name)
-    if not path:
-        pytest.fail(f"{env_name} is required when live tests are enabled")
-    return path
 
 
 def _idempotency_key(prefix: str) -> str:

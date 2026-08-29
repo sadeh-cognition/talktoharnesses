@@ -587,3 +587,34 @@ async def test_start_failure_rolls_back_and_shutdown_timeouts() -> None:
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await TalkToHarnessesService._run_shutdown_step(task, deadline + 1, "cancel")  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.asyncio
+async def test_probe_harness_releases_adapter_after_success_and_failure() -> None:
+    service, _p, _pub = _service()
+    config = HarnessConfiguration(kind=HarnessKind.GROK, working_directory="/tmp/ws")
+    h = await service.create_harness("owner", name="h", configuration=config)
+    released: list[str] = []
+
+    class _ClosableProbe(_ProbeAdapter):
+        async def aclose(self) -> None:
+            released.append("ok")
+
+    service._registry.create = lambda kind: _ClosableProbe()  # type: ignore[method-assign, return-value]
+    await service.probe_harness("owner", h.id)
+    assert released == ["ok"]
+
+    class _ClosableBoom:
+        kind = HarnessKind.GROK
+
+        async def probe(self, config: HarnessConfiguration) -> HarnessCapabilities:
+            del config
+            raise DomainError(ErrorCode.SANDBOX_UNAVAILABLE, "sandbox down")
+
+        async def aclose(self) -> None:
+            released.append("fail")
+
+    service._registry.create = lambda kind: _ClosableBoom()  # type: ignore[method-assign, return-value]
+    with pytest.raises(DomainError):
+        await service.probe_harness("owner", h.id)
+    assert released == ["ok", "fail"]

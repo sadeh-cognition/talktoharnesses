@@ -508,6 +508,251 @@ async def test_unsupported_command_is_settled() -> None:
     assert stored.settled_at is not None
 
 
+class _SlowStartRuntime(_Runtime):
+    """Models a cold sandbox start that outlives the claim lease."""
+
+    def __init__(self, persistence: MemoryPersistence, adapter: _Adapter, delay: float) -> None:
+        super().__init__(persistence, adapter)
+        self.delay = delay
+        self.starts = 0
+
+    async def ensure_binding_current(self, conversation_id: UUID, state: Any):
+        return self.managed
+
+    async def start(self, **kwargs: Any) -> HarnessSession:
+        self.starts += 1
+        await asyncio.sleep(self.delay)
+        return await super().start(**kwargs)
+
+
+def _seed_submit(prompt: str = "one") -> tuple[datetime, Any, Any, MemoryPersistence]:
+    now, state = _bound_state()
+    queued = submit_turn(state, prompt=prompt, idempotency_key=prompt, now=now)
+    assert queued.command is not None
+    persistence = MemoryPersistence()
+    persistence.seed(queued.state)
+    return now, state, queued.command, persistence
+
+
+async def _wait_for_settled(persistence: MemoryPersistence, command_id: UUID) -> None:
+    for _ in range(300):
+        stored = persistence.commands[command_id]
+        if stored.status is CommandStatus.SETTLED:
+            return
+        await asyncio.sleep(0.01)
+
+
+def _refresh_ownership(persistence: MemoryPersistence, conversation_id: UUID) -> asyncio.Task[None]:
+    """Model the worker coordinator heartbeat, which keeps this worker's
+    conversation ownership lease fresh independently of command delivery."""
+
+    async def refresh() -> None:
+        while True:
+            ownership = persistence.ownership.get(conversation_id)
+            if ownership is not None:
+                persistence.ownership[conversation_id] = (
+                    ownership[0],
+                    ownership[1],
+                    datetime.now(UTC) + timedelta(seconds=30),
+                )
+            await asyncio.sleep(0.02)
+
+    return asyncio.create_task(refresh())
+
+
+@pytest.mark.asyncio
+async def test_expired_lease_during_cold_start_does_not_double_deliver() -> None:
+    """Regression for the duplicate-turn incident: a cold start longer than
+    the claim lease must not lead to a second adapter.submit."""
+    _, state, command, persistence = _seed_submit()
+    await persistence.accept_command(command)
+    adapter = _Adapter()
+    runtime = _SlowStartRuntime(persistence, adapter, delay=0.6)
+    processor = CommandProcessor(
+        persistence,
+        _Publisher(),
+        runtime,  # type: ignore[arg-type]
+        lease_seconds=0.2,
+        poll_interval=0.02,
+    )
+
+    heartbeat = _refresh_ownership(persistence, state.conversation.id)
+    await processor.start("worker-1")
+    try:
+        await _wait_for_settled(persistence, command.id)
+        # Leave room for any duplicate task to run before shutdown.
+        await asyncio.sleep(0.1)
+    finally:
+        await processor.stop()
+        heartbeat.cancel()
+
+    assert len(adapter.submissions) == 1
+    stored = persistence.commands[command.id]
+    assert stored.status is CommandStatus.SETTLED
+    # The keepalive kept the lease fresh, so the claim loop never re-claimed.
+    assert stored.attempts == 1
+
+
+@pytest.mark.asyncio
+async def test_reclaimed_in_flight_command_is_not_delivered_twice() -> None:
+    """Even without the lease keepalive, a re-claim of our own in-flight
+    command must be skipped by the claim loop."""
+    _, state, command, persistence = _seed_submit()
+    await persistence.accept_command(command)
+    adapter = _Adapter()
+    runtime = _SlowStartRuntime(persistence, adapter, delay=0.6)
+    processor = CommandProcessor(
+        persistence,
+        _Publisher(),
+        runtime,  # type: ignore[arg-type]
+        lease_seconds=0.2,
+        poll_interval=0.02,
+    )
+    processor._spawn_lease_keepalive = lambda command: None  # type: ignore[method-assign] # pyright: ignore[reportPrivateUsage]
+
+    heartbeat = _refresh_ownership(persistence, state.conversation.id)
+    await processor.start("worker-1")
+    try:
+        await _wait_for_settled(persistence, command.id)
+        await asyncio.sleep(0.1)
+    finally:
+        await processor.stop()
+        heartbeat.cancel()
+
+    assert len(adapter.submissions) == 1
+    assert runtime.starts == 1
+    stored = persistence.commands[command.id]
+    assert stored.status is CommandStatus.SETTLED
+    # The lease expired mid-start, so the claim loop re-claimed at least once
+    # and skipped spawning a duplicate task each time.
+    assert stored.attempts > 1
+
+
+@pytest.mark.asyncio
+async def test_lease_keepalive_renews_during_slow_start() -> None:
+    _, _, command, persistence = _seed_submit()
+    await persistence.accept_command(command)
+    claimed = command.model_copy(
+        update={
+            "status": CommandStatus.CLAIMED,
+            "worker_id": "worker-1",
+            "attempts": 1,
+            "lease_expires_at": datetime.now(UTC) + timedelta(seconds=0.15),
+        }
+    )
+    persistence.commands[claimed.id] = claimed
+    initial_lease = claimed.lease_expires_at
+    adapter = _Adapter()
+    runtime = _SlowStartRuntime(persistence, adapter, delay=0.4)
+    processor = CommandProcessor(
+        persistence,
+        _Publisher(),
+        runtime,  # type: ignore[arg-type]
+        lease_seconds=0.15,
+    )
+    processor._worker_id = "worker-1"  # pyright: ignore[reportPrivateUsage]
+
+    await processor._execute_command(claimed)  # pyright: ignore[reportPrivateUsage]
+    await processor.stop()
+
+    stored = persistence.commands[claimed.id]
+    assert initial_lease is not None
+    assert stored.lease_expires_at is not None
+    assert stored.lease_expires_at > initial_lease
+    assert stored.attempts == 1
+    assert len(adapter.submissions) == 1
+
+
+def _guard_fixture(
+    *,
+    status: CommandStatus,
+    delivery_started: bool,
+    delivered: bool = False,
+) -> tuple[Any, MemoryPersistence, _Adapter, CommandProcessor, Any]:
+    now, state = _bound_state()
+    queued = submit_turn(state, prompt="guarded", idempotency_key="guarded", now=now)
+    assert queued.command is not None
+    started = start_turn(queued.state, now=now)
+    persistence = MemoryPersistence()
+    persistence.seed(started.state)
+    durable = queued.command.model_copy(
+        update={
+            "status": status,
+            "worker_id": "worker-1",
+            "attempts": 1,
+            "lease_expires_at": now + timedelta(seconds=30),
+            "delivery_started_at": now if delivery_started else None,
+            "delivered_at": now if delivered else None,
+        }
+    )
+    persistence.commands[durable.id] = durable
+    adapter = _Adapter()
+    runtime = _Runtime(persistence, adapter)
+    assert state.binding is not None
+    runtime.managed = SimpleNamespace(
+        adapter=adapter,
+        session=HarnessSession(
+            conversation_id=state.conversation.id,
+            binding_id=state.binding.id,
+            kind=HarnessKind.GROK,
+            native_session_id="session-1",
+        ),
+    )
+    processor = CommandProcessor(persistence, _Publisher(), runtime)  # type: ignore[arg-type]
+    processor._worker_id = "worker-1"  # pyright: ignore[reportPrivateUsage]
+    claimed = durable.model_copy(
+        update={"status": CommandStatus.CLAIMED, "delivery_started_at": None}
+    )
+    return claimed, persistence, adapter, processor, durable
+
+
+@pytest.mark.asyncio
+async def test_delivered_command_is_not_redelivered() -> None:
+    claimed, persistence, adapter, processor, _ = _guard_fixture(
+        status=CommandStatus.DELIVERED,
+        delivery_started=True,
+        delivered=True,
+    )
+
+    await processor._execute_command(claimed)  # pyright: ignore[reportPrivateUsage]
+    await processor.stop()
+
+    assert adapter.submissions == []
+    assert persistence.commands[claimed.id].status is CommandStatus.DELIVERED
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_prior_delivery_marks_outcome_unknown() -> None:
+    claimed, persistence, adapter, processor, _ = _guard_fixture(
+        status=CommandStatus.CLAIMED,
+        delivery_started=True,
+    )
+
+    await processor._execute_command(claimed)  # pyright: ignore[reportPrivateUsage]
+    await processor.stop()
+
+    assert adapter.submissions == []
+    stored = persistence.commands[claimed.id]
+    assert stored.status is CommandStatus.OUTCOME_UNKNOWN
+    assert stored.worker_id is None
+    assert stored.lease_expires_at is None
+
+
+@pytest.mark.asyncio
+async def test_settled_command_is_skipped() -> None:
+    claimed, persistence, adapter, processor, _ = _guard_fixture(
+        status=CommandStatus.SETTLED,
+        delivery_started=True,
+        delivered=True,
+    )
+
+    await processor._execute_command(claimed)  # pyright: ignore[reportPrivateUsage]
+    await processor.stop()
+
+    assert adapter.submissions == []
+    assert persistence.commands[claimed.id].status is CommandStatus.SETTLED
+
+
 @pytest.mark.asyncio
 async def test_steer_failure_queues_instead_of_delivered() -> None:
     now, state = _bound_state(steer=True)
@@ -558,3 +803,147 @@ async def test_steer_failure_queues_instead_of_delivered() -> None:
     assert stored.status is CommandStatus.ACCEPTED
     assert stored.kind is CommandKind.SUBMIT_TURN
     assert stored.delivered_at is None
+
+
+@pytest.mark.asyncio
+async def test_permanent_sandbox_error_settles_command_instead_of_retrying() -> None:
+    """SANDBOX_PATH_NOT_MOUNTED can never succeed on retry: the command must
+    settle and surface an event instead of staying claimed forever."""
+    from talktoharnesses.domain.enums import ErrorCode
+    from talktoharnesses.domain.errors import DomainError
+
+    now = datetime(2026, 8, 8, tzinfo=UTC)
+    state = new_conversation_state(owner_id="owner", now=now)
+    binding = ConversationHarnessBinding(
+        conversation_id=state.conversation.id,
+        kind=HarnessKind.GROK,
+        configuration=HarnessConfiguration(kind=HarnessKind.GROK, working_directory="/tmp"),
+        created_at=now,
+    )
+    state = state.model_copy(
+        update={
+            "binding": binding,
+            "conversation": state.conversation.model_copy(
+                update={"current_binding_id": binding.id}
+            ),
+        }
+    )
+    submitted = submit_turn(state, prompt="hello", idempotency_key="k1", now=now)
+    assert submitted.command is not None
+
+    persistence = MemoryPersistence()
+    persistence.seed(submitted.state)
+    await persistence.accept_command(submitted.command)
+    claimed = submitted.command.model_copy(
+        update={
+            "status": CommandStatus.CLAIMED,
+            "worker_id": "worker-1",
+            "attempts": 1,
+            "lease_expires_at": now + timedelta(seconds=30),
+        }
+    )
+    persistence.commands[claimed.id] = claimed
+
+    class _SandboxlessRuntime:
+        def get_runtime(self, conversation_id: UUID):
+            return None
+
+        async def ensure_binding_current(self, conversation_id: UUID, state: Any):
+            return None
+
+        async def start(self, **kwargs: Any) -> None:
+            raise DomainError(
+                ErrorCode.SANDBOX_PATH_NOT_MOUNTED,
+                "/tmp is not mounted into the grok sandbox",
+                details={"kind": "grok", "path": "/tmp"},
+            )
+
+        async def resume(self, **kwargs: Any) -> None:
+            await self.start(**kwargs)
+
+        async def close(self, conversation_id: UUID, *, reason: str) -> None:
+            return None
+
+    publisher = _Publisher()
+    processor = CommandProcessor(persistence, publisher, _SandboxlessRuntime())  # type: ignore[arg-type]
+    processor._worker_id = "worker-1"  # pyright: ignore[reportPrivateUsage]
+
+    await processor._handle_command(claimed)  # pyright: ignore[reportPrivateUsage]
+    await processor.stop()
+
+    stored = persistence.commands[claimed.id]
+    assert stored.status is CommandStatus.SETTLED
+    final = await persistence.get_worker_snapshot(state.conversation.id)
+    assert final.queued_turn is None
+    assert any(event.type == "turn_cancelled" for event in publisher.events)
+
+
+@pytest.mark.asyncio
+async def test_sandbox_preparing_keeps_command_claimed_for_retry() -> None:
+    """Transient SANDBOX_PREPARING must keep the lease-retry behavior."""
+    from talktoharnesses.domain.enums import ErrorCode
+    from talktoharnesses.domain.errors import DomainError
+
+    now = datetime(2026, 8, 8, tzinfo=UTC)
+    state = new_conversation_state(owner_id="owner", now=now)
+    binding = ConversationHarnessBinding(
+        conversation_id=state.conversation.id,
+        kind=HarnessKind.GROK,
+        configuration=HarnessConfiguration(kind=HarnessKind.GROK, working_directory="/tmp"),
+        created_at=now,
+    )
+    state = state.model_copy(
+        update={
+            "binding": binding,
+            "conversation": state.conversation.model_copy(
+                update={"current_binding_id": binding.id}
+            ),
+        }
+    )
+    submitted = submit_turn(state, prompt="hello", idempotency_key="k1", now=now)
+    assert submitted.command is not None
+
+    persistence = MemoryPersistence()
+    persistence.seed(submitted.state)
+    await persistence.accept_command(submitted.command)
+    claimed = submitted.command.model_copy(
+        update={
+            "status": CommandStatus.CLAIMED,
+            "worker_id": "worker-1",
+            "attempts": 1,
+            "lease_expires_at": now + timedelta(seconds=30),
+        }
+    )
+    persistence.commands[claimed.id] = claimed
+
+    class _PreparingRuntime:
+        def get_runtime(self, conversation_id: UUID):
+            return None
+
+        async def ensure_binding_current(self, conversation_id: UUID, state: Any):
+            return None
+
+        async def start(self, **kwargs: Any) -> None:
+            raise DomainError(
+                ErrorCode.SANDBOX_PREPARING,
+                "sandbox for grok is being prepared",
+                details={"kind": "grok"},
+            )
+
+        async def resume(self, **kwargs: Any) -> None:
+            await self.start(**kwargs)
+
+        async def close(self, conversation_id: UUID, *, reason: str) -> None:
+            return None
+
+    publisher = _Publisher()
+    processor = CommandProcessor(persistence, publisher, _PreparingRuntime())  # type: ignore[arg-type]
+    processor._worker_id = "worker-1"  # pyright: ignore[reportPrivateUsage]
+
+    await processor._handle_command(claimed)  # pyright: ignore[reportPrivateUsage]
+    await processor.stop()
+
+    stored = persistence.commands[claimed.id]
+    assert stored.status is CommandStatus.CLAIMED
+    final = await persistence.get_worker_snapshot(state.conversation.id)
+    assert final.queued_turn is not None

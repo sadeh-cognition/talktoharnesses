@@ -8,7 +8,8 @@ audiences:
 tags:
   - type/operation
   - audience/developer
-last_verified: 2026-08-20
+last_verified: 2026-08-30
+verified_against_commit: 78003994d9fe93108ce5a6bc3591ab2e2ef904d9
 ---
 
 # Wiki Maintenance
@@ -29,8 +30,11 @@ Open the repository's `llm-wiki/` directory as an Obsidian vault. Shared setting
 6. Run the wiki linter:
 
 ```bash
-uv run manage.py wiki_lint --root /path/to/talktoharnesses/llm-wiki
+uv run host/manage.py wiki_lint --root /path/to/talktoharnesses/llm-wiki
 ```
+
+The command is provided by the `talktoharnesses.django` application and uses
+only filesystem access; it does not read or modify application data.
 
 ## Related
 
