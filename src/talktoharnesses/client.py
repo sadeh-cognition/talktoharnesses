@@ -805,6 +805,20 @@ class AsyncTalkToHarnessesClient:
         )
         return self._parse_model(CommandProjection, response)
 
+    async def close_runtime(
+        self,
+        conversation_id: UUID,
+        *,
+        timeout: _Timeout = _UNSET,
+    ) -> None:
+        """Release the conversation's idle harness process; the next turn resumes it."""
+        await self._request(
+            "POST",
+            f"conversations/{conversation_id}/runtime/close",
+            accepted=204,
+            timeout=timeout,
+        )
+
     # ------------------------------------------------------------------
     # Interactions
     # ------------------------------------------------------------------

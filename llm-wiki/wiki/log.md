@@ -15,6 +15,15 @@ verified_against_commit: 78003994d9fe93108ce5a6bc3591ab2e2ef904d9
 
 Entries are appended using `## [YYYY-MM-DD] operation | Title`.
 
+## [2026-09-02] operation | Document the runtime close endpoint
+
+- Added `POST /conversations/{id}/runtime/close` to the HTTP API map and the
+  HTTP and SSE interface page, with its 204 and 409 `conversation_busy`
+  outcomes (turn, activity or switch in flight; runtime held by another
+  worker).
+- Verified against the working tree on top of
+  `53bc585` (sandbox harnesses using Docker).
+
 ## [2026-08-30] ingest | On-demand sandbox provisioning
 
 - Added the approved product source `raw/product/on-demand-sandbox-provisioning.md`

@@ -8,7 +8,7 @@ import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Protocol, cast
+from typing import Literal, Protocol, cast
 from uuid import UUID, uuid4
 
 from talktoharnesses.application.faults import FaultCallback, FaultPoint, checkpoint
@@ -42,6 +42,7 @@ from talktoharnesses.domain.transitions import (
     fail_session,
     reap_session,
     resume_session,
+    runtime_idle,
     start_session,
 )
 from talktoharnesses.providers.adapter import (
@@ -1489,65 +1490,138 @@ class RuntimeManager:
             return
         managed.closing = True
         try:
+            await self._close_live_resources(managed)
+            # Persist terminal status for both process-bound and SDK-managed runtimes.
+            await self._persist_terminal(managed, session_action=session_action, reason=reason)
+        finally:
+            # A runtime that failed to settle must still leave the capacity
+            # slot; ``closing`` stays set, so no second close can reach it.
+            await self._teardown_runtime(managed, close_adapter=False)
+
+    async def _close_live_resources(self, managed: ManagedRuntime) -> None:
+        """Close the adapter session; force the process when the graceful close fails."""
+        try:
             await asyncio.wait_for(
                 managed.adapter.close(managed.session),
                 timeout=self._policy.graceful_close_timeout,
             )
         except TimeoutError:
-            if managed.process is not None:
-                await managed.process.force_terminate(reason="graceful_close_timeout")
+            forced_reason = "graceful_close_timeout"
+        except Exception:
+            logger.warning(
+                "adapter close failed for conversation %s",
+                managed.conversation_id,
+                exc_info=True,
+            )
+            forced_reason = "close_failed"
         else:
             if managed.process is not None:
                 await managed.process.close()
-        # Persist terminal status for both process-bound and SDK-managed runtimes.
-        await self._persist_terminal(managed, session_action=session_action, reason=reason)
-        await self._teardown_runtime(managed, close_adapter=False)
+            return
+        if managed.process is not None:
+            await managed.process.force_terminate(reason=forced_reason)
 
     async def reap_if_eligible(self, conversation_id: UUID) -> bool:
-        """Re-read authoritative state; reap only when idle_reap_eligible."""
+        """Re-read authoritative state; reap only when the conversation is idle."""
         async with self._lock_for(conversation_id):
             managed = self._runtimes.get(conversation_id)
             if managed is None:
                 return False
-            state = await self._persistence.get_snapshot(
-                conversation_id,
+            state = await self._state_for_release(managed)
+            if state is None:
+                return True
+            if not runtime_idle(state):
+                return False
+            return await self._release_idle(managed, state, session_action="reap", reason="idle")
+
+    async def close_idle(self, conversation_id: UUID, *, reason: str) -> bool:
+        """Close the live runtime of an idle conversation; history and resume id stay.
+
+        Returns False when this worker holds no runtime for the conversation.
+        Raises CONVERSATION_BUSY when the conversation is not idle, including
+        when a turn starts between the caller's check and the reservation.
+        """
+        async with self._lock_for(conversation_id):
+            managed = self._runtimes.get(conversation_id)
+            if managed is None:
+                return False
+            state = await self._state_for_release(managed)
+            if state is None:
+                return True
+            busy = DomainError(
+                ErrorCode.CONVERSATION_BUSY,
+                "conversation is not idle",
+                details={"conversation_id": str(conversation_id)},
+            )
+            if not runtime_idle(state):
+                raise busy
+            if not await self._release_idle(managed, state, session_action="close", reason=reason):
+                raise busy
+            return True
+
+    async def _state_for_release(self, managed: ManagedRuntime) -> ConversationState | None:
+        """Authoritative state for an idle release; None once the conversation is gone."""
+        try:
+            return await self._persistence.get_snapshot(
+                managed.conversation_id,
                 managed.owner_id,
             )
-            if not state.idle_reap_eligible:
-                return False
-
-            # Reserve the reap before closing resources. A prompt committed after
-            # the snapshot makes this write conflict and leaves the runtime live.
-            result = reap_session(state, now=self._clock(), reason="idle")
-            try:
-                await self._persistence.commit_runtime_lifecycle(
-                    conversation_id,
-                    state.conversation.version,
-                    result.state,
-                    None,
-                    None,
-                    result.events,
-                    worker_id=managed.worker_id,
-                    fence=managed.fence,
-                )
-            except DomainError as exc:
-                if exc.code is ErrorCode.OPTIMISTIC_CONFLICT:
-                    return False
+        except DomainError as exc:
+            if exc.code not in (ErrorCode.INVALID_STATE, ErrorCode.NOT_FOUND):
                 raise
-            get_observability().observe_committed_events(result.events, state=result.state)
-            managed.closing = True
+        # The conversation was deleted underneath the runtime (another
+        # worker, or before delete learned to close). Nothing to
+        # persist: just free the process and the capacity slot.
+        logger.info("reaping runtime for deleted conversation %s", managed.conversation_id)
+        managed.terminal_persisted = True
+        await self._teardown_runtime(managed, close_adapter=True)
+        return None
 
-            # Close live resources; preserve native resume ID and launch history.
-            with contextlib.suppress(Exception):
-                await asyncio.wait_for(
-                    managed.adapter.close(managed.session),
-                    timeout=self._policy.graceful_close_timeout,
-                )
-            if managed.process is not None:
-                await managed.process.close()
-            await self._persist_terminal(managed, reason="idle")
+    async def _release_idle(
+        self,
+        managed: ManagedRuntime,
+        state: ConversationState,
+        *,
+        session_action: Literal["close", "reap"],
+        reason: str,
+    ) -> bool:
+        """Reserve the session close under OCC, then free the runtime.
+
+        A prompt or switch committed after ``state`` was read makes the
+        reservation conflict; the runtime then stays live and False is returned.
+        Caller holds the conversation lock.
+        """
+        if session_action == "reap":
+            result = reap_session(state, now=self._clock(), reason=reason)
+        else:
+            result = close_session(state, now=self._clock(), reason=reason)
+        try:
+            await self._persistence.commit_runtime_lifecycle(
+                managed.conversation_id,
+                state.conversation.version,
+                result.state,
+                None,
+                None,
+                result.events,
+                worker_id=managed.worker_id,
+                fence=managed.fence,
+            )
+        except DomainError as exc:
+            if exc.code is ErrorCode.OPTIMISTIC_CONFLICT:
+                return False
+            raise
+        get_observability().observe_committed_events(result.events, state=result.state)
+        managed.closing = True
+
+        # Close live resources; preserve native resume ID and launch history.
+        try:
+            await self._close_live_resources(managed)
+            await self._persist_terminal(managed, reason=reason)
+        finally:
+            # The session close is already durable: the runtime must go even
+            # when settling the process fails, or the slot stays pinned.
             await self._teardown_runtime(managed, close_adapter=False)
-            return True
+        return True
 
     async def _persist_terminal(
         self,
@@ -1655,31 +1729,36 @@ class RuntimeManager:
             return
         managed.closed = True
         replaced = self._runtimes.get(managed.conversation_id) is not managed
-        if not replaced:
-            idle = self._idle_tasks.pop(managed.conversation_id, None)
-            if idle is not None:
-                idle.cancel()
         current = asyncio.current_task()
-        others = [t for t in managed.tasks if t is not current]
-        for task in others:
-            task.cancel()
-        if others:
-            await asyncio.gather(*others, return_exceptions=True)
-        managed.tasks.clear()
-        if close_adapter:
-            with contextlib.suppress(Exception):
-                await asyncio.wait_for(
-                    managed.adapter.close(managed.session),
-                    timeout=self._policy.graceful_close_timeout,
-                )
-        if managed.process is not None:
-            with contextlib.suppress(Exception):
-                if managed.process.returncode is None:
-                    await managed.process.force_terminate(reason="teardown")
-                else:
-                    await managed.process.close()
-        if not replaced:
-            self._runtimes.pop(managed.conversation_id, None)
+        try:
+            if not replaced:
+                idle = self._idle_tasks.pop(managed.conversation_id, None)
+                # The idle reaper tears down from inside its own task; cancelling
+                # it here would abort this teardown at the next await.
+                if idle is not None and idle is not current:
+                    idle.cancel()
+            others = [t for t in managed.tasks if t is not current]
+            for task in others:
+                task.cancel()
+            if others:
+                await asyncio.gather(*others, return_exceptions=True)
+            managed.tasks.clear()
+            if close_adapter:
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(
+                        managed.adapter.close(managed.session),
+                        timeout=self._policy.graceful_close_timeout,
+                    )
+            if managed.process is not None:
+                with contextlib.suppress(Exception):
+                    if managed.process.returncode is None:
+                        await managed.process.force_terminate(reason="teardown")
+                    else:
+                        await managed.process.close()
+        finally:
+            # A closed runtime must never keep occupying a capacity slot.
+            if not replaced:
+                self._runtimes.pop(managed.conversation_id, None)
 
     async def shutdown(self, *, deadline: float | None = None) -> None:
         """Idempotent shutdown: reject new runtimes, interrupt, then force-kill."""

@@ -164,6 +164,7 @@ _RENEWABLE_COMMAND_STATUSES = (
     CommandStatus.DELIVERED.value,
 )
 
+
 def _json(model: BaseModel) -> dict[str, object]:
     return model.model_dump(mode="json")
 
@@ -577,9 +578,7 @@ class DjangoPersistence:
         if row is None:
             raise DomainError(ErrorCode.INVALID_STATE, "command not found")
         merged = merge_command_progress(_load(Command, row.data), command)
-        CommandRecord.objects.filter(command_id=command.id).update(
-            **self._command_values(merged)
-        )
+        CommandRecord.objects.filter(command_id=command.id).update(**self._command_values(merged))
         return merged
 
     async def commit_event_batch(
@@ -1862,9 +1861,7 @@ class DjangoPersistence:
                 details={"command_id": str(command.id)},
             )
         merged = merge_command_progress(_load(Command, row.data), command)
-        CommandRecord.objects.filter(command_id=command.id).update(
-            **self._command_values(merged)
-        )
+        CommandRecord.objects.filter(command_id=command.id).update(**self._command_values(merged))
 
     async def get_retention_policy(self, owner_id: str) -> RetentionPolicyProjection:
         return await sync_to_async(self._get_retention_policy, thread_sensitive=True)(owner_id)
@@ -2685,6 +2682,39 @@ class DjangoPersistence:
         row.runtime_worker_id = None
         row.runtime_lease_expires_at = None
         row.save(update_fields=("runtime_worker_id", "runtime_lease_expires_at"))
+
+    async def get_conversation_ownership(
+        self, conversation_id: UUID
+    ) -> ConversationOwnership | None:
+        return await sync_to_async(self._get_conversation_ownership, thread_sensitive=True)(
+            conversation_id
+        )
+
+    def _get_conversation_ownership(self, conversation_id: UUID) -> ConversationOwnership | None:
+        row = (
+            ConversationAggregate.objects.filter(conversation_id=conversation_id)
+            .only(
+                "conversation_id", "runtime_worker_id", "runtime_fence", "runtime_lease_expires_at"
+            )
+            .first()
+        )
+        if row is None or row.runtime_worker_id is None or row.runtime_lease_expires_at is None:
+            return None
+        return ConversationOwnership(
+            conversation_id=row.conversation_id,
+            worker_id=row.runtime_worker_id,
+            fence=int(row.runtime_fence),
+            lease_expires_at=row.runtime_lease_expires_at,
+        )
+
+    async def has_live_process(self, conversation_id: UUID) -> bool:
+        return await sync_to_async(self._has_live_process, thread_sensitive=True)(conversation_id)
+
+    def _has_live_process(self, conversation_id: UUID) -> bool:
+        return RuntimeProcess.objects.filter(
+            conversation_id=conversation_id,
+            status__in=(ProcessStatus.STARTING.value, ProcessStatus.RUNNING.value),
+        ).exists()
 
     async def complete_recovery_attempt(
         self,

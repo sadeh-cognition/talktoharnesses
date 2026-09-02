@@ -314,9 +314,7 @@ def test_harness_models_returns_persisted_probe_models(
     )
 
     assert response.status_code == 200
-    assert response.json() == [
-        {"id": "gpt-5.6-sol", "label": "GPT-5.6-Sol", "efforts": None}
-    ]
+    assert response.json() == [{"id": "gpt-5.6-sol", "label": "GPT-5.6-Sol", "efforts": None}]
 
 
 @pytest.mark.django_db(transaction=True)
@@ -526,3 +524,33 @@ def test_sse_headers_and_sync_frame(service: TalkToHarnessesService, auth_header
     assert res["Content-Type"].startswith("text/event-stream")
     assert res["Cache-Control"] == "no-cache"
     assert res["X-Accel-Buffering"] == "no"
+
+
+@pytest.mark.django_db(transaction=True)
+def test_close_runtime_route(service: TalkToHarnessesService, auth_header: str, user: Any) -> None:
+    client = Client()
+    owner = owner_id_for_user(user)
+
+    async def setup() -> UUID:
+        config = HarnessConfiguration(kind=HarnessKind.GROK, working_directory="/tmp/ws")
+        h = await service.create_harness(owner, name="h", configuration=config)
+        snap = await service.create_conversation(owner, h.id)
+        return snap.detail.conversation.id
+
+    import asyncio
+
+    cid = asyncio.run(setup())
+    path = f"/api/v1/conversations/{cid}/runtime/close"
+
+    assert client.post(path).status_code == 401
+
+    # Without a live runtime the close is an idempotent no-op.
+    ok = client.post(path, HTTP_AUTHORIZATION=auth_header)
+    assert ok.status_code == 204, ok.content
+    assert client.post(path, HTTP_AUTHORIZATION=auth_header).status_code == 204
+
+    # A queued turn counts as busy: the runtime is about to be needed.
+    asyncio.run(service.submit_turn(owner, cid, prompt="go", idempotency_key="s1"))
+    busy = client.post(path, HTTP_AUTHORIZATION=auth_header)
+    assert busy.status_code == 409, busy.content
+    assert busy.json()["code"] == "conversation_busy"

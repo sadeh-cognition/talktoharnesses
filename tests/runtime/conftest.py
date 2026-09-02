@@ -76,9 +76,7 @@ def owned_python(tmp_path: Path) -> Path:
 
 
 @pytest.fixture(autouse=True)
-def process_bound_executable_env(
-    owned_python: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def process_bound_executable_env(owned_python: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("TALKTOHARNESSES_OPENCODE_EXECUTABLE", str(owned_python))
     monkeypatch.setenv("TALKTOHARNESSES_GROK_EXECUTABLE", str(owned_python))
     monkeypatch.setenv("TALKTOHARNESSES_CURSOR_EXECUTABLE", str(owned_python))

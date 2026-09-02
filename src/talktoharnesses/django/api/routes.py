@@ -470,6 +470,13 @@ async def interrupt(request: HttpRequest, conversation_id: UUID) -> tuple[int, C
     return 202, cmd
 
 
+@router.post("/conversations/{conversation_id}/runtime/close", response={204: None})
+async def close_runtime(request: HttpRequest, conversation_id: UUID) -> tuple[int, None]:
+    """Release the idle conversation's harness process; history is retained."""
+    await get_service().close_runtime(_owner(request), conversation_id)
+    return 204, None
+
+
 # ---------------------------------------------------------------------------
 # Interactions
 # ---------------------------------------------------------------------------

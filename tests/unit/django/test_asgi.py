@@ -195,3 +195,22 @@ def test_appconfig_ready_starts_nothing() -> None:
     config.ready()
     with pytest.raises(DomainError):
         get_service()
+
+
+def test_build_service_applies_runtime_policy_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TTH_RUNTIME_IDLE_REAP_SECONDS", "42")
+    monkeypatch.setenv("TTH_RUNTIME_MAX_RUNTIMES", "3")
+
+    service = asgi_mod._build_service()  # pyright: ignore[reportPrivateUsage]
+
+    policy = service._runtime._policy  # pyright: ignore[reportPrivateUsage]
+    assert policy.idle_reap == 42.0
+    assert policy.max_runtimes == 3
+
+
+def test_build_service_fails_closed_on_invalid_runtime_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TTH_RUNTIME_MAX_RUNTIMES", "0")
+    with pytest.raises(ValueError, match="TTH_RUNTIME_MAX_RUNTIMES"):
+        asgi_mod._build_service()  # pyright: ignore[reportPrivateUsage]

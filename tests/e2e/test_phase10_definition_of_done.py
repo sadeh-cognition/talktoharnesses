@@ -214,9 +214,7 @@ async def _wait_for_event(
 
     for _ in range(100):
         events = list(await service.replay_events(owner_id, conversation_id, after_sequence=0))
-        if any(
-            event.type == event_type and event.sequence > after_sequence for event in events
-        ):
+        if any(event.type == event_type and event.sequence > after_sequence for event in events):
             assert [event.sequence for event in events] == sorted(
                 event.sequence for event in events
             )

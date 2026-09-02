@@ -93,11 +93,13 @@ async def live_http(transactional_db: None, tmp_path: Path) -> AsyncIterator[Liv
             assert health["status"] == "ok"
 
             async def close_runtime(conversation_id: UUID) -> None:
+                # Go through the public endpoint so the gate exercises the
+                # same path clients use to release a runtime.
                 runtime = get_service()._runtime  # pyright: ignore[reportPrivateUsage]
                 assert runtime.get_runtime(conversation_id) is not None, (
                     "live runtime was not running"
                 )
-                await runtime.close(conversation_id, reason="live-resume-gate")
+                await client.close_runtime(conversation_id)
                 assert runtime.get_runtime(conversation_id) is None, (
                     "live runtime remained after close"
                 )

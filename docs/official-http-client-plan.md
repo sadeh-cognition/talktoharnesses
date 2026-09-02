@@ -300,6 +300,7 @@ Do not consolidate these into a generic public history method.
 | `steer(conversation_id, *, prompt, idempotency_key)` | `POST conversations/{id}/steer` | 202 | `CommandProjection` |
 | `switch_harness(conversation_id, *, harness_id, idempotency_key)` | `POST conversations/{id}/switch` | 202 | `CommandProjection` |
 | `interrupt(conversation_id)` | `POST conversations/{id}/interrupt` | 202 | `CommandProjection` |
+| `close_runtime(conversation_id)` | `POST conversations/{id}/runtime/close` | 204 | `None` |
 
 Rules:
 

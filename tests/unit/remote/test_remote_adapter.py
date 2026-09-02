@@ -366,6 +366,56 @@ async def test_split_error_round_trips_to_domain_error() -> None:
     assert excinfo.value.details == {"conversation_id": "c1"}
 
 
+async def test_unknown_split_error_code_keeps_message_and_details() -> None:
+    """A split's request-validation 422 must surface its pydantic message."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        error = SplitError(
+            code="validation_error",
+            message="session_id: Extra inputs are not permitted",
+            details={"field": "session_id"},
+        )
+        return httpx.Response(422, content=error.model_dump_json())
+
+    transport = httpx.MockTransport(handler)
+
+    class _Client(httpx.AsyncClient):
+        def __init__(self, **kwargs: Any) -> None:
+            kwargs["transport"] = transport
+            super().__init__(**kwargs)
+
+    adapter = RemoteHarnessAdapter(HarnessKind.CLAUDE, _Endpoints(), client_factory=_Client)
+    with pytest.raises(DomainError) as excinfo:
+        await adapter.probe(_config())
+    assert excinfo.value.code is ErrorCode.PROTOCOL_ERROR
+    assert "session_id: Extra inputs are not permitted" in excinfo.value.message
+    assert "validation_error" in excinfo.value.message
+    assert excinfo.value.details == {
+        "field": "session_id",
+        "status": 422,
+        "split_code": "validation_error",
+    }
+
+
+async def test_non_json_split_error_is_generic_protocol_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(502, content=b"<html>bad gateway</html>")
+
+    transport = httpx.MockTransport(handler)
+
+    class _Client(httpx.AsyncClient):
+        def __init__(self, **kwargs: Any) -> None:
+            kwargs["transport"] = transport
+            super().__init__(**kwargs)
+
+    adapter = RemoteHarnessAdapter(HarnessKind.CLAUDE, _Endpoints(), client_factory=_Client)
+    with pytest.raises(DomainError) as excinfo:
+        await adapter.probe(_config())
+    assert excinfo.value.code is ErrorCode.PROTOCOL_ERROR
+    assert excinfo.value.message == "split returned HTTP 502"
+    assert excinfo.value.details == {"status": 502}
+
+
 async def test_force_terminate_marks_forced_and_posts() -> None:
     split = FakeSplit(pid=7)
     adapter = _adapter(split)

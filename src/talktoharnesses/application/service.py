@@ -88,6 +88,7 @@ from talktoharnesses.domain.transitions import (
     edit_queued_prompt,
     new_conversation_state,
     pin_conversation,
+    runtime_idle,
     set_retention_exemption,
     snooze_conversation,
     soft_delete_conversation,
@@ -511,6 +512,14 @@ class TalkToHarnessesService:
 
     async def soft_delete_conversation(self, owner_id: str, conversation_id: UUID) -> None:
         state = await self._persistence.get_snapshot(conversation_id, owner_id)
+        # Validate first so a busy or unknown conversation keeps its runtime.
+        soft_delete_conversation(state, now=self._clock())
+        # Close before committing the delete: closing persists process/session
+        # events through get_snapshot, which refuses soft-deleted conversations.
+        # The close is reserved under OCC, so a turn or switch committed after
+        # the validation keeps its runtime and the delete is refused as busy.
+        await self._runtime.close_idle(conversation_id, reason="deleted")
+        state = await self._persistence.get_snapshot(conversation_id, owner_id)
         result = soft_delete_conversation(state, now=self._clock())
         events = await self._persistence.commit_facade_mutation(
             conversation_id,
@@ -863,6 +872,49 @@ class TalkToHarnessesService:
         )
         await self._publish(events)
         return _command_projection(result.command)
+
+    async def close_runtime(self, owner_id: str, conversation_id: UUID) -> None:
+        """Release the idle conversation's live runtime; the next turn resumes it.
+
+        History and the native session id are kept. Refused while a turn is
+        running or queued, a background activity is running, or a harness
+        switch is in flight. The close is reserved under the conversation lock,
+        so a turn that starts concurrently keeps its runtime.
+
+        Runtimes are per worker and are not transferred, so a close that lands
+        on a worker other than the one holding the conversation lease is
+        refused rather than reported as done.
+        """
+        state = await self._persistence.get_snapshot(conversation_id, owner_id)
+        if not runtime_idle(state):
+            raise DomainError(
+                ErrorCode.CONVERSATION_BUSY,
+                "conversation is not idle",
+                details={"conversation_id": str(conversation_id)},
+            )
+        if await self._runtime.close_idle(conversation_id, reason="client_close"):
+            return
+        # No runtime here. Idempotent no-op unless another live worker still
+        # runs one: closes and reaps persist the process exit, so a starting or
+        # running incarnation under a live foreign lease is a runtime we cannot
+        # reach.
+        if not await self._persistence.has_live_process(conversation_id):
+            return
+        ownership = await self._persistence.get_conversation_ownership(conversation_id)
+        if (
+            ownership is None
+            or ownership.worker_id == self._worker_id
+            or ownership.lease_expires_at < self._clock()
+        ):
+            return
+        raise DomainError(
+            ErrorCode.CONVERSATION_BUSY,
+            "conversation runtime is held by another worker",
+            details={
+                "conversation_id": str(conversation_id),
+                "reason": "runtime_owned_by_other_worker",
+            },
+        )
 
     async def interrupt(
         self,

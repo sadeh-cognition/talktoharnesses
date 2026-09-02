@@ -22,6 +22,7 @@ django = [
     "PyJWT>=2.8",
     "uvicorn",
     "docker>=7,<8",
+    "python-dotenv>=1",
 ]
 postgres = [
     "psycopg[binary]>=3.2,<4",

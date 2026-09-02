@@ -69,6 +69,12 @@ services, by contrast, export traces, metrics, and logs by default — set
 choose the OTLP/HTTP collector endpoint (unset means
 `http://localhost:4318`).
 
+The host process (`host/settings.py`) loads an env file with python-dotenv
+before reading any setting: `TTH_ENV_FILE` if set, else
+`~/.config/agentbahn/env` (shared with agentbahn so both services point at the
+same collector), else `.env` in the repo root. A missing file is fine, and
+variables already in the process environment take precedence.
+
 ## Quick start (Django)
 
 ```python

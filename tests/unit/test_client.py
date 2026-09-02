@@ -825,6 +825,13 @@ async def test_turn_control_and_interactions(handler: RecordingHandler) -> None:
             assert "Idempotency-Key" not in handler.requests[-1].headers
             assert handler.requests[-1].content in (b"", b"null")
 
+            handler.respond(204)
+            await client.close_runtime(_CONV_ID)
+            assert handler.requests[-1].method == "POST"
+            assert handler.requests[-1].url.path.endswith(
+                f"/conversations/{_CONV_ID}/runtime/close"
+            )
+
             handler.respond(200, Page[InteractionProjection](items=(_interaction(),)))
             interactions = await client.list_interactions(_CONV_ID)
             assert interactions.items[0].id == _INTERACTION_ID

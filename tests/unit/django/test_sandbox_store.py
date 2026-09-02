@@ -58,6 +58,7 @@ async def test_upsert_updates_existing_row() -> None:
     assert loaded.last_ready_at == ready_at
     assert loaded.split_token == "token-1"
 
+
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
 async def test_reserve_inserts_when_kind_is_new() -> None:

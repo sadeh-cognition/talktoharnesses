@@ -1,11 +1,31 @@
 import os
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 from talktoharnesses.django.http_logging import configure_logging
 
-configure_logging(log_file=os.environ.get("TTH_LOG_FILE"))
-
 BASE_DIR = Path(__file__).resolve().parent
+
+
+def _resolve_env_file() -> Path:
+    """Prefer an env file outside the repo tree, shared with agentbahn, so a
+    sandboxed harness that mounts this checkout never sees host secrets."""
+    override = os.environ.get("TTH_ENV_FILE")
+    if override:
+        return Path(override).expanduser()
+    user_env = Path("~/.config/agentbahn/env").expanduser()
+    if user_env.is_file():
+        return user_env
+    return BASE_DIR.parent / ".env"
+
+
+# Optional: containerized instances (see deploy/) pass everything via the
+# process environment and have no file to load. Existing variables win.
+ENV_FILE_PATH = _resolve_env_file()
+load_dotenv(ENV_FILE_PATH)
+
+configure_logging(log_file=os.environ.get("TTH_LOG_FILE"))
 
 # Containerized instances (see deploy/) override these per instance via env;
 # the bare defaults keep the local single-host dev flow working.

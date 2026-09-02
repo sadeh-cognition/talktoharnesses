@@ -1516,6 +1516,27 @@ class MemoryPersistence:
         self._require_owner(conversation_id, worker_id, fence)
         self.ownership.pop(conversation_id, None)
 
+    async def get_conversation_ownership(
+        self, conversation_id: UUID
+    ) -> ConversationOwnership | None:
+        ownership = self.ownership.get(conversation_id)
+        if ownership is None:
+            return None
+        worker_id, fence, lease_expires_at = ownership
+        return ConversationOwnership(
+            conversation_id=conversation_id,
+            worker_id=worker_id,
+            fence=fence,
+            lease_expires_at=lease_expires_at,
+        )
+
+    async def has_live_process(self, conversation_id: UUID) -> bool:
+        return any(
+            process.conversation_id == conversation_id
+            and process.status in {ProcessStatus.STARTING, ProcessStatus.RUNNING}
+            for process in self.processes.values()
+        )
+
     async def complete_recovery_attempt(
         self,
         attempt_id: UUID,

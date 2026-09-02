@@ -149,6 +149,35 @@ def _running_activities(state: ConversationState) -> list[BackgroundActivity]:
     return [a for a in state.activities.values() if a.status == ActivityStatus.RUNNING]
 
 
+_SWITCH_IN_FLIGHT = frozenset(
+    {
+        CommandStatus.ACCEPTED,
+        CommandStatus.CLAIMED,
+        CommandStatus.DELIVERY_STARTED,
+        CommandStatus.DELIVERED,
+    }
+)
+
+
+def switch_in_flight(state: ConversationState) -> bool:
+    """True while a harness switch is accepted but not yet settled."""
+    return any(
+        command.kind is CommandKind.SWITCH_HARNESS and command.status in _SWITCH_IN_FLIGHT
+        for command in state.commands.values()
+    )
+
+
+def runtime_idle(state: ConversationState) -> bool:
+    """True when the live runtime may be closed without losing work.
+
+    ``idle_reap_eligible`` already covers running/waiting turns, queued prompts
+    and background activities; a switch in flight is the remaining case, since
+    it replaces the binding and must not have the current runtime pulled out
+    from under it.
+    """
+    return state.idle_reap_eligible and not switch_in_flight(state)
+
+
 def _recompute_status(state: ConversationState, now: datetime) -> ConversationState:
     if state.conversation.status == ConversationStatus.ARCHIVED:
         return state
@@ -1024,7 +1053,9 @@ def unsnooze_conversation(state: ConversationState, *, now: datetime) -> Transit
 def soft_delete_conversation(state: ConversationState, *, now: datetime) -> TransitionResult:
     if state.conversation.deleted_at is not None:
         raise DomainError(ErrorCode.NOT_FOUND, "conversation not found")
-    if _metadata_busy(state):
+    # Deleting releases the live runtime, so a switch in flight counts as busy
+    # here even though other metadata edits leave it alone.
+    if _metadata_busy(state) or switch_in_flight(state):
         raise DomainError(ErrorCode.CONVERSATION_BUSY, "conversation is busy")
     return _apply_metadata(state, now=now, deleted_at=_now(now))
 

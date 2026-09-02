@@ -26,6 +26,7 @@ from talktoharnesses.django.sandbox_store import DjangoSandboxStore
 from talktoharnesses.remote.registry import build_remote_adapter_registry
 from talktoharnesses.remote.sandbox import SandboxConfig, SandboxManager
 from talktoharnesses.runtime.manager import RuntimeManager
+from talktoharnesses.runtime.policy import RuntimePolicy
 
 
 def _utc_clock() -> datetime:
@@ -37,7 +38,9 @@ async def _cleanup() -> CleanupCounts:
     registry = build_remote_adapter_registry(
         SandboxManager(SandboxConfig.from_env(), store=DjangoSandboxStore())
     )
-    runtime = RuntimeManager(persistence, registry, clock=_utc_clock)
+    runtime = RuntimeManager(
+        persistence, registry, policy=RuntimePolicy.from_env(), clock=_utc_clock
+    )
     return await run_cleanup(persistence, runtime, _utc_clock, DjangoCommittedEventBroker())
 
 

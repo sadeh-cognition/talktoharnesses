@@ -50,9 +50,7 @@ def test_cost_payload_round_trips_currency_and_accepts_legacy_wire() -> None:
     qualified = event_payload_adapter.validate_python(
         {"type": "cost_updated", "cost": "0.0123", "currency": "USD"}
     )
-    legacy = event_payload_adapter.validate_python(
-        {"type": "cost_updated", "cost": "0.0123"}
-    )
+    legacy = event_payload_adapter.validate_python({"type": "cost_updated", "cost": "0.0123"})
 
     assert isinstance(qualified, CostUpdatedPayload)
     assert qualified.currency == "USD"

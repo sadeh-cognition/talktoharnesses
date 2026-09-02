@@ -1469,3 +1469,65 @@ async def test_interaction_event_lookup_harness_probe_and_search_phrase() -> Non
     await sync_to_async(materialize_projections, thread_sensitive=True)(state, ())
     hits = await persistence.search_conversations("owner-evt", '"exact phrase"', limit=10)
     assert isinstance(hits.items, tuple)
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_conversation_ownership_and_live_process_reads() -> None:
+    from talktoharnesses.django.models import ConversationAggregate
+
+    now = datetime.now(UTC).replace(microsecond=0)
+    persistence = DjangoPersistence()
+    state = _bound_state("owner", now)
+    assert state.binding is not None
+    await persistence.save_snapshot(state)
+    cid = state.conversation.id
+    rows = ConversationAggregate.objects.filter(conversation_id=cid)
+
+    # No lease, no process: nothing to report.
+    assert await persistence.get_conversation_ownership(cid) is None
+    assert await persistence.has_live_process(cid) is False
+    assert await persistence.get_conversation_ownership(uuid4()) is None
+    assert await persistence.has_live_process(uuid4()) is False
+
+    # Ownership needs both a worker and a lease expiry.
+    await rows.aupdate(runtime_worker_id="worker-a", runtime_fence=3)
+    assert await persistence.get_conversation_ownership(cid) is None
+    await rows.aupdate(runtime_worker_id=None, runtime_lease_expires_at=now + timedelta(minutes=5))
+    assert await persistence.get_conversation_ownership(cid) is None
+    await rows.aupdate(runtime_worker_id="worker-a")
+    ownership = await persistence.get_conversation_ownership(cid)
+    assert ownership is not None
+    assert ownership.conversation_id == cid
+    assert ownership.worker_id == "worker-a"
+    assert ownership.fence == 3
+    assert ownership.lease_expires_at == now + timedelta(minutes=5)
+    # An expired lease is still reported; callers compare against the clock.
+    await rows.aupdate(runtime_lease_expires_at=now - timedelta(minutes=5))
+    ownership = await persistence.get_conversation_ownership(cid)
+    assert ownership is not None
+    assert ownership.lease_expires_at == now - timedelta(minutes=5)
+
+    # Only starting/running incarnations count as live.
+    process = ProcessRecord(
+        conversation_id=cid,
+        binding_id=state.binding.id,
+        status=ProcessStatus.STARTING,
+        started_at=now,
+    )
+    for status, live in (
+        (ProcessStatus.STARTING, True),
+        (ProcessStatus.RUNNING, True),
+        (ProcessStatus.EXITED, False),
+        (ProcessStatus.ORPHANED, False),
+    ):
+        current = await persistence.get_snapshot(cid, "owner")
+        await persistence.commit_runtime_lifecycle(
+            cid,
+            current.conversation.version,
+            current,
+            process.model_copy(update={"status": status}),
+            None,
+            (),
+        )
+        assert await persistence.has_live_process(cid) is live, status

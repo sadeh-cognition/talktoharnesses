@@ -77,19 +77,29 @@ class ResolvedEndpoint(Protocol):
 
 
 def _raise_split_error(response: httpx.Response) -> None:
-    """Re-raise a split's SplitError body as a lossless DomainError."""
+    """Re-raise a split's SplitError body as a lossless DomainError.
+
+    Codes outside ErrorCode (e.g. the split's request-validation
+    ``validation_error``) still surface the split's message and details under
+    PROTOCOL_ERROR so schema drift between proxy and split is diagnosable.
+    """
     try:
         error = SplitError.model_validate_json(response.content)
-        code = ErrorCode(error.code)
-        message = error.message
-        details = error.details
-    except (ValueError, KeyError):
+    except ValueError:
         raise DomainError(
             ErrorCode.PROTOCOL_ERROR,
             f"split returned HTTP {response.status_code}",
             details={"status": response.status_code},
         ) from None
-    raise DomainError(code, message, details=details)
+    try:
+        code = ErrorCode(error.code)
+    except ValueError:
+        raise DomainError(
+            ErrorCode.PROTOCOL_ERROR,
+            f"split returned HTTP {response.status_code} ({error.code}): {error.message}",
+            details={**error.details, "status": response.status_code, "split_code": error.code},
+        ) from None
+    raise DomainError(code, error.message, details=error.details)
 
 
 class RemoteHarnessAdapter:

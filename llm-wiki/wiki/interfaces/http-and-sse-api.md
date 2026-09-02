@@ -8,7 +8,7 @@ tags:
   - type/interface
   - capability/http
   - status/implemented
-last_verified: 2026-08-20
+last_verified: 2026-09-02
 verified_against_commit: bb3d2b755500fc663816d6cbd1a7cd7947a8920b
 ---
 
@@ -26,7 +26,7 @@ Django Ninja serves the versioned API at `/api/v1`. Schemas live with the routes
 
 ## Authenticated clusters
 
-Harnesses, conversations, turns, queue, steer, interrupt, switch, interactions, approval rules, audits, search, retention, transcript export/import, token rotate/revoke, and `GET /conversations/{id}/events` SSE.
+Harnesses, conversations, turns, queue, steer, interrupt, switch, runtime close (`POST /conversations/{id}/runtime/close`, 204; 409 `conversation_busy` while a turn, activity or switch is in flight or the runtime is held by another worker), interactions, approval rules, audits, search, retention, transcript export/import, token rotate/revoke, and `GET /conversations/{id}/events` SSE.
 
 SSE uses `text/event-stream`, `Last-Event-ID` as conversation sequence, `Cache-Control: no-cache`, and `X-Accel-Buffering: no`.
 

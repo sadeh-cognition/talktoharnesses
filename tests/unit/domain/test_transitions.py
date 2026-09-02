@@ -10,6 +10,7 @@ import pytest
 from talktoharnesses.domain import (
     ApprovalDecision,
     CommandKind,
+    CommandStatus,
     ConversationStatus,
     DomainError,
     ErrorCode,
@@ -46,11 +47,17 @@ from talktoharnesses.domain import (
 )
 from talktoharnesses.domain.models import (
     ApprovalRequestPayload,
+    Command,
     ConversationHarnessBinding,
     InteractionAnswer,
     PendingInteraction,
+    SwitchHarnessPayload,
 )
-from talktoharnesses.domain.transitions import ConversationState
+from talktoharnesses.domain.transitions import (
+    ConversationState,
+    runtime_idle,
+    switch_in_flight,
+)
 
 
 def _now() -> datetime:
@@ -539,3 +546,71 @@ def test_edit_without_queue_errors() -> None:
     with pytest.raises(DomainError) as ei:
         edit_queued_prompt(state, prompt="x", now=_now())
     assert ei.value.code is ErrorCode.NO_QUEUED_PROMPT
+
+
+def _switch_command(state: ConversationState, status: CommandStatus) -> Command:
+    return Command(
+        conversation_id=state.conversation.id,
+        kind=CommandKind.SWITCH_HARNESS,
+        status=status,
+        idempotency_key=f"sw-{status.value}",
+        payload=SwitchHarnessPayload(
+            configuration=HarnessConfiguration(kind=HarnessKind.CODEX, working_directory="/tmp")
+        ),
+        created_at=_now(),
+    )
+
+
+def _with_commands(state: ConversationState, *commands: Command) -> ConversationState:
+    return state.model_copy(update={"commands": {**state.commands, **{c.id: c for c in commands}}})
+
+
+@pytest.mark.parametrize(
+    ("status", "in_flight"),
+    [
+        (CommandStatus.ACCEPTED, True),
+        (CommandStatus.CLAIMED, True),
+        (CommandStatus.DELIVERY_STARTED, True),
+        (CommandStatus.DELIVERED, True),
+        (CommandStatus.SETTLED, False),
+        (CommandStatus.COALESCED, False),
+        (CommandStatus.OUTCOME_UNKNOWN, False),
+    ],
+)
+def test_switch_in_flight_by_command_status(status: CommandStatus, in_flight: bool) -> None:
+    """Every status before settlement keeps the current runtime; the rest release it."""
+    state = _with_commands(_idle(), _switch_command(_idle(), status))
+    assert switch_in_flight(state) is in_flight
+    assert runtime_idle(state) is (not in_flight)
+
+
+def test_switch_in_flight_covers_all_statuses() -> None:
+    """A new CommandStatus member must be classified explicitly above."""
+    assert set(CommandStatus) == {
+        CommandStatus.ACCEPTED,
+        CommandStatus.CLAIMED,
+        CommandStatus.DELIVERY_STARTED,
+        CommandStatus.DELIVERED,
+        CommandStatus.SETTLED,
+        CommandStatus.COALESCED,
+        CommandStatus.OUTCOME_UNKNOWN,
+    }
+
+
+def test_runtime_idle_ignores_non_switch_commands_and_tracks_reap_eligibility() -> None:
+    idle = _idle()
+    assert switch_in_flight(idle) is False
+    assert runtime_idle(idle) is True
+
+    # A delivered prompt command is not a switch.
+    queued = submit_turn(idle, prompt="x", idempotency_key="p", now=_now())
+    assert queued.command is not None
+    delivered = queued.command.model_copy(update={"status": CommandStatus.DELIVERED})
+    with_prompt = _with_commands(queued.state, delivered)
+    assert switch_in_flight(with_prompt) is False
+    # ...but the queued turn itself makes the runtime non-idle.
+    assert runtime_idle(with_prompt) is False
+
+    running = start_turn(queued.state, now=_now())
+    assert runtime_idle(running.state) is False
+    assert runtime_idle(complete_turn(running.state, now=_now()).state) is True

@@ -80,9 +80,7 @@ def merge_command_progress(stored: Command, incoming: Command) -> Command:
     if _INFLIGHT_COMMAND_RANK.get(stored.status, 0) > _INFLIGHT_COMMAND_RANK.get(status, 0):
         status = stored.status
     leases = [
-        lease
-        for lease in (stored.lease_expires_at, incoming.lease_expires_at)
-        if lease is not None
+        lease for lease in (stored.lease_expires_at, incoming.lease_expires_at) if lease is not None
     ]
     return incoming.model_copy(
         update={
@@ -318,6 +316,16 @@ class Persistence(Protocol):
         fence: int,
     ) -> None:
         """Release an idle conversation lease when ownership still matches."""
+        ...
+
+    async def get_conversation_ownership(
+        self, conversation_id: UUID
+    ) -> ConversationOwnership | None:
+        """Return the worker currently holding the conversation lease, if any."""
+        ...
+
+    async def has_live_process(self, conversation_id: UUID) -> bool:
+        """True while a starting/running process incarnation is recorded."""
         ...
 
     async def complete_recovery_attempt(

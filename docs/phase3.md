@@ -18,7 +18,7 @@
 - Define process events for start, one-time stderr truncation, silence warning, exit, and forced termination. Stdout bytes are never represented
     as diagnostic events.
 
-- Add frozen RuntimePolicy defaults: 10-second creation, 60-second start/resume, 15-minute idle reap, 2-minute silence warning, 5-second
+- Add frozen RuntimePolicy defaults: 10-second creation, 60-second start/resume, 5-minute idle reap, 2-minute silence warning, 5-second
     interrupt and graceful-close calls, 2-second terminate escalation, and a 10-second total shutdown budget.
 
 - Make StartSessionRequest.launch and ResumeSessionRequest.launch required.

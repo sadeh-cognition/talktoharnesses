@@ -61,9 +61,7 @@ def claude_echo_sandbox(
     monkeypatch.setenv("TTH_SANDBOX_CLAUDE_AUTH_FILE", str(auth_file))
     # Forward the factory override into the container instead of a credential.
     monkeypatch.setenv("TTH_SANDBOX_ENV_CLAUDE", "TTH_SPLIT_ADAPTER_FACTORY")
-    monkeypatch.setenv(
-        "TTH_SPLIT_ADAPTER_FACTORY", "tth_claude.testing:echo_adapter_factory"
-    )
+    monkeypatch.setenv("TTH_SPLIT_ADAPTER_FACTORY", "tth_claude.testing:echo_adapter_factory")
     with isolated_sandbox_environment(
         monkeypatch,
         tmp_path_factory,
@@ -115,9 +113,7 @@ async def test_proxy_journey_through_sandboxed_split(live_http: LiveHttp) -> Non
 
     terminal = [event for event in collected if event.type in TERMINAL_TYPES]
     assert terminal[-1].type == "turn_completed"
-    messages = [
-        event for event in collected if event.type == "assistant_message_completed"
-    ]
+    messages = [event for event in collected if event.type == "assistant_message_completed"]
     assert messages, "no assistant message arrived through the split"
     text = getattr(messages[-1].payload, "text", "")
     assert text == "echo: hello split"

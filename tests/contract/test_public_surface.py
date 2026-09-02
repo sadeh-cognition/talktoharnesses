@@ -213,7 +213,6 @@ APPROVED: dict[str, frozenset[str]] = {
 }
 
 
-
 def test_core_public_imports_in_fresh_interpreter() -> None:
     code = """
 import sys

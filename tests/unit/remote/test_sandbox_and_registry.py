@@ -277,6 +277,8 @@ def test_create_container_always_bind_mounts_roots(tmp_path: Path) -> None:
         "type": "bind",
     } in runs[0]["mounts"]
     assert runs[0]["security_opt"] == ["no-new-privileges:true"]
+    # grok's multi-threaded CLI needs more pid headroom than the other kinds.
+    assert runs[0]["pids_limit"] == 2048
 
 
 def test_create_codex_container_allows_nested_sandbox(tmp_path: Path) -> None:
@@ -304,6 +306,7 @@ def test_create_codex_container_allows_nested_sandbox(tmp_path: Path) -> None:
         "no-new-privileges:true",
         "seccomp=unconfined",
     ]
+    assert runs[0]["pids_limit"] == 512
 
 
 async def test_two_managers_sharing_one_store_reuse_one_token(
@@ -643,6 +646,7 @@ def test_container_match_checks_managed_runtime_configuration(tmp_path: Path) ->
             "HostConfig": {
                 "PortBindings": {"8010/tcp": [{"HostIp": "127.0.0.1", "HostPort": "9111"}]},
                 "SecurityOpt": ["no-new-privileges:true"],
+                "PidsLimit": 2048,
                 "ExtraHosts": ["host.docker.internal:host-gateway"],
             },
             "Mounts": [
@@ -703,6 +707,11 @@ def test_container_match_checks_managed_runtime_configuration(tmp_path: Path) ->
     container.attrs["HostConfig"]["SecurityOpt"] = []
     assert not matches()
     container.attrs["HostConfig"]["SecurityOpt"] = ["no-new-privileges:true"]
+
+    # A container created before the per-kind pid budget is recreated.
+    container.attrs["HostConfig"]["PidsLimit"] = 512
+    assert not matches()
+    container.attrs["HostConfig"]["PidsLimit"] = 2048
 
     assert not matches(token="changed")
 

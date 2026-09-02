@@ -9,6 +9,8 @@ import pytest
 
 from talktoharnesses.domain import (
     ApprovalDecision,
+    CommandKind,
+    CommandStatus,
     ConversationStatus,
     DomainError,
     ErrorCode,
@@ -33,9 +35,11 @@ from talktoharnesses.domain import (
 from talktoharnesses.domain.events import ConversationMetadataChangedPayload
 from talktoharnesses.domain.models import (
     ApprovalRequestPayload,
+    Command,
     ConversationHarnessBinding,
     InteractionAnswer,
     PendingInteraction,
+    SwitchHarnessPayload,
 )
 from talktoharnesses.domain.transitions import ConversationState
 
@@ -144,3 +148,28 @@ def test_resolve_interaction_emits_resolution_without_command() -> None:
     assert interaction.id in r.state.answers
     assert r.state.active_turn is not None
     assert r.state.active_turn.status is TurnStatus.RUNNING
+
+
+def test_soft_delete_busy_while_switch_in_flight() -> None:
+    """Delete releases the runtime, so it waits for a switch to settle."""
+    state = _idle()
+    switch = Command(
+        conversation_id=state.conversation.id,
+        kind=CommandKind.SWITCH_HARNESS,
+        status=CommandStatus.DELIVERED,
+        idempotency_key="sw",
+        payload=SwitchHarnessPayload(
+            configuration=HarnessConfiguration(kind=HarnessKind.GROK, working_directory="/tmp/ws")
+        ),
+        created_at=_now(),
+    )
+    pending = state.model_copy(update={"commands": {switch.id: switch}})
+    with pytest.raises(DomainError) as exc:
+        soft_delete_conversation(pending, now=_now())
+    assert exc.value.code is ErrorCode.CONVERSATION_BUSY
+    # Other metadata edits are unaffected by a switch.
+    assert pin_conversation(pending, now=_now()).state.conversation.pinned_at is not None
+
+    settled = switch.model_copy(update={"status": CommandStatus.SETTLED})
+    done = state.model_copy(update={"commands": {settled.id: settled}})
+    assert soft_delete_conversation(done, now=_now()).state.conversation.deleted_at is not None

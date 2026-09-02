@@ -7,7 +7,7 @@ audiences:
 tags:
   - type/map
   - audience/developer
-last_verified: 2026-08-20
+last_verified: 2026-09-02
 verified_against_commit: bb3d2b755500fc663816d6cbd1a7cd7947a8920b
 ---
 
@@ -20,7 +20,7 @@ The Django Ninja API is mounted at `/api/v1`. Health, readiness, and OpenAPI doc
 - Auth: rotate and revoke tokens.
 - Harnesses: create, list, probe, capabilities, models, modes, delete.
 - Conversations: create, list, archive, pin, snooze, soft-delete, transcript export/import.
-- Turns: submit, queue edit/cancel, steer, interrupt, switch.
+- Turns: submit, queue edit/cancel, steer, interrupt, switch, runtime close (`POST /conversations/{id}/runtime/close` releases an idle harness process; the next turn resumes it).
 - Interactions: list pending, draft, resolve.
 - Approval rules and interaction audits.
 - Search and retention.

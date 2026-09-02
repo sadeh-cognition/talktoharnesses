@@ -170,6 +170,14 @@ def _security_options(kind: HarnessKind) -> list[str]:
     return options
 
 
+def _pids_limit(kind: HarnessKind) -> int:
+    if kind is HarnessKind.GROK:
+        # grok is a multi-threaded Rust binary; around ten concurrent sessions
+        # exhaust 512 pids and panic with "OS can't spawn worker thread".
+        return 2048
+    return 512
+
+
 def _auth_file_from_env(
     env: dict[str, str],
     *,
@@ -527,6 +535,8 @@ class SandboxManager:
         security_options = attrs.get("HostConfig", {}).get("SecurityOpt", [])
         if set(security_options) != set(_security_options(kind)):
             return False
+        if attrs.get("HostConfig", {}).get("PidsLimit") != _pids_limit(kind):
+            return False
 
         extra_hosts = cast("list[str]", attrs.get("HostConfig", {}).get("ExtraHosts") or [])
         if f"{_HOST_GATEWAY_ALIAS}:host-gateway" not in extra_hosts:
@@ -860,7 +870,7 @@ class SandboxManager:
             extra_hosts={_HOST_GATEWAY_ALIAS: "host-gateway"},
             cap_drop=["ALL"],
             security_opt=_security_options(kind),
-            pids_limit=512,
+            pids_limit=_pids_limit(kind),
             mem_limit="4g",
         )
 

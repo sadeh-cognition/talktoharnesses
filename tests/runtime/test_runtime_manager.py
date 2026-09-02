@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from tests.runtime.conftest import (
@@ -19,12 +19,15 @@ from tests.runtime.conftest import (
 )
 
 from talktoharnesses.domain import DomainError, ErrorCode, HarnessKind, submit_turn
-from talktoharnesses.domain.enums import ActivityStatus
+from talktoharnesses.domain.enums import ActivityStatus, CommandKind, CommandStatus
 from talktoharnesses.domain.models import (
     BackgroundActivity,
+    Command,
     HarnessCapabilities,
     HarnessConfiguration,
+    SwitchHarnessPayload,
 )
+from talktoharnesses.domain.transitions import ConversationState, start_turn
 from talktoharnesses.providers import AdapterRegistry
 from talktoharnesses.providers.adapter import (
     HarnessSession,
@@ -1067,4 +1070,324 @@ async def test_resume_for_recovery_probe_failure_maps_incompatible(
         )
     assert exc.value.code is ErrorCode.PROVIDER_INCOMPATIBLE
     assert exc.value.message == RecoveryReasonCode.PROVIDER_INCOMPATIBLE.value
+    await mgr.shutdown()
+
+
+class _RemoteFakeAdapter(FakeAdapter):
+    """FakeAdapter that mirrors a split-supervised process like RemoteHarnessAdapter."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        from talktoharnesses.remote.handle import RemoteProcessHandle
+
+        async def _terminate(_reason: str | None) -> None:
+            return None
+
+        self.process_handle = RemoteProcessHandle(pid=4242, terminate=_terminate)
+
+
+@pytest.mark.asyncio
+async def test_idle_timer_reap_removes_remote_runtime_from_live_map(
+    persistence: MemoryPersistence,
+    owned_python: Path,
+) -> None:
+    """The idle timer's reap must free the capacity slot of a runtime with a lifecycle pump.
+
+    Regression: ``_teardown_runtime`` cancelled the idle task that was running the
+    reap, so the cancellation fired at the next await and skipped the live-map pop.
+    """
+    registry = AdapterRegistry()
+    registry.register(HarnessKind.OPENCODE, _RemoteFakeAdapter)
+    policy = RuntimePolicy(
+        idle_reap=0.2,
+        start_resume_timeout=5,
+        creation_timeout=5,
+        graceful_close_timeout=1,
+        interrupt_timeout=1,
+        terminate_escalation=0.2,
+        shutdown_budget=2,
+        silence_warning=60,
+    )
+    mgr = RuntimeManager(persistence, registry, policy=policy)
+    cid = conversation_id_of(persistence)
+    config = persistence.states[cid].binding.configuration  # type: ignore[union-attr]
+    await mgr.start(conversation_id=cid, owner_id="owner-1", configuration=config)
+    managed = mgr.get_runtime(cid)
+    assert managed is not None
+    assert managed.process is not None
+
+    deadline = time.monotonic() + 3.0
+    while mgr._runtimes and time.monotonic() < deadline:  # pyright: ignore[reportPrivateUsage]
+        await asyncio.sleep(0.05)
+
+    assert "session_reaped" in {e.type for e in persistence.events[cid]}
+    assert mgr.get_runtime(cid) is None
+    assert not mgr._runtimes  # pyright: ignore[reportPrivateUsage]
+    await mgr.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_idle_reap_frees_runtime_of_deleted_conversation(
+    persistence: MemoryPersistence,
+    registry: AdapterRegistry,
+    short_policy: RuntimePolicy,
+    owned_python: Path,
+) -> None:
+    """A conversation deleted underneath its runtime must not pin a capacity slot."""
+    mgr = RuntimeManager(
+        persistence, registry, policy=short_policy.model_copy(update={"idle_reap": 60})
+    )
+    cid = conversation_id_of(persistence)
+    config = persistence.states[cid].binding.configuration  # type: ignore[union-attr]
+    await mgr.start(conversation_id=cid, owner_id="owner-1", configuration=config)
+    state = persistence.states[cid]
+    persistence.states[cid] = state.model_copy(
+        update={
+            "conversation": state.conversation.model_copy(
+                update={"deleted_at": state.conversation.updated_at}
+            )
+        }
+    )
+
+    assert await mgr.reap_if_eligible(cid)
+
+    assert mgr.get_runtime(cid) is None
+    assert not mgr._runtimes  # pyright: ignore[reportPrivateUsage]
+    await mgr.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_close_idle_loses_to_turn_started_after_snapshot(
+    registry: AdapterRegistry,
+    short_policy: RuntimePolicy,
+    owned_python: Path,
+    workdir: Path,
+    now: datetime,
+) -> None:
+    """The close is reserved under OCC: a turn committed after the idle check wins."""
+
+    class TurnStartsAfterSnapshot(MemoryPersistence):
+        armed = False
+
+        async def get_snapshot(self, conversation_id: UUID, owner_id: str) -> ConversationState:
+            stale = await super().get_snapshot(conversation_id, owner_id)
+            if self.armed:
+                self.armed = False
+                # Another worker path commits RUNNING between the snapshot and the reservation.
+                running = start_turn(
+                    submit_turn(stale, prompt="go", idempotency_key="race", now=now).state,
+                    now=now,
+                )
+                await self.commit_facade_mutation(
+                    conversation_id,
+                    owner_id,
+                    stale.conversation.version,
+                    running.state,
+                    running.events,
+                    commands=(),
+                )
+            return stale
+
+    store = TurnStartsAfterSnapshot()
+    state = make_state(now=now, workdir=workdir)
+    store.seed(state)
+    cid = state.conversation.id
+    mgr = RuntimeManager(store, registry, policy=short_policy.model_copy(update={"idle_reap": 60}))
+    await mgr.start(
+        conversation_id=cid,
+        owner_id="owner-1",
+        configuration=state.binding.configuration,  # type: ignore[union-attr]
+    )
+    store.armed = True
+
+    with pytest.raises(DomainError) as exc:
+        await mgr.close_idle(cid, reason="client_close")
+
+    assert exc.value.code is ErrorCode.CONVERSATION_BUSY
+    assert mgr.get_runtime(cid) is not None
+    assert "session_closed" not in {e.type for e in store.events[cid]}
+    assert store.states[cid].active_turn is not None
+    await mgr.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_close_idle_and_reap_refuse_while_switch_in_flight(
+    persistence: MemoryPersistence,
+    registry: AdapterRegistry,
+    short_policy: RuntimePolicy,
+    owned_python: Path,
+    now: datetime,
+) -> None:
+    mgr = RuntimeManager(
+        persistence, registry, policy=short_policy.model_copy(update={"idle_reap": 60})
+    )
+    cid = conversation_id_of(persistence)
+    state = persistence.states[cid]
+    config = state.binding.configuration  # type: ignore[union-attr]
+    await mgr.start(conversation_id=cid, owner_id="owner-1", configuration=config)
+    switch = Command(
+        conversation_id=cid,
+        kind=CommandKind.SWITCH_HARNESS,
+        status=CommandStatus.DELIVERY_STARTED,
+        idempotency_key="sw",
+        payload=SwitchHarnessPayload(configuration=config),
+        created_at=now,
+    )
+    state = persistence.states[cid]
+    persistence.states[cid] = state.model_copy(
+        update={"commands": {**state.commands, switch.id: switch}}
+    )
+
+    assert await mgr.reap_if_eligible(cid) is False
+    with pytest.raises(DomainError) as exc:
+        await mgr.close_idle(cid, reason="client_close")
+    assert exc.value.code is ErrorCode.CONVERSATION_BUSY
+    assert mgr.get_runtime(cid) is not None
+
+    settled = switch.model_copy(update={"status": CommandStatus.SETTLED})
+    state = persistence.states[cid]
+    persistence.states[cid] = state.model_copy(
+        update={"commands": {**state.commands, switch.id: settled}}
+    )
+    assert await mgr.close_idle(cid, reason="client_close") is True
+    assert mgr.get_runtime(cid) is None
+    assert "session_closed" in {e.type for e in persistence.events[cid]}
+    # Without a local runtime the close reports False instead of success.
+    assert await mgr.close_idle(cid, reason="client_close") is False
+    await mgr.shutdown()
+
+
+class _DeletedAfterReservation(MemoryPersistence):
+    """Another worker deletes the conversation once the session close is durable."""
+
+    armed = False
+    lifecycle_commits = 0
+
+    async def commit_runtime_lifecycle(self, *args: Any, **kwargs: Any) -> Any:
+        events = await super().commit_runtime_lifecycle(*args, **kwargs)
+        self.lifecycle_commits += 1
+        if self.armed:
+            self.armed = False
+            cid = args[0]
+            state = self.states[cid]
+            self.states[cid] = state.model_copy(
+                update={
+                    "conversation": state.conversation.model_copy(
+                        update={"deleted_at": state.conversation.updated_at}
+                    )
+                }
+            )
+        return events
+
+
+async def _started_manager(
+    store: MemoryPersistence,
+    registry: AdapterRegistry,
+    short_policy: RuntimePolicy,
+    workdir: Path,
+    now: datetime,
+) -> tuple[RuntimeManager, UUID]:
+    state = make_state(now=now, workdir=workdir)
+    store.seed(state)
+    cid = state.conversation.id
+    mgr = RuntimeManager(store, registry, policy=short_policy.model_copy(update={"idle_reap": 60}))
+    await mgr.start(
+        conversation_id=cid,
+        owner_id="owner-1",
+        configuration=state.binding.configuration,  # type: ignore[union-attr]
+    )
+    return mgr, cid
+
+
+@pytest.mark.asyncio
+async def test_close_idle_frees_slot_when_terminal_persist_fails(
+    registry: AdapterRegistry,
+    short_policy: RuntimePolicy,
+    owned_python: Path,
+    workdir: Path,
+    now: datetime,
+) -> None:
+    """A reserved close whose process settlement fails must not pin the runtime."""
+    store = _DeletedAfterReservation()
+    mgr, cid = await _started_manager(store, registry, short_policy, workdir, now)
+    store.armed = True
+
+    with pytest.raises(DomainError) as exc:
+        await mgr.close_idle(cid, reason="client_close")
+
+    # The session close was reserved, then the terminal persist hit the delete.
+    assert exc.value.code is ErrorCode.INVALID_STATE
+    assert "session_closed" in {e.type for e in store.events[cid]}
+    assert mgr.get_runtime(cid) is None
+    assert not mgr._runtimes  # pyright: ignore[reportPrivateUsage]
+    assert not mgr._idle_tasks  # pyright: ignore[reportPrivateUsage]
+    await mgr.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_close_frees_slot_when_terminal_persist_fails(
+    registry: AdapterRegistry,
+    short_policy: RuntimePolicy,
+    owned_python: Path,
+    workdir: Path,
+    now: datetime,
+) -> None:
+    """The unreserved close path tears the runtime down on a persist failure too."""
+
+    class SnapshotGone(MemoryPersistence):
+        armed = False
+
+        async def get_snapshot(self, conversation_id: UUID, owner_id: str) -> ConversationState:
+            if self.armed:
+                raise DomainError(ErrorCode.NOT_FOUND, "conversation not found")
+            return await super().get_snapshot(conversation_id, owner_id)
+
+    store = SnapshotGone()
+    mgr, cid = await _started_manager(store, registry, short_policy, workdir, now)
+    store.armed = True
+
+    with pytest.raises(DomainError) as exc:
+        await mgr.close(cid, reason="deleted")
+
+    assert exc.value.code is ErrorCode.NOT_FOUND
+    assert mgr.get_runtime(cid) is None
+    assert not mgr._runtimes  # pyright: ignore[reportPrivateUsage]
+    await mgr.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_close_idle_forces_process_when_adapter_close_times_out(
+    registry: AdapterRegistry,
+    short_policy: RuntimePolicy,
+    owned_python: Path,
+    workdir: Path,
+    now: datetime,
+) -> None:
+    """The reserved close escalates like the unreserved one instead of leaking the process."""
+    store = MemoryPersistence()
+    remote_registry = AdapterRegistry()
+    remote_registry.register(HarnessKind.OPENCODE, _RemoteFakeAdapter)
+    mgr, cid = await _started_manager(
+        store,
+        remote_registry,
+        short_policy.model_copy(update={"graceful_close_timeout": 0.05}),
+        workdir,
+        now,
+    )
+    managed = mgr.get_runtime(cid)
+    assert managed is not None and managed.process is not None
+
+    async def _hang(_session: HarnessSession) -> None:
+        await asyncio.sleep(10)
+
+    managed.adapter.close = _hang  # type: ignore[method-assign]
+    forced = AsyncMock()
+    managed.process.force_terminate = forced  # type: ignore[method-assign]
+
+    assert await mgr.close_idle(cid, reason="client_close") is True
+
+    # The first escalation is the timeout; teardown may force again afterwards.
+    forced.assert_awaited()
+    assert forced.await_args_list[0].kwargs["reason"] == "graceful_close_timeout"
+    assert mgr.get_runtime(cid) is None
     await mgr.shutdown()

@@ -97,9 +97,7 @@ async def test_process_bound_journey_through_sandboxed_split(live_http: LiveHttp
 
     terminal = [event for event in collected if event.type in TERMINAL_TYPES]
     assert terminal[-1].type == "turn_completed"
-    messages = [
-        event for event in collected if event.type == "assistant_message_completed"
-    ]
+    messages = [event for event in collected if event.type == "assistant_message_completed"]
     assert messages and getattr(messages[-1].payload, "text", "") == "echo: hello process"
 
     # The proxy adopted the split-supervised process: a containerless pid from

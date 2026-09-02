@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 import pytest
+from tests.runtime.conftest import FakeAdapter
 from tests.runtime.memory_persistence import MemoryPersistence
 
 from talktoharnesses.application.service import TalkToHarnessesService
@@ -28,11 +30,24 @@ from talktoharnesses.domain import (
     TurnStatus,
     UserRuleScope,
 )
+from talktoharnesses.domain.enums import CommandKind, CommandStatus
 from talktoharnesses.domain.events import ConversationEvent
-from talktoharnesses.domain.models import ApprovalRequestPayload, PendingInteraction
-from talktoharnesses.domain.transitions import request_interaction, start_turn, submit_turn
+from talktoharnesses.domain.models import (
+    ApprovalRequestPayload,
+    Command,
+    PendingInteraction,
+    SwitchHarnessPayload,
+)
+from talktoharnesses.domain.transitions import (
+    complete_turn,
+    register_activity,
+    request_interaction,
+    start_turn,
+    submit_turn,
+)
 from talktoharnesses.providers.registry import AdapterRegistry
 from talktoharnesses.runtime.manager import RuntimeManager
+from talktoharnesses.runtime.policy import RuntimePolicy
 
 
 def _now() -> datetime:
@@ -618,3 +633,270 @@ async def test_probe_harness_releases_adapter_after_success_and_failure() -> Non
     with pytest.raises(DomainError):
         await service.probe_harness("owner", h.id)
     assert released == ["ok", "fail"]
+
+
+# ---------------------------------------------------------------------------
+# Runtime release: explicit close and delete-closes-runtime
+# ---------------------------------------------------------------------------
+
+
+async def _live_runtime_service(
+    tmp_path: Path,
+    persistence: MemoryPersistence | None = None,
+) -> tuple[TalkToHarnessesService, MemoryPersistence, RuntimeManager, FakeAdapter, Any]:
+    """A service whose OPENCODE conversation has a started SDK-managed runtime."""
+    persistence = persistence if persistence is not None else MemoryPersistence()
+    registry = AdapterRegistry()
+    FakeAdapter.instances.clear()
+    registry.register(HarnessKind.OPENCODE, FakeAdapter)
+    runtime = RuntimeManager(
+        persistence,
+        registry,
+        policy=RuntimePolicy(start_resume_timeout=2.0, graceful_close_timeout=0.3),
+        clock=_now,
+    )
+    service = TalkToHarnessesService(persistence, registry, _Publisher(), _now, runtime)
+    config = HarnessConfiguration(kind=HarnessKind.OPENCODE, working_directory=str(tmp_path))
+    harness = await service.create_harness("owner", name="h", configuration=config)
+    cid = (await service.create_conversation("owner", harness.id)).detail.conversation.id
+    await runtime.start(conversation_id=cid, owner_id="owner", configuration=config)
+    managed = runtime.get_runtime(cid)
+    assert managed is not None
+    return service, persistence, runtime, FakeAdapter.instances[-1], cid
+
+
+@pytest.mark.asyncio
+async def test_close_runtime_releases_idle_runtime_and_keeps_history(tmp_path: Path) -> None:
+    service, persistence, runtime, adapter, cid = await _live_runtime_service(tmp_path)
+
+    await service.close_runtime("owner", cid)
+
+    assert runtime.get_runtime(cid) is None
+    assert not runtime._runtimes  # pyright: ignore[reportPrivateUsage]
+    assert adapter.closed is True
+    assert "session_closed" in {event.type for event in persistence.events[cid]}
+    # The conversation and its native session survive for a later resume.
+    snapshot = await service.get_conversation("owner", cid)
+    assert snapshot.detail.conversation.id == cid
+    state = await persistence.get_snapshot(cid, "owner")
+    assert state.binding is not None and state.binding.native_session_id
+    # Closing again is a no-op.
+    await service.close_runtime("owner", cid)
+
+
+@pytest.mark.asyncio
+async def test_close_runtime_refuses_while_turn_is_active(tmp_path: Path) -> None:
+    service, persistence, runtime, _adapter, cid = await _live_runtime_service(tmp_path)
+    state = await persistence.get_snapshot(cid, "owner")
+    running = start_turn(
+        submit_turn(state, prompt="go", idempotency_key="s1", now=_now()).state, now=_now()
+    )
+    await persistence.commit_facade_mutation(
+        cid, "owner", state.conversation.version, running.state, running.events, commands=()
+    )
+
+    with pytest.raises(DomainError) as exc:
+        await service.close_runtime("owner", cid)
+
+    assert exc.value.code is ErrorCode.CONVERSATION_BUSY
+    assert runtime.get_runtime(cid) is not None
+
+
+@pytest.mark.asyncio
+async def test_close_runtime_rejects_foreign_owner(tmp_path: Path) -> None:
+    service, _persistence, runtime, _adapter, cid = await _live_runtime_service(tmp_path)
+    with pytest.raises(DomainError):
+        await service.close_runtime("intruder", cid)
+    assert runtime.get_runtime(cid) is not None
+
+
+@pytest.mark.asyncio
+async def test_soft_delete_closes_live_runtime(tmp_path: Path) -> None:
+    service, _persistence, runtime, adapter, cid = await _live_runtime_service(tmp_path)
+
+    await service.soft_delete_conversation("owner", cid)
+
+    assert runtime.get_runtime(cid) is None
+    assert not runtime._runtimes  # pyright: ignore[reportPrivateUsage]
+    assert adapter.closed is True
+    with pytest.raises(DomainError) as exc:
+        await service.get_conversation("owner", cid)
+    assert exc.value.code is ErrorCode.NOT_FOUND
+
+
+@pytest.mark.asyncio
+async def test_soft_delete_refuses_while_switch_is_in_flight(tmp_path: Path) -> None:
+    """Delete releases the runtime, so it must not race a switch that replaces it."""
+    service, persistence, runtime, adapter, cid = await _live_runtime_service(tmp_path)
+    state = await persistence.get_snapshot(cid, "owner")
+    switch = Command(
+        conversation_id=cid,
+        kind=CommandKind.SWITCH_HARNESS,
+        status=CommandStatus.DELIVERED,
+        idempotency_key="sw-delete",
+        payload=SwitchHarnessPayload(
+            configuration=HarnessConfiguration(
+                kind=HarnessKind.OPENCODE, working_directory=str(tmp_path)
+            )
+        ),
+        created_at=_now(),
+    )
+    pending = state.model_copy(update={"commands": {**state.commands, switch.id: switch}})
+    await persistence.commit_facade_mutation(
+        cid, "owner", state.conversation.version, pending, (), commands=(switch,)
+    )
+
+    with pytest.raises(DomainError) as exc:
+        await service.soft_delete_conversation("owner", cid)
+
+    assert exc.value.code is ErrorCode.CONVERSATION_BUSY
+    assert runtime.get_runtime(cid) is not None
+    assert adapter.closed is False
+    assert "session_closed" not in {event.type for event in persistence.events[cid]}
+    snapshot = await service.get_conversation("owner", cid)
+    assert snapshot.detail.conversation.deleted_at is None
+
+
+@pytest.mark.asyncio
+async def test_soft_delete_loses_to_turn_queued_after_validation(tmp_path: Path) -> None:
+    """A prompt queued between the busy check and the close keeps its runtime."""
+
+    class TurnQueuesAfterSnapshot(MemoryPersistence):
+        armed = False
+
+        async def get_snapshot(self, conversation_id: Any, owner_id: str) -> Any:
+            stale = await super().get_snapshot(conversation_id, owner_id)
+            if self.armed:
+                self.armed = False
+                queued = submit_turn(stale, prompt="go", idempotency_key="race", now=_now())
+                assert queued.command is not None
+                await self.commit_facade_mutation(
+                    conversation_id,
+                    owner_id,
+                    stale.conversation.version,
+                    queued.state,
+                    queued.events,
+                    commands=(queued.command,),
+                )
+            return stale
+
+    store = TurnQueuesAfterSnapshot()
+    service, persistence, runtime, adapter, cid = await _live_runtime_service(tmp_path, store)
+    store.armed = True
+
+    with pytest.raises(DomainError) as exc:
+        await service.soft_delete_conversation("owner", cid)
+
+    assert exc.value.code is ErrorCode.CONVERSATION_BUSY
+    assert runtime.get_runtime(cid) is not None
+    assert adapter.closed is False
+    assert "session_closed" not in {event.type for event in persistence.events[cid]}
+    assert persistence.states[cid].queued_turn is not None
+    assert persistence.states[cid].conversation.deleted_at is None
+
+
+@pytest.mark.asyncio
+async def test_close_runtime_refuses_while_background_activity_runs(tmp_path: Path) -> None:
+    """BACKGROUND_ACTIVE is busy: the harness is still working after the turn."""
+    service, persistence, runtime, adapter, cid = await _live_runtime_service(tmp_path)
+    state = await persistence.get_snapshot(cid, "owner")
+    running = start_turn(
+        submit_turn(state, prompt="go", idempotency_key="s1", now=_now()).state, now=_now()
+    )
+    assert running.state.active_turn is not None
+    with_activity = register_activity(
+        running.state, parent_turn_id=running.state.active_turn.id, now=_now(), title="bg"
+    )
+    finished = complete_turn(with_activity.state, now=_now())
+    assert finished.state.active_turn is None
+    assert finished.state.idle_reap_eligible is False
+    await persistence.commit_facade_mutation(
+        cid,
+        "owner",
+        state.conversation.version,
+        finished.state,
+        running.events + with_activity.events + finished.events,
+        commands=(),
+    )
+
+    with pytest.raises(DomainError) as exc:
+        await service.close_runtime("owner", cid)
+
+    assert exc.value.code is ErrorCode.CONVERSATION_BUSY
+    assert runtime.get_runtime(cid) is not None
+    assert adapter.closed is False
+
+
+@pytest.mark.asyncio
+async def test_close_runtime_refuses_while_switch_is_in_flight(tmp_path: Path) -> None:
+    """An accepted switch replaces the binding; the current runtime stays until it settles."""
+    service, persistence, runtime, adapter, cid = await _live_runtime_service(tmp_path)
+    state = await persistence.get_snapshot(cid, "owner")
+    switch = Command(
+        conversation_id=cid,
+        kind=CommandKind.SWITCH_HARNESS,
+        status=CommandStatus.ACCEPTED,
+        idempotency_key="sw1",
+        payload=SwitchHarnessPayload(
+            configuration=HarnessConfiguration(
+                kind=HarnessKind.OPENCODE, working_directory=str(tmp_path)
+            )
+        ),
+        created_at=_now(),
+    )
+    pending = state.model_copy(update={"commands": {**state.commands, switch.id: switch}})
+    await persistence.commit_facade_mutation(
+        cid, "owner", state.conversation.version, pending, (), commands=(switch,)
+    )
+
+    with pytest.raises(DomainError) as exc:
+        await service.close_runtime("owner", cid)
+
+    assert exc.value.code is ErrorCode.CONVERSATION_BUSY
+    assert runtime.get_runtime(cid) is not None
+    assert adapter.closed is False
+
+
+@pytest.mark.asyncio
+async def test_close_runtime_on_non_owning_worker_refuses(tmp_path: Path) -> None:
+    """Runtimes are per worker: a close landing elsewhere must not report success."""
+    service_a, persistence, runtime_a, adapter, cid = await _live_runtime_service(tmp_path)
+    service_a._worker_id = "worker-a"  # pyright: ignore[reportPrivateUsage]
+    persistence.ownership[cid] = ("worker-a", 1, _now() + timedelta(minutes=5))
+    registry = AdapterRegistry()
+    registry.register(HarnessKind.OPENCODE, FakeAdapter)
+    runtime_b = RuntimeManager(persistence, registry, clock=_now)
+    service_b = TalkToHarnessesService(persistence, registry, _Publisher(), _now, runtime_b)
+    service_b._worker_id = "worker-b"  # pyright: ignore[reportPrivateUsage]
+
+    with pytest.raises(DomainError) as exc:
+        await service_b.close_runtime("owner", cid)
+
+    assert exc.value.code is ErrorCode.CONVERSATION_BUSY
+    assert exc.value.details["reason"] == "runtime_owned_by_other_worker"
+    assert runtime_a.get_runtime(cid) is not None
+    assert adapter.closed is False
+    assert "session_closed" not in {event.type for event in persistence.events[cid]}
+
+    # The owning worker closes it; afterwards the other worker's close is a no-op.
+    await service_a.close_runtime("owner", cid)
+    assert runtime_a.get_runtime(cid) is None
+    await service_b.close_runtime("owner", cid)
+    await service_a.close_runtime("owner", cid)
+
+
+@pytest.mark.asyncio
+async def test_close_runtime_ignores_expired_lease_of_other_worker(tmp_path: Path) -> None:
+    """A dead worker's stale lease holds no runtime; closing is an idempotent no-op."""
+    persistence = MemoryPersistence()
+    registry = AdapterRegistry()
+    registry.register(HarnessKind.OPENCODE, FakeAdapter)
+    runtime = RuntimeManager(persistence, registry, clock=_now)
+    service = TalkToHarnessesService(persistence, registry, _Publisher(), _now, runtime)
+    service._worker_id = "worker-b"  # pyright: ignore[reportPrivateUsage]
+    config = HarnessConfiguration(kind=HarnessKind.OPENCODE, working_directory=str(tmp_path))
+    harness = await service.create_harness("owner", name="h", configuration=config)
+    cid = (await service.create_conversation("owner", harness.id)).detail.conversation.id
+    persistence.ownership[cid] = ("worker-a", 1, _now() - timedelta(seconds=1))
+
+    await service.close_runtime("owner", cid)

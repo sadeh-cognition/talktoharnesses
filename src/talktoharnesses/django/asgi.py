@@ -43,6 +43,7 @@ from talktoharnesses.remote.sandbox import (
     ensure_docker_cli_available,
 )
 from talktoharnesses.runtime.manager import RuntimeManager
+from talktoharnesses.runtime.policy import RuntimePolicy
 
 logger = logging.getLogger(__name__)
 
@@ -95,7 +96,9 @@ def _build_service() -> TalkToHarnessesService:
     sandboxes = SandboxManager(SandboxConfig.from_env(), store=DjangoSandboxStore())
     registry = build_remote_adapter_registry(sandboxes)
     broker = DjangoCommittedEventBroker()
-    runtime = RuntimeManager(persistence, registry, clock=_utc_clock)
+    runtime = RuntimeManager(
+        persistence, registry, policy=RuntimePolicy.from_env(), clock=_utc_clock
+    )
     return TalkToHarnessesService(
         persistence,
         registry,

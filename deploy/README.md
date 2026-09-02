@@ -75,14 +75,38 @@ Tuning environment (all optional):
   | opencode | `$HOME/.local/share/opencode/auth.json` | `/home/agent/.local/share/opencode/auth.json` |
   | prime_agent | `$HOME/.prime/config.json` | `/home/agent/.prime/config.json` |
 
+Runtime tuning (all optional):
+
+- `TTH_RUNTIME_IDLE_REAP_SECONDS` — how long an idle conversation keeps its
+  harness process before the proxy closes it (default 300). History and the
+  native session are kept; the next turn resumes. Lower it when many
+  short-lived conversations share one sandbox.
+- `TTH_RUNTIME_MAX_RUNTIMES` — live harness processes per proxy worker
+  (default 20). Beyond it new turns fail with `conversation_busy`
+  ("runtime capacity reached") until a runtime is closed or reaped. Clients
+  can release one early with `POST /conversations/{id}/runtime/close`. The
+  close is refused with `409 conversation_busy` while a turn, background
+  activity or harness switch is in flight. Runtimes are per worker and are
+  not handed between workers, so with several proxy workers behind one
+  address the close is also refused (same code, `reason:
+  runtime_owned_by_other_worker`) when it lands on a worker that does not
+  hold the conversation; retry, or let the idle reap release it.
+
 The split token sent as `X-TTH-Split-Token` is generated per sandbox and
 persisted (in the clear) in the proxy database; it guards loopback-only
 traffic between the proxy and its containers, which share a trust domain.
 
 Containers are created with `restart: unless-stopped`, `cap_drop: ALL`,
-`no-new-privileges`, `pids_limit 512`, `mem_limit 4g`, a per-kind
+`no-new-privileges`, `pids_limit 512` (2048 for grok, whose multi-threaded CLI
+exhausts 512 at around ten concurrent sessions), `mem_limit 4g`, a per-kind
 `tth-<kind>-home` volume for CLI credentials, and are **left running** when
 the proxy stops so later requests reuse them.
+
+A container is recreated on first use when its settings no longer match the
+proxy's, including the pids limit. Upgrading from a build that used 512 for
+grok therefore replaces the existing `tth-grok` container the next time a
+grok harness is prepared, which drops any grok sessions still running in it;
+schedule that upgrade when grok conversations are idle.
 
 Interactive CLI logins persist in the per-kind home volume, e.g.:
 
