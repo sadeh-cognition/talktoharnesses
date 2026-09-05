@@ -226,6 +226,20 @@ def unique_prompt(prefix: str, *, mention_permission: bool = True) -> str:
     )
 
 
+def unique_edit_prompt(prefix: str) -> str:
+    """Drive the harness's native file-write tool rather than the shell.
+
+    Grok forwards its Write/SearchReplace tool inputs on permission requests
+    (captured at 1.0.13), so this prompt proves those shapes stay allowlisted.
+    """
+    token = uuid4().hex[:12]
+    return (
+        f"{prefix} token={token}. Use your native file write tool (not the shell) to "
+        f"create `live-{token}.md` in the current directory containing exactly "
+        "`live-ok`. Do not ask any questions."
+    )
+
+
 def unique_multi_prompt(prefix: str, *, mention_permission: bool = True) -> str:
     token = uuid4().hex[:12]
     if mention_permission:

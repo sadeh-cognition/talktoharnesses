@@ -13,7 +13,7 @@ accepted; `latest_verified` is advisory only.
 
 - Adapter version: `2026.8.5`
 - Floor: CLI `>= 1.0.0` on linux
-- Latest verified: `1.0.5 (5115b46bc9)` on linux
+- Latest verified: `1.0.13 (5e9a58528b76)` on linux
 - Models, modes, and efforts are discovered at probe from the installed CLI.
 - ACP: v1
 

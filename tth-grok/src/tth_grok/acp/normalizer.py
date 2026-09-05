@@ -43,6 +43,8 @@ from tth_types.harness import (
     StructuredQuestionPayload,
 )
 
+from tth_grok.acp.schemas.grok_ext import grok_file_permission_target
+
 # Namespace for deriving stable UUIDs from native IDs within a session.
 _NS = UUID("a7c3e9f1-2b4d-4e6f-8a0c-1d2e3f4a5b6c")
 
@@ -595,6 +597,10 @@ class AcpSessionNormalizer:
                         op = None
                     if op is not None:
                         return FileApprovalAction(path=path, operation=op)
+                grok_target = grok_file_permission_target(input_map)
+                if grok_target is not None:
+                    grok_path, grok_op = grok_target
+                    return FileApprovalAction(path=grok_path, operation=FileOperation(grok_op))
 
         return None
 

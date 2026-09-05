@@ -10,7 +10,6 @@ from tth_grok.acp.schemas.base import (
     ALLOWED_INBOUND_METHODS,
     ALLOWED_OUTBOUND_METHODS,
     GROK_CONTROL_NOTIFICATIONS,
-    is_allowlisted_permission_request,
     is_allowlisted_session_update,
 )
 from tth_grok.acp.schemas.cursor_ext import CURSOR_EXTRA_OUTBOUND_METHODS
@@ -58,6 +57,7 @@ def grok_acp_protocol() -> AcpProtocolConfig:
     """Grok-pinned ACP allowlist (ACP v1 + grok_ext control notifications)."""
     from tth_grok.acp.schemas.grok_ext import (
         is_allowlisted_ask_user_question,
+        is_allowlisted_grok_permission_request,
     )
 
     return AcpProtocolConfig(
@@ -66,7 +66,7 @@ def grok_acp_protocol() -> AcpProtocolConfig:
         control_notifications=GROK_CONTROL_NOTIFICATIONS,
         session_update_validator=is_allowlisted_session_update,
         request_validators={
-            "session/request_permission": is_allowlisted_permission_request,
+            "session/request_permission": is_allowlisted_grok_permission_request,
             "_x.ai/ask_user_question": is_allowlisted_ask_user_question,
         },
         # Grok emits additive `_x.ai/*` control notifications across CLI builds.

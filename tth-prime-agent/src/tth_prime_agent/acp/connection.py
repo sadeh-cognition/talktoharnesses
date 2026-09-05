@@ -6,7 +6,7 @@ import asyncio
 import contextlib
 import logging
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import Any, cast
 
 from tth_types.enums import ErrorCode
 from tth_types.errors import DomainError
@@ -29,6 +29,35 @@ logger = logging.getLogger(__name__)
 
 RequestHandler = Callable[[JsonRpcRequest], Awaitable[Any | None]]
 NotificationHandler = Callable[[JsonRpcNotification], Awaitable[None]]
+
+
+def _describe_fault_details(details: object) -> str:
+    """Summarize rejected-frame details as key paths only.
+
+    Values are never logged: a rejected permission ``rawInput`` may carry file
+    contents or command lines. Key paths (plus the ``variant`` tag Grok uses
+    to label its tool inputs) are enough to pin the missing fixture.
+    """
+    if not isinstance(details, dict):
+        return ""
+    parts: list[str] = []
+
+    def walk(value: object, prefix: str) -> None:
+        if isinstance(value, dict):
+            mapping = cast(dict[object, object], value)
+            for key, item in mapping.items():
+                path = f"{prefix}.{key}" if prefix else str(key)
+                if key == "variant" and isinstance(item, str):
+                    parts.append(f"{path}={item}")
+                else:
+                    walk(item, path)
+        elif isinstance(value, list):
+            parts.append(f"{prefix}[{len(cast(list[object], value))}]")
+        else:
+            parts.append(prefix)
+
+    walk(cast(dict[object, object], details), "")
+    return ", ".join(parts[:64])
 
 
 class Delivered:
@@ -193,7 +222,11 @@ class AcpConnection:
                 try:
                     await self._dispatch(obj)
                 except DomainError as exc:
-                    logger.warning("ACP protocol fault: %s", exc)
+                    logger.warning(
+                        "ACP protocol fault: %s (details: %s)",
+                        exc,
+                        _describe_fault_details(exc.details),
+                    )
                     self._accepting_writes = False
                     self._fail_pending(exc)
                     return

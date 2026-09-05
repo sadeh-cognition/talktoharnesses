@@ -253,3 +253,196 @@ async def test_concurrent_permission_requests_keep_distinct_waiters() -> None:
     assert isinstance(e2, HarnessInteractionRequest)
     assert e1.provider_correlation["json_rpc_request_id"] == "rpc-1"
     assert e2.provider_correlation["json_rpc_request_id"] == "rpc-2"
+
+
+# --- Pinned Grok 1.0.13 (5e9a58528b76) permission fixtures ------------------
+#
+# Captured over ACP stdio in the tth-grok sandbox on 2026-09-05, with both
+# ``--always-approve`` and ``--permission-mode default``. Grok forwards its own
+# tool arguments as ``rawInput`` with a ``variant`` tag, and it emits the
+# permission request (with the same option set) even under ``--always-approve``.
+
+_GROK_EDIT_OPTIONS = [
+    {
+        "optionId": "allow-edits-session",
+        "name": "Yes, allow all edits during this session",
+        "kind": "allow_always",
+    },
+    {"optionId": "allow-once", "name": "Yes", "kind": "allow_once"},
+    {
+        "optionId": "reject-once",
+        "name": "No, and tell Grok what to do differently",
+        "kind": "reject_once",
+    },
+]
+
+_GROK_BASH_OPTIONS = [
+    {
+        "optionId": "always-allow",
+        "name": "Yes, and don't ask again for bash commands",
+        "kind": "allow_always",
+    },
+    {"optionId": "allow-once", "name": "Yes, proceed", "kind": "allow_once"},
+    {
+        "optionId": "reject-once",
+        "name": "No, and tell Grok what to do differently",
+        "kind": "reject_once",
+    },
+    {
+        "optionId": "reject-always",
+        "name": "No, and don't ask again for this command",
+        "kind": "reject_always",
+    },
+]
+
+
+def _grok_meta(
+    name: str, kind: str, namespace: str, label: str, **tool_input: object
+) -> dict[str, object]:
+    return {
+        "x.ai/tool": {
+            "version": 1,
+            "name": name,
+            "kind": kind,
+            "namespace": namespace,
+            "label": label,
+            "read_only": False,
+            "input": tool_input,
+        }
+    }
+
+
+GROK_1_0_13_WRITE_PERMISSION: dict[str, object] = {
+    "sessionId": "01a071b4-6dda-7c90-a771-c54db71a695c",
+    "toolCall": {
+        "toolCallId": "call-7e7f35be-af2a-4c3f-ba81-1b0764fa8abd-0",
+        "kind": "edit",
+        "title": "Write `/work/yolo_test.md`",
+        "rawInput": {
+            "variant": "Write",
+            "file_path": "/work/yolo_test.md",
+            "content": "capture test\n",
+        },
+        "_meta": _grok_meta("write", "write", "opencode", "Write", path="/work/yolo_test.md"),
+    },
+    "options": _GROK_EDIT_OPTIONS,
+}
+
+GROK_1_0_13_SEARCH_REPLACE_PERMISSION: dict[str, object] = {
+    "sessionId": "01a071b5-92fa-7710-a7a3-e106c07df457",
+    "toolCall": {
+        "toolCallId": "call-e4c80c1d-10ff-42fb-b1e7-c9dd34819cb1-1",
+        "kind": "edit",
+        "title": "Edit `/work/once_test.md`",
+        "rawInput": {
+            "variant": "SearchReplace",
+            "file_path": "/work/once_test.md",
+            "old_string": "capture test\n",
+            "new_string": "capture test\nedited\n",
+            "replace_all": False,
+        },
+        "_meta": _grok_meta(
+            "search_replace", "edit", "grok_build", "Edit", path="/work/once_test.md"
+        ),
+    },
+    "options": _GROK_EDIT_OPTIONS,
+}
+
+GROK_1_0_13_BASH_PERMISSION: dict[str, object] = {
+    "sessionId": "01a071b5-92fa-7710-a7a3-e106c07df457",
+    "toolCall": {
+        "toolCallId": "call-a3676e0f-125f-4dc9-9618-99e3ed128996-2",
+        "kind": "execute",
+        "title": "Execute `echo extra >> once_test.md && cat once_test.md`",
+        "rawInput": {
+            "variant": "Bash",
+            "command": "echo extra >> once_test.md && cat once_test.md",
+            "description": "Append extra line and cat the file",
+            "is_background": False,
+        },
+        "_meta": _grok_meta(
+            "run_terminal_command",
+            "execute",
+            "grok_build",
+            "Run Command",
+            command="echo extra >> once_test.md && cat once_test.md",
+            description="Append extra line and cat the file",
+        ),
+    },
+    "options": _GROK_BASH_OPTIONS,
+}
+
+
+@pytest.mark.parametrize(
+    "fixture",
+    [
+        GROK_1_0_13_WRITE_PERMISSION,
+        GROK_1_0_13_SEARCH_REPLACE_PERMISSION,
+        GROK_1_0_13_BASH_PERMISSION,
+    ],
+    ids=["write", "search_replace", "bash"],
+)
+def test_grok_1_0_13_permission_shapes_are_allowlisted(fixture: dict[str, object]) -> None:
+    from tth_grok.acp.schemas.base import is_allowlisted_permission_request
+    from tth_grok.acp.schemas.grok_ext import is_allowlisted_grok_permission_request
+
+    assert is_allowlisted_grok_permission_request(fixture)
+    # The edit shapes are Grok-specific; the protocol-level ACP v1 schema must
+    # not silently grow to accept them.
+    variant = fixture["toolCall"]["rawInput"]["variant"]  # type: ignore[index]
+    assert is_allowlisted_permission_request(fixture) is (variant == "Bash")
+
+
+def test_grok_write_permission_is_file_create_action() -> None:
+    n = GrokNormalizer()
+    n.set_session("s")
+    n.begin_turn(uuid4())
+    payload = n.on_permission_request(GROK_1_0_13_WRITE_PERMISSION, interaction_id=uuid4())[0]
+    assert isinstance(payload, InteractionRequestedPayload)
+    assert isinstance(payload.request, ApprovalRequestPayload)
+    request = payload.request
+    assert isinstance(request.action, FileApprovalAction)
+    assert request.action.path == "/work/yolo_test.md"
+    assert request.action.operation is FileOperation.CREATE
+    assert request.path == "/work/yolo_test.md"
+    assert request.operation is FileOperation.CREATE
+    assert request.tool_name == "Write `/work/yolo_test.md`"
+    # Even under --always-approve Grok advertises allow-session and allow-once,
+    # which is what a yolo caller needs to auto-approve without a human.
+    assert ApprovalDecision.ALLOW_SESSION in request.available_decisions
+    assert ApprovalDecision.ALLOW_ONCE in request.available_decisions
+    assert ApprovalDecision.DENY in request.available_decisions
+
+
+def test_grok_search_replace_permission_is_file_modify_action() -> None:
+    n = GrokNormalizer()
+    n.set_session("s")
+    n.begin_turn(uuid4())
+    payload = n.on_permission_request(
+        GROK_1_0_13_SEARCH_REPLACE_PERMISSION, interaction_id=uuid4()
+    )[0]
+    assert isinstance(payload, InteractionRequestedPayload)
+    assert isinstance(payload.request, ApprovalRequestPayload)
+    assert isinstance(payload.request.action, FileApprovalAction)
+    assert payload.request.action.path == "/work/once_test.md"
+    assert payload.request.action.operation is FileOperation.MODIFY
+
+
+def test_grok_bash_permission_is_command_action() -> None:
+    n = GrokNormalizer()
+    n.set_session("s")
+    n.begin_turn(uuid4())
+    payload = n.on_permission_request(GROK_1_0_13_BASH_PERMISSION, interaction_id=uuid4())[0]
+    assert isinstance(payload, InteractionRequestedPayload)
+    assert isinstance(payload.request, ApprovalRequestPayload)
+    assert isinstance(payload.request.action, CommandApprovalAction)
+    assert payload.request.action.argv == ("echo extra >> once_test.md && cat once_test.md",)
+    assert ApprovalDecision.ALLOW_SESSION in payload.request.available_decisions
+
+
+def test_grok_edit_variant_without_path_stays_manual_only() -> None:
+    from tth_grok.acp.schemas.grok_ext import grok_file_permission_target
+
+    assert grok_file_permission_target({"variant": "Write", "content": "x"}) is None
+    assert grok_file_permission_target({"variant": "Unknown", "file_path": "/a"}) is None
+    assert grok_file_permission_target({"variant": "Write", "file_path": ""}) is None

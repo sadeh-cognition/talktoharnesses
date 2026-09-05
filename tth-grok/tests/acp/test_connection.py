@@ -259,3 +259,82 @@ async def test_cursor_protocol_allows_set_config_option_grok_rejects() -> None:
         )
     assert exc.value.code is ErrorCode.UNSUPPORTED_NATIVE_EVENT
     await grok_conn.close()
+
+
+async def test_grok_protocol_accepts_captured_write_permission() -> None:
+    """Grok 1.0.13 forwards its Write tool input as rawInput; the turn must not die."""
+    proc = FakeProcess()
+    conn = AcpConnection(proc)  # type: ignore[arg-type]
+    seen: list[object] = []
+
+    async def handler(req: object) -> None:
+        seen.append(req)
+        return None
+
+    conn.set_request_handler("session/request_permission", handler)
+    await conn.start()
+    pending, _ = await conn.request("initialize", {"protocolVersion": 1})
+    await proc.feed(
+        '{"jsonrpc":"2.0","id":"p1","method":"session/request_permission",'
+        '"params":{"sessionId":"s","toolCall":{"toolCallId":"c1","kind":"edit",'
+        '"title":"Write `/work/a.md`","rawInput":{"variant":"Write",'
+        '"file_path":"/work/a.md","content":"hi\\n"},"_meta":{"x.ai/tool":{"name":"write"}}},'
+        '"options":[{"optionId":"allow-once","name":"Yes","kind":"allow_once"}]}}'
+    )
+    await proc.feed('{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}')
+    await asyncio.wait_for(pending, timeout=1)
+    assert len(seen) == 1
+    await conn.close()
+
+
+async def test_cursor_protocol_rejects_grok_write_permission() -> None:
+    """The Grok edit-tool shapes must not leak into the shared ACP v1 allowlist."""
+    from tth_grok.acp.protocol import cursor_acp_protocol
+
+    proc = FakeProcess()
+    conn = AcpConnection(proc, protocol=cursor_acp_protocol())  # type: ignore[arg-type]
+
+    async def handler(_req: object) -> None:
+        return None
+
+    conn.set_request_handler("session/request_permission", handler)
+    await conn.start()
+    pending, _ = await conn.request("initialize", {"protocolVersion": 1})
+    await proc.feed(
+        '{"jsonrpc":"2.0","id":"p1","method":"session/request_permission",'
+        '"params":{"toolCall":{"rawInput":{"variant":"Write","file_path":"/work/a.md",'
+        '"content":"hi"}},"options":[]}}'
+    )
+    with pytest.raises(DomainError) as exc:
+        await asyncio.wait_for(pending, timeout=1)
+    assert exc.value.code is ErrorCode.UNSUPPORTED_NATIVE_EVENT
+    await conn.close()
+
+
+def test_fault_details_are_summarized_as_key_paths_only() -> None:
+    from tth_grok.acp.connection import (
+        _describe_fault_details,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    summary = _describe_fault_details(
+        {
+            "params": {
+                "sessionId": "s",
+                "toolCall": {
+                    "rawInput": {
+                        "variant": "Write",
+                        "file_path": "/secret/path.md",
+                        "content": "TOP SECRET",
+                    }
+                },
+                "options": [{"optionId": "allow-once"}],
+            }
+        }
+    )
+    assert "params.toolCall.rawInput.variant=Write" in summary
+    assert "params.toolCall.rawInput.file_path" in summary
+    assert "params.toolCall.rawInput.content" in summary
+    assert "params.options[1]" in summary
+    assert "TOP SECRET" not in summary
+    assert "/secret/path.md" not in summary
+    assert _describe_fault_details(None) == ""

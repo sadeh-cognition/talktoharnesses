@@ -12,7 +12,12 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-from tests.live.helpers import LiveHttp, isolated_sandbox_environment, run_live_gate
+from tests.live.helpers import (
+    LiveHttp,
+    isolated_sandbox_environment,
+    run_live_gate,
+    unique_edit_prompt,
+)
 
 from talktoharnesses.domain.enums import HarnessKind
 from talktoharnesses.domain.models import HarnessConfiguration
@@ -46,4 +51,22 @@ async def test_live_grok_through_tth_docker_sandbox(live_http: LiveHttp) -> None
             kind=HarnessKind.GROK,
             working_directory=str(live_http.workspace),
         ),
+    )
+
+
+async def test_live_grok_yolo_edit_tool_through_tth_docker_sandbox(live_http: LiveHttp) -> None:
+    """Yolo Grok still emits session/request_permission for its edit tools.
+
+    ``--always-approve`` does not suppress the request over ACP stdio; it must
+    be forwarded (with allow options) so a yolo caller can auto-approve it, not
+    rejected as an unallowlisted shape.
+    """
+    await run_live_gate(
+        live_http,
+        configuration=HarnessConfiguration(
+            kind=HarnessKind.GROK,
+            yolo=True,
+            working_directory=str(live_http.workspace),
+        ),
+        prompt_fn=unique_edit_prompt,
     )
