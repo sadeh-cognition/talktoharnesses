@@ -77,6 +77,11 @@ def public_message(
 ) -> str:
     """Return a short generic message for a stable error code."""
     if code is ErrorCode.PROVIDER_INCOMPATIBLE:
+        if details is not None and details.get("reason") in (
+            "authentication_required",
+            "authentication_failed",
+        ):
+            return "harness authentication failed; refresh the provider credentials on the TTH host"
         version_message = _version_mismatch_message(details)
         if version_message is not None:
             return version_message

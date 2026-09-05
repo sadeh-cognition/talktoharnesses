@@ -827,7 +827,7 @@ class RuntimeManager:
                 process_record,
                 handle,
                 exc.code.value,
-                public_message(exc.code),
+                public_message(exc.code, details=exc.details),
                 worker_id=worker_id,
                 fence=fence,
             )

@@ -1,7 +1,8 @@
-"""Shared Grok ACP initialization validation."""
+"""Shared Grok ACP initialization, validation, and headless authentication."""
 
 from __future__ import annotations
 
+import os
 from typing import Any, cast
 
 from tth_types.enums import ErrorCode
@@ -9,6 +10,7 @@ from tth_types.errors import DomainError
 
 from tth_grok import __version__
 from tth_grok.acp.connection import AcpConnection
+from tth_grok.acp.jsonrpc import JsonRpcRemoteError
 from tth_grok.acp.schemas.base import ALLOWED_OUTBOUND_METHODS
 from tth_grok.harness.compatibility import GrokReleaseRecord
 
@@ -62,6 +64,35 @@ async def initialize_grok(
         release,
         require_load_session=require_load_session,
     )
+    auth_methods = result_map.get("authMethods")
+    if auth_methods:
+        methods = {_map_dict(method).get("id") for method in cast(list[object], auth_methods)}
+        if os.environ.get("XAI_API_KEY") and "xai.api_key" in methods:
+            method_id = "xai.api_key"
+        elif "cached_token" in methods:
+            method_id = "cached_token"
+        else:
+            raise DomainError(
+                ErrorCode.PROVIDER_INCOMPATIBLE,
+                "Grok credentials are unavailable; seed the sandbox from a Grok login "
+                "or pass XAI_API_KEY into the sandbox",
+                details={"reason": "authentication_required"},
+            )
+        try:
+            future, _ = await connection.request(
+                "authenticate", {"methodId": method_id, "_meta": {"headless": True}}
+            )
+            await future
+        except JsonRpcRemoteError as exc:
+            raise DomainError(
+                ErrorCode.PROVIDER_INCOMPATIBLE,
+                "Grok authentication failed; refresh the sandbox Grok login or XAI_API_KEY",
+                details={
+                    "reason": "authentication_failed",
+                    "method_id": method_id,
+                    "remote_code": exc.code,
+                },
+            ) from exc
     return result_map
 
 

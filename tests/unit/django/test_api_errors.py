@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from talktoharnesses.django.api.errors import domain_error_response
 from talktoharnesses.domain.enums import ErrorCode
 from talktoharnesses.domain.errors import DomainError, public_message
@@ -29,6 +31,23 @@ def test_provider_incompatible_uses_generic_message() -> None:
     assert body["code"] == ErrorCode.PROVIDER_INCOMPATIBLE.value
     assert body["message"] == public_message(ErrorCode.PROVIDER_INCOMPATIBLE)
     assert "/home/user" not in body["message"]
+
+
+@pytest.mark.parametrize("reason", ["authentication_required", "authentication_failed"])
+def test_provider_authentication_failure_has_safe_actionable_message(reason: str) -> None:
+    response = domain_error_response(
+        DomainError(
+            ErrorCode.PROVIDER_INCOMPATIBLE,
+            "SECRET_TOKEN=private-provider-output",
+            details={"reason": reason, "token": "private-token"},
+        )
+    )
+    assert json.loads(response.content) == {
+        "code": "provider_incompatible",
+        "message": (
+            "harness authentication failed; refresh the provider credentials on the TTH host"
+        ),
+    }
 
 
 def test_provider_version_mismatch_includes_safe_versions() -> None:

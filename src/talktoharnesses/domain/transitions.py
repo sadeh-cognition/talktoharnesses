@@ -1137,17 +1137,21 @@ def fail_turn(
     now: datetime,
     error_code: str,
     message: str,
+    turn_id: UUID | None = None,
 ) -> TransitionResult:
-    if state.active_turn is None:
-        raise DomainError(ErrorCode.NO_ACTIVE_TURN, "no active turn to fail")
+    queued = state.queued_turn is not None and state.queued_turn.id == turn_id
+    turn = state.queued_turn if queued else state.active_turn
+    if turn is None or (turn_id is not None and turn.id != turn_id):
+        raise DomainError(ErrorCode.NO_ACTIVE_TURN, "no matching turn to fail")
 
-    cancelled = cancel_open_interactions(state, now=now)
-    state = cancelled.state
-    prefix = cancelled.events
-    assert state.active_turn is not None
+    prefix: tuple[ConversationEvent, ...] = ()
+    if not queued:
+        cancelled = cancel_open_interactions(state, now=now)
+        state = cancelled.state
+        prefix = cancelled.events
 
     ts = _now(now)
-    turn = state.active_turn.model_copy(
+    turn = turn.model_copy(
         update={
             "status": TurnStatus.FAILED,
             "completed_at": ts,
@@ -1161,15 +1165,20 @@ def fail_turn(
             update={"status": CommandStatus.SETTLED, "settled_at": ts}
         )
 
-    new_state = state.model_copy(
-        update={
-            "active_turn": None,
-            "commands": commands,
-            "conversation": state.conversation.model_copy(
-                update={"active_turn_id": None, "updated_at": ts}
-            ),
-        }
-    )
+    if queued:
+        new_state = state.model_copy(
+            update={"queued_turn": None, "queued_user_text": None, "commands": commands}
+        )
+    else:
+        new_state = state.model_copy(
+            update={
+                "active_turn": None,
+                "commands": commands,
+                "conversation": state.conversation.model_copy(
+                    update={"active_turn_id": None, "updated_at": ts}
+                ),
+            }
+        )
     new_state, events = append_events(
         new_state,
         ts,

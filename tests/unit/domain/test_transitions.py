@@ -427,6 +427,41 @@ def test_interrupt_fail_outcome_unknown() -> None:
     assert r.events[-1].payload.type == "turn_outcome_unknown"
 
 
+def test_fail_queued_turn_preserves_active_turn_and_interaction() -> None:
+    active = start_turn(
+        submit_turn(_idle(), prompt="active", idempotency_key="active", now=_now()).state,
+        now=_now(),
+    )
+    assert active.state.active_turn is not None
+    interaction = PendingInteraction(
+        conversation_id=active.state.conversation.id,
+        turn_id=active.state.active_turn.id,
+        kind=InteractionKind.APPROVAL,
+        request=ApprovalRequestPayload(summary="continue?"),
+        created_at=_now(),
+    )
+    waiting = request_interaction(active.state, interaction, now=_now())
+    queued = submit_turn(waiting.state, prompt="next", idempotency_key="next", now=_now())
+    assert queued.state.queued_turn is not None
+    assert queued.command is not None
+
+    result = fail_turn(
+        queued.state,
+        now=_now(),
+        turn_id=queued.state.queued_turn.id,
+        error_code="protocol_error",
+        message="startup failed",
+    )
+
+    assert result.state.active_turn == waiting.state.active_turn
+    assert result.state.interactions == waiting.state.interactions
+    assert result.state.queued_turn is None
+    assert result.state.queued_user_text is None
+    assert result.state.commands[queued.command.id].status is CommandStatus.SETTLED
+    assert [event.type for event in result.events] == ["turn_failed"]
+    assert result.events[0].payload.turn_id == queued.state.queued_turn.id  # type: ignore[union-attr]
+
+
 def test_mode_change_while_active_rejected() -> None:
     state = _idle()
     r = submit_turn(state, prompt="x", idempotency_key="a", now=_now())

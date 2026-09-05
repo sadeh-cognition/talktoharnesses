@@ -45,7 +45,6 @@ from talktoharnesses.domain.models import (
 from talktoharnesses.domain.transitions import (
     ConversationState,
     apply_steer,
-    cancel_queued_prompt,
     commit_switch,
     fail_switch,
     fail_turn,
@@ -62,14 +61,15 @@ from talktoharnesses.runtime.manager import ManagedRuntime, RuntimeManager
 
 logger = logging.getLogger(__name__)
 
-# Sandbox failures a lease-expiry retry can never fix: the path will still not
-# be mounted and the image/CLI will still be broken. SANDBOX_PREPARING is
-# deliberately absent — leaving the command claimed and retrying is correct
-# while a prepare is in flight.
-_PERMANENT_SANDBOX_ERRORS = frozenset(
+# Preparation and ownership/contention can recover without failing the turn.
+# Other startup failures must reach clients instead of retrying indefinitely.
+_RETRYABLE_STARTUP_ERRORS = frozenset(
     {
-        ErrorCode.SANDBOX_PATH_NOT_MOUNTED,
-        ErrorCode.SANDBOX_UNAVAILABLE,
+        ErrorCode.SANDBOX_PREPARING,
+        ErrorCode.STALE_OWNER,
+        ErrorCode.OPTIMISTIC_CONFLICT,
+        ErrorCode.WORKER_LEASE_UNAVAILABLE,
+        ErrorCode.CONVERSATION_BUSY,
     }
 )
 
@@ -268,14 +268,6 @@ class CommandProcessor:
                     command.conversation_id,
                     command.id,
                 )
-                if exc.code in _PERMANENT_SANDBOX_ERRORS:
-                    try:
-                        await self._fail_undeliverable_command(command, exc)
-                    except Exception:
-                        logger.exception(
-                            "failed to settle undeliverable command %s",
-                            command.id,
-                        )
             except Exception:
                 logger.exception(
                     "command execution failed conversation=%s command=%s",
@@ -360,6 +352,17 @@ class CommandProcessor:
             lease_task = self._spawn_lease_keepalive(command)
             try:
                 await self._ensure_runtime(state)
+            except Exception as exc:
+                if isinstance(exc, DomainError) and exc.code in _RETRYABLE_STARTUP_ERRORS:
+                    raise
+                logger.exception("runtime startup failed for command %s", command.id)
+                error = (
+                    exc
+                    if isinstance(exc, DomainError)
+                    else DomainError(ErrorCode.INVALID_STATE, "runtime startup failed")
+                )
+                await self._fail_undeliverable_command(command, error)
+                return
             finally:
                 await self._cancel_lease_keepalive(lease_task)
             state = await self._persistence.get_worker_snapshot(command.conversation_id)
@@ -833,16 +836,22 @@ class CommandProcessor:
         base_version = state.conversation.version
         now = self._clock()
         events: Sequence[ConversationEvent] = ()
-        if state.active_turn is not None and state.active_turn.command_id == command.id:
+        turn = next(
+            (
+                turn
+                for turn in (state.active_turn, state.queued_turn)
+                if turn is not None and turn.command_id == command.id
+            ),
+            None,
+        )
+        if turn is not None:
             result = fail_turn(
                 state,
                 now=now,
+                turn_id=turn.id,
                 error_code=exc.code.value,
-                message=public_message(exc.code),
+                message=public_message(exc.code, details=exc.details),
             )
-            state, events = result.state, result.events
-        elif state.queued_turn is not None and state.queued_turn.command_id == command.id:
-            result = cancel_queued_prompt(state, now=now)
             state, events = result.state, result.events
         settled = self._settled(state.commands.get(command.id, command), now=now)
         commands = dict(state.commands)

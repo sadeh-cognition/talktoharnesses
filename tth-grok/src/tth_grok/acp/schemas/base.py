@@ -14,6 +14,7 @@ class _Strict(BaseModel):
 ALLOWED_OUTBOUND_METHODS: frozenset[str] = frozenset(
     {
         "initialize",
+        "authenticate",
         "session/new",
         "session/load",
         "session/prompt",

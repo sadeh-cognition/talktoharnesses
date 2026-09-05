@@ -16,6 +16,7 @@ from talktoharnesses.application.command_processor import CommandProcessor
 from talktoharnesses.domain import (
     CommandKind,
     CommandStatus,
+    ErrorCode,
     HarnessCapabilities,
     HarnessConfiguration,
     HarnessKind,
@@ -26,12 +27,14 @@ from talktoharnesses.domain import (
     start_turn,
     submit_turn,
 )
+from talktoharnesses.domain.errors import DomainError
 from talktoharnesses.domain.events import (
     AssistantMessageDeltaPayload,
     ConversationEvent,
     HarnessEvent,
     ProviderWarningPayload,
     TurnCompletedPayload,
+    TurnFailedPayload,
 )
 from talktoharnesses.domain.models import ConversationHarnessBinding, EditQueuedPayload
 from talktoharnesses.providers.adapter import HarnessSession, SteerRequest, TurnRequest
@@ -806,12 +809,26 @@ async def test_steer_failure_queues_instead_of_delivered() -> None:
 
 
 @pytest.mark.asyncio
-async def test_permanent_sandbox_error_settles_command_instead_of_retrying() -> None:
-    """SANDBOX_PATH_NOT_MOUNTED can never succeed on retry: the command must
-    settle and surface an event instead of staying claimed forever."""
-    from talktoharnesses.domain.enums import ErrorCode
-    from talktoharnesses.domain.errors import DomainError
-
+@pytest.mark.parametrize(
+    "error",
+    [
+        DomainError(ErrorCode.SANDBOX_PATH_NOT_MOUNTED, "not mounted"),
+        DomainError(ErrorCode.SANDBOX_UNAVAILABLE, "unavailable"),
+        DomainError(
+            ErrorCode.PROVIDER_INCOMPATIBLE,
+            "private provider output",
+            details={"reason": "authentication_failed"},
+        ),
+        DomainError(ErrorCode.PROTOCOL_ERROR, "split HTTP 500"),
+        DomainError(ErrorCode.RUNTIME_TIMEOUT, "startup timed out"),
+        RuntimeError("unexpected startup failure with private output"),
+    ],
+)
+@pytest.mark.parametrize("active", [False, True])
+async def test_startup_error_settles_command_instead_of_retrying(
+    error: Exception,
+    active: bool,
+) -> None:
     now = datetime(2026, 8, 8, tzinfo=UTC)
     state = new_conversation_state(owner_id="owner", now=now)
     binding = ConversationHarnessBinding(
@@ -832,7 +849,7 @@ async def test_permanent_sandbox_error_settles_command_instead_of_retrying() -> 
     assert submitted.command is not None
 
     persistence = MemoryPersistence()
-    persistence.seed(submitted.state)
+    persistence.seed(start_turn(submitted.state, now=now).state if active else submitted.state)
     await persistence.accept_command(submitted.command)
     claimed = submitted.command.model_copy(
         update={
@@ -852,11 +869,7 @@ async def test_permanent_sandbox_error_settles_command_instead_of_retrying() -> 
             return None
 
         async def start(self, **kwargs: Any) -> None:
-            raise DomainError(
-                ErrorCode.SANDBOX_PATH_NOT_MOUNTED,
-                "/tmp is not mounted into the grok sandbox",
-                details={"kind": "grok", "path": "/tmp"},
-            )
+            raise error
 
         async def resume(self, **kwargs: Any) -> None:
             await self.start(**kwargs)
@@ -873,9 +886,23 @@ async def test_permanent_sandbox_error_settles_command_instead_of_retrying() -> 
 
     stored = persistence.commands[claimed.id]
     assert stored.status is CommandStatus.SETTLED
+    assert stored.worker_id is None
+    assert stored.lease_expires_at is None
     final = await persistence.get_worker_snapshot(state.conversation.id)
     assert final.queued_turn is None
-    assert any(event.type == "turn_cancelled" for event in publisher.events)
+    assert final.active_turn is None
+    failures = [
+        event.payload for event in publisher.events if isinstance(event.payload, TurnFailedPayload)
+    ]
+    assert len(failures) == 1
+    assert failures[0].turn_id == submitted.command.target_turn_id
+    expected_code = error.code if isinstance(error, DomainError) else ErrorCode.INVALID_STATE
+    assert failures[0].error_code == expected_code.value
+    assert "private output" not in failures[0].message
+    if expected_code is ErrorCode.PROVIDER_INCOMPATIBLE:
+        assert "authentication failed" in failures[0].message
+    await processor._handle_command(claimed)  # pyright: ignore[reportPrivateUsage]
+    assert len(publisher.events) == 1
 
 
 @pytest.mark.asyncio

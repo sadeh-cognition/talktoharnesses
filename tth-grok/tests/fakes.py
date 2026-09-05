@@ -54,6 +54,8 @@ class _FakeAcpProcess:
         agent_name: str = "grok",
         agent_version: str = "1.0.0",
         load_session: bool = True,
+        auth_methods: tuple[str, ...] = (),
+        reject_auth: bool = False,
     ) -> None:
         self.process_id = uuid4()
         self.pid = 12345
@@ -70,6 +72,9 @@ class _FakeAcpProcess:
         self._agent_name = agent_name
         self._agent_version = agent_version
         self._load_session = load_session
+        self._auth_methods = auth_methods
+        self._reject_auth = reject_auth
+        self._authenticated = not auth_methods
         self._task: asyncio.Task[None] | None = None
         self.requests: list[dict[str, Any]] = []
         self._cursor_mode = "agent"
@@ -85,8 +90,7 @@ class _FakeAcpProcess:
         if not line:
             return
         msg = json.loads(line)
-        if self._is_cursor:
-            self.requests.append(msg)
+        self.requests.append(msg)
         asyncio.create_task(self._respond(msg))
 
     def stdout(self) -> AsyncIterator[bytes]:
@@ -184,6 +188,9 @@ class _FakeAcpProcess:
     async def _respond(self, msg: dict[str, Any]) -> None:
         req_id = msg.get("id")
         method = msg.get("method")
+        if method in {"session/new", "session/load"} and not self._authenticated:
+            await self._reply_error(req_id, -32000, "Authentication required")
+            return
         if method == "initialize":
             await self._reply(
                 req_id,
@@ -191,8 +198,15 @@ class _FakeAcpProcess:
                     "protocolVersion": 1,
                     "agentInfo": {"name": self._agent_name, "version": self._agent_version},
                     "agentCapabilities": {"loadSession": self._load_session},
+                    "authMethods": [{"id": method_id} for method_id in self._auth_methods],
                 },
             )
+        elif method == "authenticate":
+            if self._reject_auth:
+                await self._reply_error(req_id, -32000, "Authentication required")
+                return
+            self._authenticated = True
+            await self._reply(req_id, {})
         elif method == "session/new":
             payload: dict[str, Any] = {"sessionId": self._session_id}
             if self._is_cursor:

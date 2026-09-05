@@ -8,7 +8,7 @@ from typing import Any, cast
 from uuid import uuid4
 
 import pytest
-from tth_types.adapter import StartSessionRequest, TurnRequest
+from tth_types.adapter import ResumeSessionRequest, StartSessionRequest, TurnRequest
 from tth_types.enums import ErrorCode, HarnessKind
 from tth_types.errors import DomainError
 from tth_types.events import (
@@ -129,26 +129,70 @@ class _RecordingPromptProcess(_FakeAcpProcess):
 
 async def _started_adapter(
     proc: _FakeAcpProcess,
+    *,
+    resume: bool = False,
 ) -> tuple[GrokAdapter, Any]:
     release = match_release("grok 1.0.5 (5115b46bc9) [stable]", platform="linux")
     adapter = GrokAdapter()
     adapter._release = release  # pyright: ignore[reportPrivateUsage]
     adapter._capabilities = release.to_harness_capabilities()  # pyright: ignore[reportPrivateUsage]
     adapter.bind_process(proc)  # type: ignore[arg-type]
-    session = await adapter.start(
-        StartSessionRequest(
-            conversation_id=uuid4(),
-            binding_id=uuid4(),
-            configuration=HarnessConfiguration(kind=HarnessKind.GROK, working_directory="/tmp"),
-            launch=LaunchSnapshot(
-                harness_version="1.0.5",
-                working_directory="/tmp",
-                adapter_version="test",
-                capabilities=release.to_harness_capabilities(),
-            ),
-        )
+    request = StartSessionRequest(
+        conversation_id=uuid4(),
+        binding_id=uuid4(),
+        configuration=HarnessConfiguration(kind=HarnessKind.GROK, working_directory="/tmp"),
+        launch=LaunchSnapshot(
+            harness_version="1.0.5",
+            working_directory="/tmp",
+            adapter_version="test",
+            capabilities=release.to_harness_capabilities(),
+        ),
     )
+    if resume:
+        session = await adapter.resume(
+            ResumeSessionRequest(**request.model_dump(), native_session_id="existing-session")
+        )
+    else:
+        session = await adapter.start(request)
     return adapter, session
+
+
+@pytest.mark.parametrize("resume", [False, True])
+@pytest.mark.parametrize(
+    ("auth_methods", "api_key", "expected_method"),
+    [
+        (("grok.com", "cached_token"), False, "cached_token"),
+        (("cached_token", "xai.api_key"), True, "xai.api_key"),
+        (("cached_token", "xai.api_key"), False, "cached_token"),
+        ((), False, None),
+    ],
+)
+async def test_authentication_precedes_session_start_and_resume(
+    monkeypatch: pytest.MonkeyPatch,
+    resume: bool,
+    auth_methods: tuple[str, ...],
+    api_key: bool,
+    expected_method: str | None,
+) -> None:
+    monkeypatch.delenv("XAI_API_KEY", raising=False)
+    if api_key:
+        monkeypatch.setenv("XAI_API_KEY", "test-key")
+    proc = _FakeAcpProcess(agent_version="1.0.5", auth_methods=auth_methods)
+    adapter, session = await _started_adapter(proc, resume=resume)
+    try:
+        methods = [request["method"] for request in proc.requests]
+        assert methods == [
+            "initialize",
+            *(["authenticate"] if expected_method else []),
+            "session/load" if resume else "session/new",
+        ]
+        if expected_method:
+            assert proc.requests[1]["params"] == {
+                "methodId": expected_method,
+                "_meta": {"headless": True},
+            }
+    finally:
+        await adapter.close(session)
 
 
 @pytest.mark.asyncio
