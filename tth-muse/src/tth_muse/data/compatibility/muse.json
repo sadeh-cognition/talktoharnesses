@@ -1,0 +1,18 @@
+{
+  "adapter_version": "2026.8.5",
+  "floor": {
+    "version": "1.0.3-R2198.1",
+    "platforms": [
+      "linux"
+    ],
+    "capabilities": {
+      "supports_resume": true,
+      "supports_interrupt": true,
+      "supports_steer": true,
+      "supports_multi_interaction": true,
+      "supports_nested_activity": false
+    },
+    "notes": "Uses the official Muse Session Protocol v1 over muse serve. Models come from model/list; mode and effort discovery are not exposed by MSP. Approval-ledger durability errors after resume reproduce with the official SDK on Muse 1.0.3-R2198.1; the live delivery gate fails and latest_verified remains unset."
+  },
+  "latest_verified": null
+}

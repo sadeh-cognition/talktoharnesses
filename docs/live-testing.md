@@ -33,6 +33,7 @@ container. Enable it with `TALKTOHARNESSES_LIVE_<KIND>_SANDBOX=1` and run
 | Claude Code | `TALKTOHARNESSES_LIVE_CLAUDE_SANDBOX=1` | `tests/live/test_claude_sandbox_live.py` |
 | OpenCode | `TALKTOHARNESSES_LIVE_OPENCODE_SANDBOX=1` | `tests/live/test_opencode_sandbox_live.py` |
 | Prime Agent | `TALKTOHARNESSES_LIVE_PRIME_AGENT_SANDBOX=1` | `tests/live/test_prime_agent_sandbox_live.py` |
+| Muse Code | `TALKTOHARNESSES_LIVE_MUSE_SANDBOX=1` | `tests/live/test_muse_sandbox_live.py` |
 
 The fixture boots an isolated container from the `tth-<kind>:latest` image,
 seeds the kind's host credential file (override the source with

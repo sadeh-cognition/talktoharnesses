@@ -7,7 +7,7 @@ audiences:
   - developer
 tags:
   - type/index
-last_verified: 2026-08-29
+last_verified: 2026-09-05
 ---
 
 # Wiki Index
@@ -20,7 +20,7 @@ Use this catalog to route into the maintained knowledge graph. Obsidian users sh
 - [Developer overview](maps/developer-overview.md): architecture, interfaces, decisions, operations, and evidence.
 - [Requirements by status](maps/requirements-by-status.md): plugin-free delivery view.
 - [Architecture and integrations](maps/architecture-and-integrations.md): system structure and external boundaries.
-- [Compatibility and adapters](maps/compatibility-and-adapters.md): split-owned floors, probes, and provider adapters.
+- [Compatibility and adapters](maps/compatibility-and-adapters.md): split-owned floors, probes, and provider adapters, including Muse Code SDK alignment and its approval limitation after resume.
 - [HTTP API map](maps/http-api.md): authenticated HTTP/SSE clusters.
 
 ## Capabilities

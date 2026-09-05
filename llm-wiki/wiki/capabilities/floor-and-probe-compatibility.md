@@ -9,8 +9,8 @@ tags:
   - type/capability
   - capability/compatibility
   - status/implemented
-last_verified: 2026-08-29
-verified_against_commit: 47644027875773ba520cbfdd9f978d196a548802
+last_verified: 2026-09-05
+verified_against_commit: 92bdf81138628204f7b58df5f1f80545abdbbde3
 ---
 
 # Floor-and-Probe Compatibility
@@ -19,7 +19,7 @@ Each harness packages one floor identity, published platforms, and adapter-owned
 
 ## Product value
 
-Consumers get a hard contract without a patch grid. A new CLI patch above the floor does not require a compatibility JSON edit to run. `SUPPORTED_HARNESSES.md` is aggregated from compatibility data owned by the six split projects. `latest_verified` is advisory (`verified`, `behind_verified`, `ahead_of_verified`, `unknown`) and never fails a probe.
+Consumers get a hard contract without a patch grid. A new CLI patch above the floor does not require a compatibility JSON edit to run. `SUPPORTED_HARNESSES.md` is aggregated from compatibility data owned by the seven split projects. `latest_verified` is advisory (`verified`, `behind_verified`, `ahead_of_verified`, `unknown`) and never fails a probe.
 
 ## Current implementation
 

@@ -7,8 +7,8 @@ audiences:
 tags:
   - type/operation
   - audience/developer
-last_verified: 2026-08-30
-verified_against_commit: 2920f5820783245bd5b871e61edd44642ebfe56a
+last_verified: 2026-09-05
+verified_against_commit: 92bdf81138628204f7b58df5f1f80545abdbbde3
 ---
 
 # Testing Guidelines
@@ -29,6 +29,16 @@ Closed-loop coverage of adapter emit → interaction broker →
 proposed as an in-process orchestration harness. See
 [Orchestration Interaction Test Harness](../analyses/orchestration-interaction-test-harness.md).
 That suite is not in the tree at the inspected commit.
+
+Muse Code `1.0.3-R2198.1` passes the live create/resume usage checks, but
+approval delivery after resume can fail with MSP `-32603` and an approval
+ledger durability-fence error. The error also reproduces with Meta's SDK
+outside TTH and Docker after resuming a completed session. The adapter follows
+the SDK's approval routing, decision deduplication, command identities, and
+bounded non-admission retries. The live gate checks persisted answer-command
+outcomes because interaction counts and turn completion can pass despite failed
+delivery. `latest_verified` remains unset. Evidence: `tth-muse/README.md`,
+`tth-muse/tests/test_muse.py`, and `tests/live/test_muse_sandbox_live.py`.
 
 ## Related
 

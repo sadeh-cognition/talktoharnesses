@@ -50,7 +50,11 @@ class SessionFrameStream:
 
     def _schedule_close(self) -> None:
         if self._close_task is None:
-            self._close_task = self._loop.create_task(self._close_session())
+            self._close_task = self._loop.create_task(self._run_close())
+
+    async def _run_close(self) -> None:
+        # create_task wants a coroutine, not a bare Awaitable.
+        await self._close_session()
 
 
 def stream_frames(

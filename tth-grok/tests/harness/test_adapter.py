@@ -167,32 +167,74 @@ async def _started_adapter(
         ((), False, None),
     ],
 )
-async def test_authentication_precedes_session_start_and_resume(
+async def test_authentication_follows_auth_required_error(
     monkeypatch: pytest.MonkeyPatch,
     resume: bool,
     auth_methods: tuple[str, ...],
     api_key: bool,
     expected_method: str | None,
 ) -> None:
+    """ACP signals auth need via the session error, so authenticate only then."""
     monkeypatch.delenv("XAI_API_KEY", raising=False)
     if api_key:
         monkeypatch.setenv("XAI_API_KEY", "test-key")
     proc = _FakeAcpProcess(agent_version="1.0.5", auth_methods=auth_methods)
     adapter, session = await _started_adapter(proc, resume=resume)
     try:
+        operation = "session/load" if resume else "session/new"
         methods = [request["method"] for request in proc.requests]
         assert methods == [
             "initialize",
-            *(["authenticate"] if expected_method else []),
-            "session/load" if resume else "session/new",
+            operation,
+            *(["authenticate", operation] if expected_method else []),
         ]
         if expected_method:
-            assert proc.requests[1]["params"] == {
+            assert proc.requests[2]["params"] == {
                 "methodId": expected_method,
                 "_meta": {"headless": True},
             }
     finally:
         await adapter.close(session)
+
+
+@pytest.mark.parametrize("resume", [False, True])
+async def test_logged_in_agent_advertising_methods_is_not_forced_to_authenticate(
+    resume: bool,
+) -> None:
+    proc = _FakeAcpProcess(agent_version="1.0.5", auth_methods=("cached_token",))
+    proc._authenticated = True  # pyright: ignore[reportPrivateUsage]
+    adapter, session = await _started_adapter(proc, resume=resume)
+    try:
+        methods = [request["method"] for request in proc.requests]
+        assert methods == ["initialize", "session/load" if resume else "session/new"]
+    finally:
+        await adapter.close(session)
+
+
+@pytest.mark.parametrize(
+    ("auth_methods", "reject_auth", "reason", "message"),
+    [
+        (("grok.com",), False, "authentication_required", "Grok credentials are unavailable"),
+        (("cached_token",), True, "authentication_failed", "Grok authentication failed"),
+    ],
+)
+async def test_unusable_or_rejected_authentication_fails_start(
+    monkeypatch: pytest.MonkeyPatch,
+    auth_methods: tuple[str, ...],
+    reject_auth: bool,
+    reason: str,
+    message: str,
+) -> None:
+    monkeypatch.delenv("XAI_API_KEY", raising=False)
+    proc = _FakeAcpProcess(
+        agent_version="1.0.5", auth_methods=auth_methods, reject_auth=reject_auth
+    )
+    with pytest.raises(DomainError, match=message) as exc:
+        await _started_adapter(proc)
+    assert exc.value.code is ErrorCode.PROVIDER_INCOMPATIBLE
+    assert exc.value.details["reason"] == reason
+    methods = [request["method"] for request in proc.requests]
+    assert methods == ["initialize", "session/new", *(["authenticate"] if reject_auth else [])]
 
 
 @pytest.mark.asyncio

@@ -7,8 +7,8 @@ audiences:
 tags:
   - type/architecture
   - audience/developer
-last_verified: 2026-08-30
-verified_against_commit: 2920f5820783245bd5b871e61edd44642ebfe56a
+last_verified: 2026-09-05
+verified_against_commit: 92bdf81138628204f7b58df5f1f80545abdbbde3
 ---
 
 # System Context
@@ -19,7 +19,7 @@ TalkToHarnesses (tth-proxy) sits between HTTP clients and per-kind harness split
 
 - Host Django (or a custom persistence host) owns settings, users, database, and the ASGI/worker process.
 - `TalkToHarnessesService` is the in-process facade.
-- A generic `RemoteHarnessAdapter` per conversation drives one split service (`tth-grok` … `tth-prime-agent`) over HTTP+SSE; `SandboxManager` resolves an explicit URL or boots and reuses one Docker container per enabled kind.
+- A generic `RemoteHarnessAdapter` per conversation drives one split service (`tth-grok` … `tth-muse`) over HTTP+SSE; `SandboxManager` resolves an explicit URL or boots and reuses one Docker container per enabled kind.
 - The `tth-types` package carries the shared wire schemas between proxy and splits.
 - The relational database is canonical for conversations, events, and commands.
 - Optional HTTP clients call `/api/v1` (unchanged by the split).

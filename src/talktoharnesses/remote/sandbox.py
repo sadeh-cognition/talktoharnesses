@@ -37,6 +37,7 @@ DEFAULT_PORTS: dict[HarnessKind, int] = {
     HarnessKind.CLAUDE: 8114,
     HarnessKind.OPENCODE: 8115,
     HarnessKind.PRIME_AGENT: 8116,
+    HarnessKind.MUSE: 8117,
 }
 
 # Provider credential env vars forwarded into each kind's container when set.
@@ -47,6 +48,7 @@ DEFAULT_ENV_PASSTHROUGH: dict[HarnessKind, tuple[str, ...]] = {
     HarnessKind.CLAUDE: ("ANTHROPIC_API_KEY",),
     HarnessKind.OPENCODE: ("OPENCODE_API_KEY",),
     HarnessKind.PRIME_AGENT: (),
+    HarnessKind.MUSE: ("META_API_KEY",),
 }
 
 _OTEL_ENDPOINT_ENV = "OTEL_EXPORTER_OTLP_ENDPOINT"
@@ -91,6 +93,11 @@ class AuthFileSpec:
 
 
 _AUTH_FILE_DEFAULTS: dict[HarnessKind, AuthFileSpec] = {
+    HarnessKind.MUSE: AuthFileSpec(
+        "TTH_SANDBOX_MUSE_AUTH_FILE",
+        Path(".config/muse/auth.json"),
+        "/home/agent/.config/muse",
+    ),
     HarnessKind.GROK: AuthFileSpec(
         "TTH_SANDBOX_GROK_AUTH_FILE",
         Path(".grok/auth.json"),

@@ -9,8 +9,8 @@ tags:
   - type/requirement
   - capability/adapters
   - status/partially-implemented
-last_verified: 2026-08-30
-verified_against_commit: 78003994d9fe93108ce5a6bc3591ab2e2ef904d9
+last_verified: 2026-09-05
+verified_against_commit: 92bdf81138628204f7b58df5f1f80545abdbbde3
 sources:
   - raw/product/harness-token-usage-requirements.md
   - raw/engineering/live-testing-token-usage.md
@@ -30,7 +30,9 @@ Grok normalizes its native ACP usage events. Codex normalizes the per-turn
 portion of its thread token update. Claude aggregates per-model usage with a
 top-level fallback. OpenCode aggregates unique `step-finish` parts and
 reconciles message history before terminal. Prime Agent aggregates
-assistant-message usage. These five providers produce the existing canonical
+assistant-message usage. Muse Code accumulates MSP per-completion usage for
+the active turn, retaining the provider's counted-once prompt/total fields and
+using terminal-only reported counts when needed. These six providers produce the existing canonical
 `usage_updated` payload before a successful turn terminal.
 
 The Cursor adapter recognizes ACP `usage_update` notifications and
@@ -71,6 +73,8 @@ usage requirement.
 
 ## Implementation evidence
 
+- `tth-muse/src/tth_muse/harness/` (Muse Code MSP integration)
+
 - `tth-*/src/tth_*/harness/` usage normalizers for Grok, Cursor, Codex,
   Claude, OpenCode, and Prime Agent
 - `tth-cursor/src/tth_cursor/acp/normalizer.py` (Cursor ACP usage mapping)
@@ -79,6 +83,9 @@ usage requirement.
 - `tests/live/helpers.py` (shared create/resume usage gate)
 
 ## Test evidence
+
+- `tth-muse/tests/test_muse.py`
+- `tests/live/test_muse_sandbox_live.py`
 
 - `tth-grok/tests/harness/test_normalizer.py`
 - `tth-cursor/tests/acp/test_normalizer.py`

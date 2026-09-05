@@ -1,4 +1,10 @@
-"""Shared Grok ACP initialization, validation, and headless authentication."""
+"""Shared Grok ACP initialization, validation, and headless authentication.
+
+ACP advertises ``authMethods`` on ``initialize`` as the methods a client *may*
+use; whether authentication is actually needed is signalled by the agent
+rejecting ``session/new`` / ``session/load`` with the ``auth_required`` error.
+Authentication therefore happens lazily, on that error, never eagerly.
+"""
 
 from __future__ import annotations
 
@@ -15,6 +21,9 @@ from tth_grok.acp.schemas.base import ALLOWED_OUTBOUND_METHODS
 from tth_grok.harness.compatibility import GrokReleaseRecord
 
 CLIENT_INFO = {"name": "talktoharnesses", "version": __version__}
+
+# ACP: the agent requires authentication before the requested operation.
+ACP_AUTH_REQUIRED = -32000
 
 
 def _map_dict(value: object) -> dict[str, Any]:
@@ -64,36 +73,86 @@ async def initialize_grok(
         release,
         require_load_session=require_load_session,
     )
-    auth_methods = result_map.get("authMethods")
-    if auth_methods:
-        methods = {_map_dict(method).get("id") for method in cast(list[object], auth_methods)}
-        if os.environ.get("XAI_API_KEY") and "xai.api_key" in methods:
-            method_id = "xai.api_key"
-        elif "cached_token" in methods:
-            method_id = "cached_token"
-        else:
-            raise DomainError(
-                ErrorCode.PROVIDER_INCOMPATIBLE,
-                "Grok credentials are unavailable; seed the sandbox from a Grok login "
-                "or pass XAI_API_KEY into the sandbox",
-                details={"reason": "authentication_required"},
-            )
-        try:
-            future, _ = await connection.request(
-                "authenticate", {"methodId": method_id, "_meta": {"headless": True}}
-            )
-            await future
-        except JsonRpcRemoteError as exc:
-            raise DomainError(
-                ErrorCode.PROVIDER_INCOMPATIBLE,
-                "Grok authentication failed; refresh the sandbox Grok login or XAI_API_KEY",
-                details={
-                    "reason": "authentication_failed",
-                    "method_id": method_id,
-                    "remote_code": exc.code,
-                },
-            ) from exc
     return result_map
+
+
+def advertised_auth_methods(initialize_result: dict[str, Any]) -> frozenset[str]:
+    """Method ids the agent offered on ``initialize`` (possibly none)."""
+    raw = initialize_result.get("authMethods")
+    if not isinstance(raw, list):
+        return frozenset()
+    ids: set[str] = set()
+    for method in cast(list[object], raw):
+        method_id = _map_dict(method).get("id")
+        if isinstance(method_id, str):
+            ids.add(method_id)
+    return frozenset(ids)
+
+
+def _select_auth_method(auth_methods: frozenset[str]) -> str:
+    if os.environ.get("XAI_API_KEY") and "xai.api_key" in auth_methods:
+        return "xai.api_key"
+    if "cached_token" in auth_methods:
+        return "cached_token"
+    raise DomainError(
+        ErrorCode.PROVIDER_INCOMPATIBLE,
+        "Grok credentials are unavailable; seed the sandbox from a Grok login "
+        "or pass XAI_API_KEY into the sandbox",
+        details={"reason": "authentication_required", "auth_methods": sorted(auth_methods)},
+    )
+
+
+async def authenticate_grok(connection: AcpConnection, auth_methods: frozenset[str]) -> str:
+    """Run one headless ``authenticate`` with the best advertised method."""
+    method_id = _select_auth_method(auth_methods)
+    try:
+        future, _ = await connection.request(
+            "authenticate", {"methodId": method_id, "_meta": {"headless": True}}
+        )
+        await future
+    except JsonRpcRemoteError as exc:
+        raise DomainError(
+            ErrorCode.PROVIDER_INCOMPATIBLE,
+            "Grok authentication failed; refresh the sandbox Grok login or XAI_API_KEY",
+            details={
+                "reason": "authentication_failed",
+                "method_id": method_id,
+                "remote_code": exc.code,
+            },
+        ) from exc
+    return method_id
+
+
+async def request_with_authentication(
+    connection: AcpConnection,
+    method: str,
+    params: dict[str, Any],
+    *,
+    auth_methods: frozenset[str],
+) -> Any:
+    """Send ``method``; on ACP ``auth_required`` authenticate once and retry."""
+    future, _ = await connection.request(method, params)
+    try:
+        return await future
+    except JsonRpcRemoteError as exc:
+        if exc.code != ACP_AUTH_REQUIRED:
+            raise
+    method_id = await authenticate_grok(connection, auth_methods)
+    future, _ = await connection.request(method, params)
+    try:
+        return await future
+    except JsonRpcRemoteError as exc:
+        if exc.code != ACP_AUTH_REQUIRED:
+            raise
+        raise DomainError(
+            ErrorCode.PROVIDER_INCOMPATIBLE,
+            "Grok still requires authentication after a headless login",
+            details={
+                "reason": "authentication_failed",
+                "method_id": method_id,
+                "remote_code": exc.code,
+            },
+        ) from exc
 
 
 def validate_grok_initialize(

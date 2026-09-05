@@ -732,6 +732,7 @@ def test_container_match_checks_managed_runtime_configuration(tmp_path: Path) ->
         (HarnessKind.CLAUDE, "/home/agent/.claude", ".credentials.json"),
         (HarnessKind.OPENCODE, "/home/agent/.local/share/opencode", "auth.json"),
         (HarnessKind.PRIME_AGENT, "/home/agent/.prime", "config.json"),
+        (HarnessKind.MUSE, "/home/agent/.config/muse", "auth.json"),
     ],
 )
 def test_seed_provider_auth_copies_only_auth_file(

@@ -166,6 +166,7 @@ def test_default_registry_contains_all_phase7_adapters() -> None:
             HarnessKind.CLAUDE,
             HarnessKind.OPENCODE,
             HarnessKind.PRIME_AGENT,
+            HarnessKind.MUSE,
         }
     )
 

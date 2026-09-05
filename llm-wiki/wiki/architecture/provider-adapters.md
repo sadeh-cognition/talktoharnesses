@@ -7,8 +7,8 @@ audiences:
 tags:
   - type/architecture
   - audience/developer
-last_verified: 2026-08-30
-verified_against_commit: 2920f5820783245bd5b871e61edd44642ebfe56a
+last_verified: 2026-09-05
+verified_against_commit: 92bdf81138628204f7b58df5f1f80545abdbbde3
 ---
 
 # Provider Adapters
@@ -28,6 +28,14 @@ capabilities against the packaged floor through the official HTTP client, with
 the kind's split running in its on-demand Docker sandbox. The
 Cursor gate currently exposes the upstream ACP token-usage gap rather than
 passing it.
+
+Muse Code uses the official MSP v1 command plane over `muse serve`. Its
+self-contained split is `tth-muse`; shared wire models remain in `tth-types`.
+Its Python connection follows Meta's SDK command identities, acknowledgment
+checks, and non-admission retries. Approval delivery shares the first decision's
+outcome across concurrent calls and replay.
+Implementation evidence: `tth-muse/src/tth_muse/harness/`. Protocol fixtures and
+adapter tests: `tth-muse/tests/test_muse.py`.
 
 ## Related
 

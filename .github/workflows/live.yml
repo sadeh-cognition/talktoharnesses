@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       providers:
-        description: Comma-separated providers to run (grok,cursor,codex,claude,opencode,prime_agent) or all
+        description: Comma-separated providers to run (grok,cursor,codex,claude,opencode,prime_agent,muse) or all
         required: true
         default: all
 
@@ -141,3 +141,24 @@ jobs:
         env:
           TALKTOHARNESSES_LIVE_PRIME_AGENT_SANDBOX: "1"
         run: uv run pytest tests/live/test_prime_agent_sandbox_live.py -q --tb=short
+
+  live-muse:
+    name: Live Muse Code
+    if: ${{ inputs.providers == 'all' || contains(inputs.providers, 'muse') }}
+    runs-on: [self-hosted, linux, talktoharnesses-live, muse]
+    environment: live-muse
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: ${{ env.UV_VERSION }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: uv sync --locked --extra django --extra client
+      - name: Build sandbox image
+        run: ./deploy/build-splits.sh latest muse
+      - name: Create/resume gate
+        env:
+          TALKTOHARNESSES_LIVE_MUSE_SANDBOX: "1"
+        run: uv run pytest tests/live/test_muse_sandbox_live.py -q --tb=short

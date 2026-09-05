@@ -39,7 +39,12 @@ from tth_grok.harness.compatibility import (
     GrokReleaseRecord,
     enforce_published_operation,
 )
-from tth_grok.harness.control import initialize_grok, validate_grok_initialize
+from tth_grok.harness.control import (
+    advertised_auth_methods,
+    initialize_grok,
+    request_with_authentication,
+    validate_grok_initialize,
+)
 from tth_grok.harness.normalizer import GrokNormalizer
 from tth_grok.harness.probe import probe_grok
 from tth_grok.runtime.handle import ProcessHandle
@@ -67,6 +72,7 @@ class GrokAdapter:
         self._normalizer = GrokNormalizer()
         self._release: GrokReleaseRecord | None = None
         self._capabilities: HarnessCapabilities | None = None
+        self._auth_methods: frozenset[str] = frozenset()
         self._session: HarnessSession | None = None
         self._event_q: asyncio.Queue[HarnessEvent | HarnessInteractionRequest | None] = (
             asyncio.Queue()
@@ -112,11 +118,12 @@ class GrokAdapter:
         assert self._connection is not None
         await self._initialize(require_load_session=False)
         cwd = request.launch.working_directory or request.configuration.working_directory
-        future, _delivered = await self._connection.request(
+        result = await request_with_authentication(
+            self._connection,
             "session/new",
             {"cwd": cwd, "mcpServers": []},
+            auth_methods=self._auth_methods,
         )
-        result = await future
         session_id = _require_session_id(result)
         self._normalizer.set_session(session_id, resync=False)
         session = HarnessSession(
@@ -138,15 +145,16 @@ class GrokAdapter:
         await self._initialize(require_load_session=True)
         cwd = request.launch.working_directory or request.configuration.working_directory
         self._normalizer.set_session(request.native_session_id, resync=True)
-        future, _delivered = await self._connection.request(
+        result = await request_with_authentication(
+            self._connection,
             "session/load",
             {
                 "sessionId": request.native_session_id,
                 "cwd": cwd,
                 "mcpServers": [],
             },
+            auth_methods=self._auth_methods,
         )
-        result = await future
         session_id = _session_id_or_none(result) or request.native_session_id
         if not session_id:
             raise DomainError(ErrorCode.PROTOCOL_ERROR, "session result missing sessionId")
@@ -338,11 +346,12 @@ class GrokAdapter:
     async def _initialize(self, *, require_load_session: bool = False) -> None:
         assert self._connection is not None
         assert self._release is not None
-        await initialize_grok(
+        result = await initialize_grok(
             self._connection,
             self._release,
             require_load_session=require_load_session,
         )
+        self._auth_methods = advertised_auth_methods(result)
 
     def _validate_initialize_identity(
         self, result: dict[str, Any], *, require_load_session: bool = False

@@ -12,7 +12,11 @@ from uuid import UUID, uuid4
 import pytest
 from tests.runtime.memory_persistence import MemoryPersistence
 
-from talktoharnesses.application.command_processor import CommandProcessor
+from talktoharnesses.application.command_processor import (
+    _MAX_TRANSIENT_STARTUP_ATTEMPTS,
+    _TRANSIENT_STARTUP_ERRORS,
+    CommandProcessor,
+)
 from talktoharnesses.domain import (
     CommandKind,
     CommandStatus,
@@ -27,6 +31,7 @@ from talktoharnesses.domain import (
     start_turn,
     submit_turn,
 )
+from talktoharnesses.domain.enums import TurnStatus
 from talktoharnesses.domain.errors import DomainError
 from talktoharnesses.domain.events import (
     AssistantMessageDeltaPayload,
@@ -36,7 +41,12 @@ from talktoharnesses.domain.events import (
     TurnCompletedPayload,
     TurnFailedPayload,
 )
-from talktoharnesses.domain.models import ConversationHarnessBinding, EditQueuedPayload
+from talktoharnesses.domain.models import (
+    Command,
+    ConversationHarnessBinding,
+    EditQueuedPayload,
+    InterruptPayload,
+)
 from talktoharnesses.providers.adapter import HarnessSession, SteerRequest, TurnRequest
 
 
@@ -851,11 +861,17 @@ async def test_startup_error_settles_command_instead_of_retrying(
     persistence = MemoryPersistence()
     persistence.seed(start_turn(submitted.state, now=now).state if active else submitted.state)
     await persistence.accept_command(submitted.command)
+    # Transient codes get a bounded number of retries; at the cap they settle.
+    attempts = (
+        _MAX_TRANSIENT_STARTUP_ATTEMPTS
+        if isinstance(error, DomainError) and error.code in _TRANSIENT_STARTUP_ERRORS
+        else 1
+    )
     claimed = submitted.command.model_copy(
         update={
             "status": CommandStatus.CLAIMED,
             "worker_id": "worker-1",
-            "attempts": 1,
+            "attempts": attempts,
             "lease_expires_at": now + timedelta(seconds=30),
         }
     )
@@ -974,3 +990,238 @@ async def test_sandbox_preparing_keeps_command_claimed_for_retry() -> None:
     assert stored.status is CommandStatus.CLAIMED
     final = await persistence.get_worker_snapshot(state.conversation.id)
     assert final.queued_turn is not None
+
+
+class _FailingStartRuntime:
+    def __init__(self, error: BaseException, *, delay: float = 0.0) -> None:
+        self.error = error
+        self.delay = delay
+        self.starts = 0
+
+    def get_runtime(self, conversation_id: UUID):
+        return None
+
+    async def ensure_binding_current(self, conversation_id: UUID, state: Any):
+        return None
+
+    async def start(self, **kwargs: Any) -> None:
+        self.starts += 1
+        if self.delay:
+            await asyncio.sleep(self.delay)
+        raise self.error
+
+    async def resume(self, **kwargs: Any) -> None:
+        await self.start(**kwargs)
+
+    async def close(self, conversation_id: UUID, *, reason: str) -> None:
+        return None
+
+
+def _claimed(command: Command, now: datetime, *, attempts: int = 1) -> Command:
+    return command.model_copy(
+        update={
+            "status": CommandStatus.CLAIMED,
+            "worker_id": "worker-1",
+            "attempts": attempts,
+            "lease_expires_at": now + timedelta(seconds=30),
+        }
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("code", sorted(_TRANSIENT_STARTUP_ERRORS, key=lambda c: c.value))
+async def test_transient_startup_error_keeps_command_claimed_below_attempt_cap(
+    code: ErrorCode,
+) -> None:
+    """A split restarting mid-probe must be retried, not fail the user's turn."""
+    now, state = _bound_state()
+    submitted = submit_turn(state, prompt="hello", idempotency_key="k1", now=now)
+    assert submitted.command is not None
+    persistence = MemoryPersistence()
+    persistence.seed(submitted.state)
+    await persistence.accept_command(submitted.command)
+    claimed = _claimed(submitted.command, now, attempts=_MAX_TRANSIENT_STARTUP_ATTEMPTS - 1)
+    persistence.commands[claimed.id] = claimed
+
+    publisher = _Publisher()
+    runtime = _FailingStartRuntime(DomainError(code, "split request failed"))
+    processor = CommandProcessor(persistence, publisher, runtime)  # type: ignore[arg-type]
+    processor._worker_id = "worker-1"  # pyright: ignore[reportPrivateUsage]
+
+    await processor._handle_command(claimed)  # pyright: ignore[reportPrivateUsage]
+    await processor.stop()
+
+    assert persistence.commands[claimed.id].status is CommandStatus.CLAIMED
+    assert publisher.events == []
+    final = await persistence.get_worker_snapshot(state.conversation.id)
+    assert final.queued_turn is not None
+
+
+@pytest.mark.asyncio
+async def test_startup_failure_fails_active_turn_for_non_turn_command() -> None:
+    """INTERRUPT against a runtime that can never start must still terminalize
+    the active turn instead of settling silently and leaving it RUNNING."""
+    now, state = _bound_state()
+    submitted = submit_turn(state, prompt="hello", idempotency_key="k1", now=now)
+    assert submitted.command is not None
+    started = start_turn(submitted.state, now=now)
+    assert started.state.active_turn is not None
+    interrupt = Command(
+        conversation_id=state.conversation.id,
+        kind=CommandKind.INTERRUPT,
+        status=CommandStatus.ACCEPTED,
+        idempotency_key="interrupt-1",
+        payload=InterruptPayload(),
+        created_at=now,
+    )
+    persistence = MemoryPersistence()
+    persistence.seed(started.state)
+    await persistence.accept_command(interrupt)
+    claimed = _claimed(interrupt, now)
+    persistence.commands[claimed.id] = claimed
+
+    publisher = _Publisher()
+    runtime = _FailingStartRuntime(DomainError(ErrorCode.SANDBOX_UNAVAILABLE, "gone"))
+    processor = CommandProcessor(persistence, publisher, runtime)  # type: ignore[arg-type]
+    processor._worker_id = "worker-1"  # pyright: ignore[reportPrivateUsage]
+
+    await processor._handle_command(claimed)  # pyright: ignore[reportPrivateUsage]
+    await processor.stop()
+
+    assert persistence.commands[claimed.id].status is CommandStatus.SETTLED
+    final = await persistence.get_worker_snapshot(state.conversation.id)
+    assert final.active_turn is None
+    failures = [
+        event.payload for event in publisher.events if isinstance(event.payload, TurnFailedPayload)
+    ]
+    assert [failure.turn_id for failure in failures] == [started.state.active_turn.id]
+    assert failures[0].error_code == ErrorCode.SANDBOX_UNAVAILABLE.value
+
+
+@pytest.mark.asyncio
+async def test_startup_failure_fails_waiting_active_turn_and_queued_turn() -> None:
+    """A queued SUBMIT hitting a permanent startup failure must not leave the
+    conversation WAITING with no runtime and no command left to drive it."""
+    now, state = _bound_state()
+    first = submit_turn(state, prompt="active", idempotency_key="a", now=now)
+    started = start_turn(first.state, now=now)
+    assert started.state.active_turn is not None
+    waiting = started.state.model_copy(
+        update={
+            "active_turn": started.state.active_turn.model_copy(
+                update={"status": TurnStatus.WAITING}
+            )
+        }
+    )
+    second = submit_turn(waiting, prompt="queued", idempotency_key="b", now=now)
+    assert second.command is not None
+    assert second.state.queued_turn is not None
+    persistence = MemoryPersistence()
+    persistence.seed(second.state)
+    await persistence.accept_command(second.command)
+    claimed = _claimed(second.command, now)
+    persistence.commands[claimed.id] = claimed
+
+    publisher = _Publisher()
+    runtime = _FailingStartRuntime(DomainError(ErrorCode.SANDBOX_PATH_NOT_MOUNTED, "nope"))
+    processor = CommandProcessor(persistence, publisher, runtime)  # type: ignore[arg-type]
+    processor._worker_id = "worker-1"  # pyright: ignore[reportPrivateUsage]
+
+    await processor._handle_command(claimed)  # pyright: ignore[reportPrivateUsage]
+    await processor.stop()
+
+    assert persistence.commands[claimed.id].status is CommandStatus.SETTLED
+    final = await persistence.get_worker_snapshot(state.conversation.id)
+    assert final.active_turn is None
+    assert final.queued_turn is None
+    assert final.idle_reap_eligible is True
+    failed = {
+        event.payload.turn_id
+        for event in publisher.events
+        if isinstance(event.payload, TurnFailedPayload)
+    }
+    assert failed == {started.state.active_turn.id, second.state.queued_turn.id}
+
+
+@pytest.mark.asyncio
+async def test_startup_failure_cancels_lease_keepalive_before_settling() -> None:
+    """The keepalive must be gone before the settle commit; otherwise a renew
+    tick after the commit fails, cancels the task, and skips the publish."""
+    now, state = _bound_state()
+    submitted = submit_turn(state, prompt="hello", idempotency_key="k1", now=now)
+    assert submitted.command is not None
+    persistence = MemoryPersistence()
+    persistence.seed(submitted.state)
+    await persistence.accept_command(submitted.command)
+    claimed = _claimed(submitted.command, now)
+    persistence.commands[claimed.id] = claimed
+
+    publisher = _Publisher()
+    runtime = _FailingStartRuntime(DomainError(ErrorCode.SANDBOX_UNAVAILABLE, "gone"), delay=0.05)
+    processor = CommandProcessor(
+        persistence,
+        publisher,
+        runtime,  # type: ignore[arg-type]
+        lease_seconds=0.03,
+    )
+    processor._worker_id = "worker-1"  # pyright: ignore[reportPrivateUsage]
+
+    keepalive_alive_at_settle: list[bool] = []
+    original_commit = persistence.commit_turn_batch
+
+    async def observing_commit(*args: Any, **kwargs: Any) -> Any:
+        keepalive_alive_at_settle.append(
+            any(
+                not task.done()
+                for task in asyncio.all_tasks()
+                if (task.get_name() or "").startswith("lease-")
+            )
+        )
+        return await original_commit(*args, **kwargs)
+
+    persistence.commit_turn_batch = observing_commit  # type: ignore[method-assign]
+
+    await processor._handle_command(claimed)  # pyright: ignore[reportPrivateUsage]
+    await processor.stop()
+
+    assert keepalive_alive_at_settle == [False]
+    assert persistence.commands[claimed.id].status is CommandStatus.SETTLED
+    assert any(isinstance(event.payload, TurnFailedPayload) for event in publisher.events)
+
+
+@pytest.mark.asyncio
+async def test_stale_owner_cancels_sibling_tasks_and_refuses_unfenced_writes() -> None:
+    now, state = _bound_state()
+    conversation_id = state.conversation.id
+    persistence = MemoryPersistence()
+    persistence.seed(state)
+    processor = CommandProcessor(persistence, _Publisher(), _Runtime(persistence, _Adapter()))  # type: ignore[arg-type]
+    processor._worker_id = "worker-1"  # pyright: ignore[reportPrivateUsage]
+    processor.set_fence(conversation_id, 7)
+
+    started = asyncio.Event()
+
+    async def in_flight() -> None:
+        started.set()
+        await asyncio.sleep(10)
+
+    sibling_id = uuid4()
+    task = asyncio.create_task(in_flight())
+    processor._command_tasks[sibling_id] = task  # pyright: ignore[reportPrivateUsage]
+    processor._task_conversations[sibling_id] = conversation_id  # pyright: ignore[reportPrivateUsage]
+    await started.wait()
+
+    await processor._on_stale_owner(conversation_id)  # pyright: ignore[reportPrivateUsage]
+
+    assert task.cancelled()
+    with pytest.raises(DomainError) as exc:
+        processor._fence_kwargs(conversation_id)  # pyright: ignore[reportPrivateUsage]
+    assert exc.value.code is ErrorCode.STALE_OWNER
+
+    # A fresh claim installs a new fence and lifts the refusal.
+    processor.set_fence(conversation_id, 8)
+    assert processor._fence_kwargs(conversation_id) == {  # pyright: ignore[reportPrivateUsage]
+        "worker_id": "worker-1",
+        "fence": 8,
+    }
+    await processor.stop()

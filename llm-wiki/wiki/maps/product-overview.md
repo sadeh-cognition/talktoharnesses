@@ -7,8 +7,8 @@ audiences:
 tags:
   - type/map
   - audience/product
-last_verified: 2026-08-21
-verified_against_commit: c996cbcd23b7cbf4f6b4d70422ab17ce715661bf
+last_verified: 2026-09-05
+verified_against_commit: 92bdf81138628204f7b58df5f1f80545abdbbde3
 ---
 
 # Product Overview
@@ -17,7 +17,7 @@ TalkToHarnesses (TTH) gives [library embedders, Django hosts, and remote HTTP cl
 
 ## Capabilities
 
-- [Unified harness adapters](../capabilities/unified-harness-adapters.md) cover Grok, Cursor, Codex, Claude Code, OpenCode, and Prime Agent.
+- [Unified harness adapters](../capabilities/unified-harness-adapters.md) cover Grok, Cursor, Codex, Claude Code, OpenCode, Prime Agent, and Muse Code.
 - [Persistent conversations and turns](../capabilities/persistent-conversations.md) keep canonical transcripts independent of native harness state.
 - [Approvals and structured questions](../capabilities/approvals-and-questions.md) pause turns for human or rule-based answers.
 - [Django HTTP and SSE surface](../capabilities/django-http-sse.md) exposes authenticated APIs and replayable streams.

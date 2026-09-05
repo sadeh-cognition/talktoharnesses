@@ -113,3 +113,20 @@ accepted; `latest_verified` is advisory only.
 ### Notes
 
 - Uses Prime Agent's official JSONL RPC mode. Create, resume, steer, and interrupt are published for the linux live gate.
+
+## Muse Code
+
+- Adapter version: `2026.8.5`
+- Floor: CLI `>= 1.0.3-R2198.1` on linux
+- Latest verified: _none_
+- Models, modes, and efforts are discovered at probe from the installed CLI.
+
+### Adapter capabilities
+
+| Resume | Interrupt | Steer | Multi-interaction | Nested |
+| --- | --- | --- | --- | --- |
+| yes | yes | yes | yes | no |
+
+### Notes
+
+- Uses the official Muse Session Protocol v1 over muse serve. Models come from model/list; mode and effort discovery are not exposed by MSP. Approval-ledger durability errors after resume reproduce with the official SDK on Muse 1.0.3-R2198.1; the live delivery gate fails and latest_verified remains unset.

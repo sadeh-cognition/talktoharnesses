@@ -9,8 +9,8 @@ tags:
   - type/map
   - audience/product
   - audience/developer
-last_verified: 2026-08-30
-verified_against_commit: 78003994d9fe93108ce5a6bc3591ab2e2ef904d9
+last_verified: 2026-09-05
+verified_against_commit: 92bdf81138628204f7b58df5f1f80545abdbbde3
 ---
 
 # Requirements by Status
@@ -18,6 +18,9 @@ verified_against_commit: 78003994d9fe93108ce5a6bc3591ab2e2ef904d9
 Plugin-free delivery view of the public contracts documented in this vault.
 
 ## Partially implemented
+
+- [Resolve approvals and structured questions](../requirements/resolve-approvals-and-structured-questions.md):
+  Muse Code 1.0.3-R2198.1 can fail native approval settlement with a durability-fence error.
 
 - [Report harness token usage](../requirements/report-harness-token-usage.md):
   Cursor Agent does not currently expose token usage through ACP.
@@ -27,7 +30,6 @@ Plugin-free delivery view of the public contracts documented in this vault.
 - [Probe and configure harnesses](../requirements/probe-and-configure-harnesses.md)
 - [Create and manage conversations](../requirements/create-and-manage-conversations.md)
 - [Submit turns and stream events](../requirements/submit-turns-and-stream-events.md)
-- [Resolve approvals and structured questions](../requirements/resolve-approvals-and-structured-questions.md)
 - [Steer, interrupt, and switch harness](../requirements/steer-interrupt-and-switch-harness.md)
 - [Queue and edit prompts](../requirements/queue-and-edit-prompts.md)
 - [Apply approval rules](../requirements/apply-approval-rules.md)

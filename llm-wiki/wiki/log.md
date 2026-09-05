@@ -170,6 +170,34 @@ Entries are appended using `## [YYYY-MM-DD] operation | Title`.
   `bb3d2b755500fc663816d6cbd1a7cd7947a8920b` plus uncommitted floor-and-probe
   compatibility work present in the working tree.
 
+## [2026-09-05] implementation | Muse Code split integration
+
+- Added Muse Code to adapter, compatibility, deployment, and requirement evidence.
+- Inspected baseline `92bdf81138628204f7b58df5f1f80545abdbbde3` plus the Muse Code working-tree changes.
+- Muse uses the official MSP v1 interface in a self-contained split; provider
+  execution remains behind the existing proxy HTTP/SSE contract.
+- Protocol tests use Meta's published SDK conformance transcripts. Live
+  create/resume usage passes; the full gate remains blocked by native Muse
+  approval-ledger durability errors. Direct CLI steering and interruption pass.
+- Core non-live tests pass; coverage remains 90.14%, identical to the untouched
+  baseline and below the existing 91% gate. The repository-wide format check
+  also reports pre-existing files outside the Muse changes.
+
+## [2026-09-05] implementation | Align Muse approval handling with the SDK
+
+- Inspected baseline `92bdf81138628204f7b58df5f1f80545abdbbde3` plus working-tree Muse changes.
+- Matched SDK approval notification/receipt handling, per-connection monotonic
+  UUIDv7 command IDs, acknowledgment identity checks, and bounded retries for
+  explicit overload/backpressure errors with unchanged command identities.
+- Concurrent and replayed answers share the first delivery outcome, including
+  native failures. Protocol tests cover these behaviors and structured questions.
+- Tightened the live gate to reject persisted answer commands with unknown
+  outcomes: interaction counts and completed turns had hidden native failures.
+- Reproduced the same ledger error with Meta's SDK after resuming a completed
+  session outside both TTH and Docker. Fresh-session SDK approvals succeeded
+  on the host and in Docker. The native failure after resume remains unresolved.
+- Muse tests and lint pass; the stricter live gate fails on approval delivery.
+
 ## Related
 
 - [Wiki index](index.md)

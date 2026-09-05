@@ -16,7 +16,10 @@ from tests.unit.remote.test_remote_adapter import (
 from tth_types.split_api import SplitError
 
 from talktoharnesses.application.broker import InProcessCommittedEventBroker
-from talktoharnesses.application.command_processor import CommandProcessor
+from talktoharnesses.application.command_processor import (
+    _MAX_TRANSIENT_STARTUP_ATTEMPTS,
+    CommandProcessor,
+)
 from talktoharnesses.application.service import TalkToHarnessesService
 from talktoharnesses.client import AsyncTalkToHarnessesClient
 from talktoharnesses.django.api import sse
@@ -113,7 +116,11 @@ async def test_startup_failure_reaches_live_and_reconnecting_client(
     service = TalkToHarnessesService(
         persistence, registry, broker, lambda: datetime.now(UTC), runtime
     )
-    processor = CommandProcessor(persistence, broker, runtime)
+    # Short leases so a transient (protocol) failure exhausts its bounded
+    # retries within the test budget instead of waiting out 30s leases.
+    processor = CommandProcessor(
+        persistence, broker, runtime, lease_seconds=0.2, poll_interval=0.02
+    )
 
     async def no_database_connection() -> None:
         pass
@@ -171,7 +178,10 @@ async def test_startup_failure_reaches_live_and_reconnecting_client(
 
         stored = persistence.commands[submitted.command.id]
         assert stored.status is CommandStatus.SETTLED
-        assert stored.attempts == 1
+        # Transport/protocol failures are retried a bounded number of times
+        # before the turn fails; provider errors fail on the first attempt.
+        expected_attempts = _MAX_TRANSIENT_STARTUP_ATTEMPTS if code == "internal_error" else 1
+        assert stored.attempts == expected_attempts
         assert stored.lease_expires_at is None
         turns = persistence.turns[conversation_id]
         assert turns[submitted.command.target_turn_id].status is TurnStatus.FAILED

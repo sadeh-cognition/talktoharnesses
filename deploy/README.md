@@ -14,14 +14,15 @@ from a top-level project directory:
 | claude | `tth-claude` | `tth-claude` | 8114 |
 | opencode | `tth-opencode` | `tth-opencode` | 8115 |
 | prime_agent | `tth-prime-agent` | `tth-prime-agent` | 8116 |
+| muse | `tth-muse` | `tth-muse` | 8117 |
 
-All six expose the identical HTTP+SSE API defined by the shared
+All seven expose the identical HTTP+SSE API defined by the shared
 [`tth-types`](../tth-types) package (`tth_types.split_api`).
 
 ## Building the split images
 
 ```sh
-deploy/build-splits.sh            # all six, tag "latest"
+deploy/build-splits.sh            # all seven, tag "latest"
 deploy/build-splits.sh v1 claude  # one kind, custom tag
 ```
 
@@ -60,7 +61,7 @@ Tuning environment (all optional):
 - `TTH_SANDBOX_ENV_<KIND>` — comma-separated env vars forwarded into that
   kind's container (defaults: `XAI_API_KEY`, `CURSOR_API_KEY`,
   `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `OPENCODE_API_KEY` for their kinds;
-  prime_agent forwards none).
+  Muse forwards `META_API_KEY`; prime_agent forwards none).
 - `TTH_SANDBOX_<KIND>_AUTH_FILE` — optional credential file source, seeded
   into the managed `tth-<kind>-home` volume when that kind's container is
   created. By default TTH uses the kind's conventional host file when present;
@@ -74,6 +75,7 @@ Tuning environment (all optional):
   | claude | `$HOME/.claude/.credentials.json` | `/home/agent/.claude/.credentials.json` |
   | opencode | `$HOME/.local/share/opencode/auth.json` | `/home/agent/.local/share/opencode/auth.json` |
   | prime_agent | `$HOME/.prime/config.json` | `/home/agent/.prime/config.json` |
+  | muse | `$HOME/.config/muse/auth.json` | `/home/agent/.config/muse/auth.json` |
 
 Runtime tuning (all optional):
 
@@ -116,14 +118,14 @@ docker exec -it tth-claude claude login
 
 ## OpenTelemetry
 
-The proxy and all six splits export traces, metrics, and logs by default via
+The proxy and all seven splits export traces, metrics, and logs by default via
 OTLP/HTTP:
 
 - `OTEL_EXPORTER_OTLP_ENDPOINT=false` (or `0`, case-insensitive) disables all
   signals; any other value is the collector endpoint; unset uses the SDK
   default `http://localhost:4318`. Missing SDK/exporter packages with export
   enabled fail startup — opt out or install them.
-- Each split bakes its own `service.name` (`tth-grok` … `tth-prime-agent`,
+- Each split bakes its own `service.name` (`tth-grok` … `tth-muse`,
   overridable per process via `OTEL_SERVICE_NAME`); the proxy reports
   `talktoharnesses`.
 - The proxy always injects the endpoint into sandbox containers (independent

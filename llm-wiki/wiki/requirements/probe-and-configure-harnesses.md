@@ -9,8 +9,8 @@ tags:
   - type/requirement
   - capability/adapters
   - status/implemented
-last_verified: 2026-08-30
-verified_against_commit: 2920f5820783245bd5b871e61edd44642ebfe56a
+last_verified: 2026-09-05
+verified_against_commit: 92bdf81138628204f7b58df5f1f80545abdbbde3
 sources:
   - raw/product/readme.md
   - raw/product/tth-owned-harness-executable-discovery-requirements.md
@@ -28,6 +28,10 @@ An owner can create a named harness of a supported kind, store its configuration
 ## Current behavior
 
 `POST /harnesses` persists an owner-owned `HarnessInstance` with kind, working directory, workspace roots, and optional model, mode, effort, and yolo. The create body and domain configuration reject executable paths. The proxy constructs a `RemoteHarnessAdapter` for every kind and spawns the kind's Docker sandbox on demand when its endpoint is first resolved: a missing image is built locally from the repository's per-kind build context, and the spawned sandbox is recorded in the proxy database (kind, container, image, port, base URL, split token, status) so a restarted proxy reattaches with the persisted token. There is no per-kind enablement configuration and no in-process provider fallback. While a build or boot is still in progress a request fails with the retryable `sandbox_preparing`; unrecoverable sandbox failures surface as `sandbox_unavailable` with a fixed-vocabulary actionable message. The split owns CLI or SDK discovery, provider authentication, compatibility data, and process supervision. `POST /harnesses/{id}/probe` returns `HarnessProbeProjection` including `VersionAdvisory`. Identities below the split-owned floor or on unpublished platforms fail with `provider_incompatible`. Models, modes, and efforts come from the live split. Cursor accepts `model-id[key=value,...]` selectors. `yolo` is fixed at creation. Historical stored JSON containing `executable_path` fails validation and must be recreated.
+
+Muse Code is available as `muse` with a Linux floor of `1.0.3-R2198.1`.
+Probe compares the numeric R-build identity, verifies MSP v1 and durable sessions,
+and queries the live model catalog. Mode and effort lists are empty.
 
 ## Gap
 
@@ -48,6 +52,8 @@ No gap remains against the documented floor-and-probe contract.
 
 ## Implementation evidence
 
+- `tth-muse/src/tth_muse/harness/` (Muse Code MSP integration)
+
 - `src/talktoharnesses/application/service.py` (`create_harness`, `probe_harness`, `get_harness_capabilities`, `get_harness_models`, `get_harness_modes`)
 - `src/talktoharnesses/remote/registry.py` (`build_remote_adapter_registry`)
 - `src/talktoharnesses/remote/sandbox.py` (`SandboxConfig`, `SandboxManager.endpoint`)
@@ -59,6 +65,9 @@ No gap remains against the documented floor-and-probe contract.
 - `src/talktoharnesses/django/api/routes.py`
 
 ## Test evidence
+
+- `tth-muse/tests/test_muse.py`
+- `tests/live/test_muse_sandbox_live.py`
 
 - `tests/unit/remote/test_sandbox_and_registry.py`
 - `tth-*/tests/harness/test_probe.py`

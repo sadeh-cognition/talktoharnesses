@@ -106,24 +106,14 @@ async def test_probe_grok_success_and_error_paths(monkeypatch: pytest.MonkeyPatc
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("auth_methods", "reject_auth", "error_message"),
-    [
-        ((), False, None),
-        (("cached_token",), False, None),
-        (("grok.com",), False, "Grok credentials are unavailable"),
-        (("cached_token",), True, "Grok authentication failed"),
-    ],
-)
+@pytest.mark.parametrize("auth_methods", [(), ("cached_token",), ("grok.com",)])
 async def test_grok_resume_probe_reads_initialize_capability(
     monkeypatch: pytest.MonkeyPatch,
     auth_methods: tuple[str, ...],
-    reject_auth: bool,
-    error_message: str | None,
 ) -> None:
-    process = _FakeAcpProcess(
-        load_session=False, auth_methods=auth_methods, reject_auth=reject_auth
-    )
+    """The probe only reads capabilities; credentials are checked lazily at
+    session start, so advertised auth methods never make the probe fail."""
+    process = _FakeAcpProcess(load_session=False, auth_methods=auth_methods)
     capabilities = HarnessCapabilities(
         kind=HarnessKind.GROK,
         version="1.0.0 (3cd0d0cbce) [stable]",
@@ -153,14 +143,7 @@ async def test_grok_resume_probe_reads_initialize_capability(
         capabilities,
     )
 
-    if error_message:
-        with pytest.raises(DomainError, match=error_message) as exc:
-            await probe
-        assert exc.value.code is ErrorCode.PROVIDER_INCOMPATIBLE
-    else:
-        assert await probe is False
+    assert await probe is False
     methods = [request["method"] for request in process.requests]
-    assert methods == (
-        ["initialize", "authenticate"] if "cached_token" in auth_methods else ["initialize"]
-    )
+    assert methods == ["initialize"]
     assert process.returncode == 0

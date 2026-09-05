@@ -12,6 +12,7 @@ class HarnessKind(StrEnum):
     CLAUDE = "claude"
     OPENCODE = "opencode"
     PRIME_AGENT = "prime_agent"
+    MUSE = "muse"
 
 
 class ConversationStatus(StrEnum):

@@ -921,8 +921,16 @@ class RuntimeManager:
             except DomainError as exc:
                 if exc.code is ErrorCode.OPTIMISTIC_CONFLICT:
                     continue
+                logger.warning(
+                    "session failure event not persisted conversation=%s code=%s",
+                    conversation_id,
+                    exc.code.value,
+                )
                 return
             except Exception:  # noqa: BLE001
+                logger.exception(
+                    "session failure event not persisted conversation=%s", conversation_id
+                )
                 return
 
     async def _commit_process(
@@ -966,10 +974,17 @@ class RuntimeManager:
         configuration: HarnessConfiguration,
         adapter_version: str,
     ) -> LaunchSnapshot:
-        caps = await asyncio.wait_for(
-            plan.adapter.probe(configuration),
-            timeout=self._policy.start_resume_timeout,
-        )
+        if getattr(plan.adapter, "remote", False) is True:
+            # Remote splits budget their own probe and the sandbox reports a
+            # retryable SANDBOX_PREPARING after its prepare grace. A local
+            # timeout of the same length would always fire first and turn a
+            # cold image build into a permanent RUNTIME_TIMEOUT.
+            caps = await plan.adapter.probe(configuration)
+        else:
+            caps = await asyncio.wait_for(
+                plan.adapter.probe(configuration),
+                timeout=self._policy.start_resume_timeout,
+            )
         launch_getter = getattr(plan.adapter, "last_probe_launch", None)
         if callable(launch_getter):
             remote_launch = launch_getter()

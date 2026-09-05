@@ -73,6 +73,27 @@ _RETRYABLE_STARTUP_ERRORS = frozenset(
     }
 )
 
+# Transport failures and startup timeouts are usually transient (a split
+# container restarting, a cold sandbox outliving the probe budget). They get a
+# bounded number of lease-expiry retries before the turn fails for the client.
+_TRANSIENT_STARTUP_ERRORS = frozenset(
+    {
+        ErrorCode.PROTOCOL_ERROR,
+        ErrorCode.RUNTIME_TIMEOUT,
+    }
+)
+_MAX_TRANSIENT_STARTUP_ATTEMPTS = 3
+
+
+def _startup_error_is_retryable(exc: BaseException, command: Command) -> bool:
+    if not isinstance(exc, DomainError):
+        return False
+    if exc.code in _RETRYABLE_STARTUP_ERRORS:
+        return True
+    return (
+        exc.code in _TRANSIENT_STARTUP_ERRORS and command.attempts < _MAX_TRANSIENT_STARTUP_ATTEMPTS
+    )
+
 
 class _FenceCommitKwargs(TypedDict, total=False):
     worker_id: str
@@ -134,8 +155,12 @@ class CommandProcessor:
         # Coordinator disables claims until initial recovery finishes.
         self._claims_enabled = True
         self._fences: dict[UUID, int] = {}
+        # Conversations whose fence was dropped after an ownership loss. Writes
+        # for them must fail closed until a new claim installs a fresh fence.
+        self._lost_fences: set[UUID] = set()
         self._claim_task: asyncio.Task[None] | None = None
         self._command_tasks: dict[UUID, asyncio.Task[None]] = {}
+        self._task_conversations: dict[UUID, UUID] = {}
         self._conv_locks: dict[UUID, asyncio.Lock] = {}
         self._pumps: dict[UUID, asyncio.Task[None]] = {}
         self._batchers: dict[UUID, DeltaBatcher] = {}
@@ -172,6 +197,7 @@ class CommandProcessor:
         if self._command_tasks:
             await asyncio.gather(*self._command_tasks.values(), return_exceptions=True)
         self._command_tasks.clear()
+        self._task_conversations.clear()
         for task in list(self._pumps.values()):
             task.cancel()
         if self._pumps:
@@ -191,9 +217,11 @@ class CommandProcessor:
 
     def set_fence(self, conversation_id: UUID, fence: int) -> None:
         self._fences[conversation_id] = fence
+        self._lost_fences.discard(conversation_id)
 
     def drop_fence(self, conversation_id: UUID) -> None:
-        self._fences.pop(conversation_id, None)
+        if self._fences.pop(conversation_id, None) is not None:
+            self._lost_fences.add(conversation_id)
 
     def ensure_pump(self, conversation_id: UUID) -> None:
         self._ensure_pump(conversation_id)
@@ -203,6 +231,14 @@ class CommandProcessor:
 
     def _fence_kwargs(self, conversation_id: UUID) -> _FenceCommitKwargs:
         fence = self._fences.get(conversation_id)
+        if fence is None and conversation_id in self._lost_fences:
+            # Never fall back to an unfenced write once ownership was lost:
+            # another worker may own the conversation by now.
+            raise DomainError(
+                ErrorCode.STALE_OWNER,
+                "conversation fence was lost",
+                details={"conversation_id": str(conversation_id)},
+            )
         if self._worker_id is None or fence is None:
             return {}
         return {"worker_id": self._worker_id, "fence": fence}
@@ -244,9 +280,10 @@ class CommandProcessor:
                             name=f"cmd-{command.id}",
                         )
                         self._command_tasks[command.id] = task
+                        self._task_conversations[command.id] = command.conversation_id
                         task.add_done_callback(
                             lambda done, command_id=command.id: (
-                                self._command_tasks.pop(command_id, None)
+                                self._forget_command_task(command_id)
                                 if self._command_tasks.get(command_id) is done
                                 else None
                             )
@@ -275,11 +312,35 @@ class CommandProcessor:
                     command.id,
                 )
 
+    def _forget_command_task(self, command_id: UUID) -> None:
+        self._command_tasks.pop(command_id, None)
+        self._task_conversations.pop(command_id, None)
+
     async def _on_stale_owner(self, conversation_id: UUID) -> None:
         await self._quiesce_pump(conversation_id)
         with contextlib.suppress(Exception):
             await self._runtime.close(conversation_id, reason="stale_owner")
         self.drop_fence(conversation_id)
+        await self._cancel_conversation_commands(conversation_id)
+
+    async def _cancel_conversation_commands(self, conversation_id: UUID) -> None:
+        """Stop every other in-flight delivery for a conversation we no longer own.
+
+        A sibling task could otherwise observe a shutdown error from the closed
+        runtime and settle its command after the fence is gone.
+        """
+        current = asyncio.current_task()
+        doomed = [
+            task
+            for command_id, task in list(self._command_tasks.items())
+            if self._task_conversations.get(command_id) == conversation_id
+            and task is not current
+            and not task.done()
+        ]
+        for task in doomed:
+            task.cancel()
+        if doomed:
+            await asyncio.gather(*doomed, return_exceptions=True)
 
     async def _execute_command(self, command: Command) -> None:
         if self._draining:
@@ -353,7 +414,12 @@ class CommandProcessor:
             try:
                 await self._ensure_runtime(state)
             except Exception as exc:
-                if isinstance(exc, DomainError) and exc.code in _RETRYABLE_STARTUP_ERRORS:
+                # Stop renewing before settling: a renew tick landing after
+                # the settle commit fails with "lease not found" and cancels
+                # this task between the durable write and the live publish.
+                await self._cancel_lease_keepalive(lease_task)
+                lease_task = None
+                if _startup_error_is_retryable(exc, command):
                     raise
                 logger.exception("runtime startup failed for command %s", command.id)
                 error = (
@@ -803,7 +869,7 @@ class CommandProcessor:
             err.value,
         )
         code = err.value
-        message = public_message(err)
+        message = public_message(err, details=exc.details if isinstance(exc, DomainError) else None)
         state = await self._persistence.get_worker_snapshot(command.conversation_id)
         now = self._clock()
         result = fail_switch(state, now=now, message=message, error_code=code)
@@ -830,40 +896,50 @@ class CommandProcessor:
         Left CLAIMED, the command would be reclaimed after every lease expiry
         and retried forever against the same permanent sandbox failure; the
         session-failure event is already persisted by the runtime manager, so
-        only the command (and any turn it carries) still needs resolving.
+        only the command and the turns that depended on the runtime still need
+        resolving. Without a runtime the active turn can never progress, so it
+        fails alongside any queued turn this command carried; a non-turn
+        command (interrupt, steer) therefore still produces a client-visible
+        outcome instead of leaving the turn RUNNING or WAITING forever.
         """
         state = await self._persistence.get_worker_snapshot(command.conversation_id)
         base_version = state.conversation.version
         now = self._clock()
-        events: Sequence[ConversationEvent] = ()
-        turn = next(
-            (
-                turn
-                for turn in (state.active_turn, state.queued_turn)
-                if turn is not None and turn.command_id == command.id
-            ),
-            None,
-        )
-        if turn is not None:
+        events: list[ConversationEvent] = []
+        message = public_message(exc.code, details=exc.details)
+        doomed = [
+            turn
+            for turn in (state.active_turn, state.queued_turn)
+            if turn is not None and (turn is state.active_turn or turn.command_id == command.id)
+        ]
+        rows: dict[UUID, Command] = {}
+        for turn in doomed:
             result = fail_turn(
                 state,
                 now=now,
                 turn_id=turn.id,
                 error_code=exc.code.value,
-                message=public_message(exc.code, details=exc.details),
+                message=message,
             )
-            state, events = result.state, result.events
+            state = result.state
+            events.extend(result.events)
+            turn_command = (
+                state.commands.get(turn.command_id) if turn.command_id is not None else None
+            )
+            if turn_command is not None and turn_command.id != command.id:
+                rows[turn_command.id] = self._settled(turn_command, now=now)
         settled = self._settled(state.commands.get(command.id, command), now=now)
+        rows[settled.id] = settled
         commands = dict(state.commands)
-        commands[settled.id] = settled
+        commands.update(rows)
         state = state.model_copy(update={"commands": commands})
         get_observability().record_command(kind=command.kind, outcome="failed")
         committed = await self._persistence.commit_turn_batch(
             command.conversation_id,
             base_version,
             state,
-            events,
-            (settled,),
+            tuple(events),
+            tuple(rows.values()),
             **self._fence_kwargs(command.conversation_id),
         )
         await self._safe_publish(committed, state=state)

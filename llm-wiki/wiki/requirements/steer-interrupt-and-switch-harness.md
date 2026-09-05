@@ -9,8 +9,8 @@ tags:
   - type/requirement
   - capability/adapters
   - status/implemented
-last_verified: 2026-08-29
-verified_against_commit: 47644027875773ba520cbfdd9f978d196a548802
+last_verified: 2026-09-05
+verified_against_commit: 92bdf81138628204f7b58df5f1f80545abdbbde3
 ---
 
 # Steer, Interrupt, and Switch Harness
@@ -36,12 +36,17 @@ No gap remains against adapter-owned capability flags. Nested activity is unpubl
 
 ## Implementation evidence
 
+- `tth-muse/src/tth_muse/harness/` (Muse Code MSP integration)
+
 - `src/talktoharnesses/application/service.py` (`steer`, `interrupt`, `switch_harness`)
 - `src/talktoharnesses/remote/adapter.py`
 - `tth-*/src/tth_*/harness/adapter.py`
 - `tth-*/src/tth_*/harness/compatibility.py`
 
 ## Test evidence
+
+- `tth-muse/tests/test_muse.py`
+- `tests/live/test_muse_sandbox_live.py`
 
 - `tests/e2e/test_phase8_switch_gate.py`
 - `tests/unit/remote/test_remote_adapter.py`

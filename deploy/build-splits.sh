@@ -2,7 +2,7 @@
 # Build every top-level tth-<kind> split service image.
 #
 # Usage: deploy/build-splits.sh [tag] [kind ...]
-#   tag defaults to "latest"; kinds default to all six.
+#   tag defaults to "latest"; kinds default to all seven.
 #
 # UID/GID build args match the invoking user so the executable-ownership
 # check inside the container accepts the installed CLIs, and files written
@@ -14,7 +14,7 @@ TAG="${1:-latest}"
 shift || true
 KINDS=("$@")
 if [ ${#KINDS[@]} -eq 0 ]; then
-    KINDS=(grok cursor codex claude opencode prime-agent)
+    KINDS=(grok cursor codex claude opencode prime-agent muse)
 fi
 
 for kind in "${KINDS[@]}"; do

@@ -17,7 +17,7 @@ def test_render_supported_write_and_check(tmp_path: Path) -> None:
     )
     assert written.returncode == 0, written.stdout + written.stderr
     rendered = output.read_text(encoding="utf-8")
-    for title in ("Grok", "Cursor", "Codex", "Claude Code", "OpenCode", "Prime Agent"):
+    for title in ("Grok", "Cursor", "Codex", "Claude Code", "OpenCode", "Prime Agent", "Muse Code"):
         assert f"## {title}" in rendered
 
     checked = subprocess.run(

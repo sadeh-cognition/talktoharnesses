@@ -16,6 +16,7 @@ SPLITS = (
     ("claude", "tth-claude", "Claude Code"),
     ("opencode", "tth-opencode", "OpenCode"),
     ("prime_agent", "tth-prime-agent", "Prime Agent"),
+    ("muse", "tth-muse", "Muse Code"),
 )
 CAPABILITIES = (
     "supports_resume",

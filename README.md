@@ -2,10 +2,10 @@
 
 TalkToHarnesses (TTH) is the proxy service of a split architecture: a
 persistence-backed asynchronous facade with authenticated HTTP/SSE APIs that
-drives six harness kinds (Grok, Cursor, Codex, Claude Code, OpenCode, Prime
-Agent) through per-kind split services. Each split runs in a Docker sandbox the
-proxy spawns on demand and tracks in its database. Each split lives in
-its own top-level project directory (`tth-grok` … `tth-prime-agent`); shared
+drives seven harness kinds (Grok, Cursor, Codex, Claude Code, OpenCode, Prime
+Agent, Muse Code) through per-kind split services. Each split runs in a Docker
+sandbox the proxy spawns on demand and tracks in its database. Each split lives in
+its own top-level project directory (`tth-grok` … `tth-muse`); shared
 wire schemas live in [`tth-types`](tth-types). See [`deploy/README.md`](deploy/README.md)
 for the canonical deployment and split-runtime guide.
 
