@@ -76,13 +76,13 @@ _RETRYABLE_STARTUP_ERRORS = frozenset(
 # Transport failures and startup timeouts are usually transient (a split
 # container restarting, a cold sandbox outliving the probe budget). They get a
 # bounded number of lease-expiry retries before the turn fails for the client.
-_TRANSIENT_STARTUP_ERRORS = frozenset(
+TRANSIENT_STARTUP_ERRORS = frozenset(
     {
         ErrorCode.PROTOCOL_ERROR,
         ErrorCode.RUNTIME_TIMEOUT,
     }
 )
-_MAX_TRANSIENT_STARTUP_ATTEMPTS = 3
+MAX_TRANSIENT_STARTUP_ATTEMPTS = 3
 
 
 def _startup_error_is_retryable(exc: BaseException, command: Command) -> bool:
@@ -91,7 +91,7 @@ def _startup_error_is_retryable(exc: BaseException, command: Command) -> bool:
     if exc.code in _RETRYABLE_STARTUP_ERRORS:
         return True
     return (
-        exc.code in _TRANSIENT_STARTUP_ERRORS and command.attempts < _MAX_TRANSIENT_STARTUP_ATTEMPTS
+        exc.code in TRANSIENT_STARTUP_ERRORS and command.attempts < MAX_TRANSIENT_STARTUP_ATTEMPTS
     )
 
 
@@ -1202,18 +1202,18 @@ class CommandProcessor:
     ) -> bool:
         async with self._lock_for(conversation_id):
             # Chain from pending batcher state when present so version stays coherent.
+            # One snapshot per batch, not per event: the batcher keeps the base
+            # version of its first add, and flush reloads, re-checks the binding,
+            # and rebases on an optimistic conflict, so a concurrent commit is
+            # caught there.
             state = batcher.state
             if state is None:
                 state = await self._persistence.get_worker_snapshot(conversation_id)
-                base_version = state.conversation.version
-                authoritative = state
-            else:
-                authoritative = await self._persistence.get_worker_snapshot(conversation_id)
-                base_version = authoritative.conversation.version
+            base_version = state.conversation.version
 
             # A stale runtime must never recreate history for a replaced binding.
             managed = managed_runtime or self._runtime.get_runtime(conversation_id)
-            if managed is not None and not self._runtime_matches_binding(managed, authoritative):
+            if managed is not None and not self._runtime_matches_binding(managed, state):
                 await self._close_stale_runtime(conversation_id, managed)
                 return False
 

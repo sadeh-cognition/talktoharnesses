@@ -44,9 +44,7 @@ class _ExcludeOpenTelemetryLogRecords(logging.Filter):
         return not record.name.startswith("opentelemetry")
 
 
-def configure_opentelemetry(
-    service_name: str | None = None, *, log_level: str = "INFO"
-) -> None:
+def configure_opentelemetry(service_name: str | None = None, *, log_level: str = "INFO") -> None:
     """Set up OTLP-exporting tracer, meter, and logger providers."""
     global _telemetry_enabled
     if _telemetry_enabled or telemetry_opted_out():
@@ -78,9 +76,7 @@ def configure_opentelemetry(
             "OTEL_EXPORTER_OTLP_ENDPOINT=false to opt out"
         ) from exc
 
-    resolved_name = (
-        service_name or os.environ.get("OTEL_SERVICE_NAME") or "talktoharnesses"
-    )
+    resolved_name = service_name or os.environ.get("OTEL_SERVICE_NAME") or "talktoharnesses"
     resource = Resource.create({"service.name": resolved_name})
 
     tracer_provider = TracerProvider(resource=resource)

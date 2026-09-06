@@ -16,15 +16,15 @@ from tth_types.errors import DomainError
 
 from talktoharnesses.providers.registry import AdapterRegistry
 from talktoharnesses.remote.adapter import RemoteHarnessAdapter
+from talktoharnesses.remote.docker_ops import container_otlp_endpoint
 from talktoharnesses.remote.registry import build_remote_adapter_registry
 from talktoharnesses.remote.sandbox import (
-    _AUTH_FILE_DEFAULTS,  # pyright: ignore[reportPrivateUsage]
     SandboxConfig,
     SandboxManager,
     SandboxRecordData,
-    _container_otlp_endpoint,  # pyright: ignore[reportPrivateUsage]
     ensure_docker_cli_available,
 )
+from talktoharnesses.remote.sandbox_auth import AUTH_FILE_DEFAULTS
 
 
 class FakeStore:
@@ -518,7 +518,7 @@ def test_config_from_env_empty_mount_roots_mounts_nothing() -> None:
 
 def test_config_from_env_discovers_provider_auth_files(tmp_path: Path) -> None:
     expected: dict[HarnessKind, str] = {}
-    for kind, spec in _AUTH_FILE_DEFAULTS.items():
+    for kind, spec in AUTH_FILE_DEFAULTS.items():
         auth_file = tmp_path / spec.default_relative_path
         auth_file.parent.mkdir(parents=True, exist_ok=True)
         auth_file.write_text(f"test-{kind.value}-auth", encoding="utf-8")
@@ -563,7 +563,7 @@ def test_config_from_env_auth_file_overrides(tmp_path: Path) -> None:
     ],
 )
 def test_container_otlp_endpoint_rewrite(raw: str | None, expected: str) -> None:
-    assert _container_otlp_endpoint(raw) == expected
+    assert container_otlp_endpoint(raw) == expected
 
 
 def test_environment_always_manages_otel_vars(monkeypatch: pytest.MonkeyPatch) -> None:

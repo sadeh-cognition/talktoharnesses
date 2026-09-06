@@ -59,9 +59,7 @@ async def probe_codex(
         runtime_version=runtime_version,
         platform=sys.platform,
     )
-    models, default_efforts = await _discover_models(
-        openai_codex, config.working_directory
-    )
+    models, default_efforts = await _discover_models(openai_codex, config.working_directory)
     capabilities = release.to_harness_capabilities().model_copy(
         update={"models": models, "efforts": default_efforts}
     )

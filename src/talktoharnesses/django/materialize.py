@@ -55,42 +55,72 @@ from talktoharnesses.domain.events import (
 from talktoharnesses.domain.models import Turn, limit_tool_output_tail
 from talktoharnesses.domain.transitions import ConversationState
 
+# Payloads that never change searchable text (title, message text, tool names,
+# arguments, paths, output tails). A batch made only of these skips the
+# O(history) search-document rebuild; the next text-bearing event (message or
+# tool completion, turn end, title change, transcript import) rebuilds it.
+_SEARCH_NEUTRAL_PAYLOADS: tuple[type[object], ...] = (
+    AssistantMessageStartedPayload,
+    AssistantMessageDeltaPayload,
+    ReasoningStartedPayload,
+    ReasoningDeltaPayload,
+    ReasoningCompletedPayload,
+    PlanCreatedPayload,
+    PlanUpdatedPayload,
+    ToolStartedPayload,
+    ToolOutputDeltaPayload,
+    ActivityStartedPayload,
+    ActivityCompletedPayload,
+    UsageUpdatedPayload,
+    CostUpdatedPayload,
+    InteractionRequestedPayload,
+    InteractionDraftUpdatedPayload,
+    InteractionResolvedPayload,
+    TurnStartedPayload,
+)
+
+
+def _touches_search_text(events: Sequence[ConversationEvent]) -> bool:
+    if not events:
+        return True
+    return any(not isinstance(event.payload, _SEARCH_NEUTRAL_PAYLOADS) for event in events)
+
 
 def materialize_projections(
     state: ConversationState,
     events: Sequence[ConversationEvent],
 ) -> None:
-    """Upsert denormalized shell fields and history rows for one commit."""
+    """Upsert history rows for one commit.
+
+    Shell columns on ``ConversationAggregate`` are written by the caller's
+    aggregate store, so only projection rows are touched here. With events,
+    the projection is incremental: every interaction and activity mutation
+    emits an event, so ``_apply_event`` covers them. Without events (snapshot
+    save, transcript import) the full state is synced instead.
+    """
     conversation = state.conversation
     cid = conversation.id
-    try:
-        ConversationAggregate.objects.get(conversation_id=cid)
-    except ConversationAggregate.DoesNotExist:
+    if not ConversationAggregate.objects.filter(conversation_id=cid).exists():
         return
-
-    binding = state.binding
-    pending = any(
-        i.status in {InteractionStatus.PENDING, InteractionStatus.DRAFT}
-        for i in state.interactions.values()
-    )
-    ConversationAggregate.objects.filter(conversation_id=cid).update(
-        title=conversation.display_title,
-        status=conversation.status.value,
-        harness_kind=binding.kind.value if binding else None,
-        model=binding.configuration.model if binding else None,
-        mode=binding.configuration.mode if binding else None,
-        has_pending_interactions=pending,
-        pinned_at=conversation.pinned_at,
-        archived_at=conversation.archived_at,
-        snoozed_until=conversation.snoozed_until,
-        latest_activity_at=conversation.updated_at,
-    )
 
     if state.active_turn is not None:
         _upsert_turn(cid, state.active_turn)
     if state.queued_turn is not None:
         _upsert_turn(cid, state.queued_turn)
 
+    if events:
+        for event in events:
+            _apply_event(cid, event)
+    else:
+        _sync_interactions_and_activities(state)
+
+    sync_active_binding(state)
+    if _touches_search_text(events):
+        _refresh_search_document(_recompute_derived_title(state))
+
+
+def _sync_interactions_and_activities(state: ConversationState) -> None:
+    cid = state.conversation.id
     for interaction in state.interactions.values():
         InteractionRecord.objects.update_or_create(
             interaction_id=interaction.id,
@@ -119,12 +149,6 @@ def materialize_projections(
                 "completed_at": activity.completed_at,
             },
         )
-
-    for event in events:
-        _apply_event(cid, event)
-
-    sync_active_binding(state)
-    _refresh_search_document(_recompute_derived_title(state))
 
 
 def _next_order_index(conversation_id: UUID) -> int:

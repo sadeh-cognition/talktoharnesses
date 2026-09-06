@@ -13,13 +13,7 @@ from tth_types.enums import ErrorCode, HarnessKind
 from tth_types.errors import DomainError
 
 _KIND_EXECUTABLES: dict[HarnessKind, tuple[str, str]] = {
-    HarnessKind.GROK: ("grok", "TALKTOHARNESSES_GROK_EXECUTABLE"),
-    HarnessKind.CURSOR: ("cursor-agent", "TALKTOHARNESSES_CURSOR_EXECUTABLE"),
-    HarnessKind.OPENCODE: ("opencode", "TALKTOHARNESSES_OPENCODE_EXECUTABLE"),
-    HarnessKind.PRIME_AGENT: (
-        "prime-agent",
-        "TALKTOHARNESSES_PRIME_AGENT_EXECUTABLE",
-    ),
+    HarnessKind.PRIME_AGENT: ("prime-agent", "TALKTOHARNESSES_PRIME_AGENT_EXECUTABLE"),
 }
 
 

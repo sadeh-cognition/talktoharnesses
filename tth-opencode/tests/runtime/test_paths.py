@@ -159,10 +159,10 @@ def test_execute_check_uses_effective_ids(owned_python: Path) -> None:
 def test_resolve_kind_executable_uses_env_then_path(
     owned_python: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("TALKTOHARNESSES_GROK_EXECUTABLE", str(owned_python))
-    assert resolve_kind_executable(HarnessKind.GROK) == owned_python.resolve()
+    monkeypatch.setenv("TALKTOHARNESSES_OPENCODE_EXECUTABLE", str(owned_python))
+    assert resolve_kind_executable(HarnessKind.OPENCODE) == owned_python.resolve()
 
-    monkeypatch.delenv("TALKTOHARNESSES_GROK_EXECUTABLE")
+    monkeypatch.delenv("TALKTOHARNESSES_OPENCODE_EXECUTABLE")
 
     def found(_name: str) -> str:
         return str(owned_python)
@@ -171,27 +171,27 @@ def test_resolve_kind_executable_uses_env_then_path(
         "tth_opencode.shared.paths.shutil.which",
         found,
     )
-    assert resolve_kind_executable(HarnessKind.GROK) == owned_python.resolve()
+    assert resolve_kind_executable(HarnessKind.OPENCODE) == owned_python.resolve()
 
 
 def test_resolve_kind_executable_missing_path(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("TALKTOHARNESSES_GROK_EXECUTABLE", raising=False)
+    monkeypatch.delenv("TALKTOHARNESSES_OPENCODE_EXECUTABLE", raising=False)
 
     def missing(_name: str) -> None:
         return None
 
     monkeypatch.setattr("tth_opencode.shared.paths.shutil.which", missing)
     with pytest.raises(DomainError) as exc:
-        resolve_kind_executable(HarnessKind.GROK)
+        resolve_kind_executable(HarnessKind.OPENCODE)
     assert exc.value.code is ErrorCode.INVALID_EXECUTABLE
-    assert "grok" in exc.value.message
+    assert "opencode" in exc.value.message
 
 
 def test_resolve_kind_executable_does_not_fallback_from_invalid_env(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv(
-        "TALKTOHARNESSES_GROK_EXECUTABLE",
+        "TALKTOHARNESSES_OPENCODE_EXECUTABLE",
         str(tmp_path / "missing-grok"),
     )
 
@@ -203,14 +203,14 @@ def test_resolve_kind_executable_does_not_fallback_from_invalid_env(
         fail,
     )
     with pytest.raises(DomainError) as exc:
-        resolve_kind_executable(HarnessKind.GROK)
+        resolve_kind_executable(HarnessKind.OPENCODE)
     assert exc.value.code is ErrorCode.INVALID_EXECUTABLE
 
 
 def test_resolve_kind_executable_does_not_fallback_from_empty_env(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("TALKTOHARNESSES_GROK_EXECUTABLE", "")
+    monkeypatch.setenv("TALKTOHARNESSES_OPENCODE_EXECUTABLE", "")
 
     def fail(_name: str) -> str:
         pytest.fail("PATH fallback must not run")
@@ -220,7 +220,7 @@ def test_resolve_kind_executable_does_not_fallback_from_empty_env(
         fail,
     )
     with pytest.raises(DomainError) as exc:
-        resolve_kind_executable(HarnessKind.GROK)
+        resolve_kind_executable(HarnessKind.OPENCODE)
     assert exc.value.code is ErrorCode.INVALID_EXECUTABLE
 
 

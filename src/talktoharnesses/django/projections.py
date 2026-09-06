@@ -36,8 +36,6 @@ from talktoharnesses.domain.errors import DomainError
 from talktoharnesses.domain.models import (
     ActivityProjection,
     ApprovalRequestPayload,
-    Command,
-    CommandProjection,
     ConversationShell,
     HarnessCapabilities,
     HarnessConfiguration,
@@ -78,9 +76,9 @@ def shell_from_row(row: ConversationAggregate) -> ConversationShell:
 
 
 def _validate_json(model: type[_ModelT], value: object) -> _ModelT:
-    import json
-
-    return model.model_validate_json(json.dumps(value))
+    # Rows hold ``model_dump(mode="json")`` output; lax validation accepts the
+    # serialized forms without re-encoding to JSON text.
+    return model.model_validate(value, strict=False)
 
 
 def _uuid_attr(row: object, name: str) -> UUID:
@@ -190,17 +188,6 @@ def interaction_from_row(row: InteractionRecord) -> InteractionProjection:
         request=request,
         draft=draft,
         created_at=row.created_at,
-    )
-
-
-def command_projection(command: Command) -> CommandProjection:
-    return CommandProjection(
-        id=command.id,
-        kind=command.kind,
-        status=command.status,
-        target_turn_id=command.target_turn_id,
-        idempotency_key=command.idempotency_key,
-        created_at=command.created_at,
     )
 
 

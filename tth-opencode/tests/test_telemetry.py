@@ -63,5 +63,5 @@ def test_configure_hard_fails_without_otel_packages(
 
 
 def test_service_name_matches_package() -> None:
-    # Guards against copy-paste drift across the six split repos.
+    # Guards against copy-paste drift across the split repos.
     assert telemetry._SERVICE_NAME == "tth-opencode"  # pyright: ignore[reportPrivateUsage]

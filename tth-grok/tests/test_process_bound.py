@@ -56,7 +56,7 @@ class SpawnFakeAdapter:
 
     async def probe(self, config: HarnessConfiguration) -> HarnessCapabilities:
         del config
-        return HarnessCapabilities(kind=HarnessKind.GROK, version="1.18.19")
+        return HarnessCapabilities(kind=HarnessKind.GROK, version="1.0.3-R2198.1")
 
     async def start(self, request: StartSessionRequest) -> HarnessSession:
         return HarnessSession(
@@ -79,9 +79,7 @@ class SpawnFakeAdapter:
     async def interrupt(self, session: HarnessSession) -> None:
         del session
 
-    async def answer_interaction(
-        self, session: HarnessSession, answer: InteractionAnswer
-    ) -> None:
+    async def answer_interaction(self, session: HarnessSession, answer: InteractionAnswer) -> None:
         del session, answer
 
     def events(
@@ -174,9 +172,7 @@ async def test_spawn_terminate_and_process_frames(
     names = [name for name, _ in frames]
     assert FRAME_PROCESS in names
     process_frames = [
-        ProcessFrame.model_validate_json(data)
-        for name, data in frames
-        if name == FRAME_PROCESS
+        ProcessFrame.model_validate_json(data) for name, data in frames if name == FRAME_PROCESS
     ]
     kinds = {frame.event.type for frame in process_frames}
     assert "forced_termination" in kinds
@@ -185,3 +181,42 @@ async def test_spawn_terminate_and_process_frames(
     assert final.forced_reason == "test-kill"
     assert names[-1] == FRAME_END
     assert spawn_adapter.handle.returncode is not None
+
+
+async def test_spawn_layers_spec_environment_over_the_parent_environment(
+    tmp_path: Any,
+) -> None:
+    from tth_types.harness import LaunchSnapshot
+
+    from tth_grok.runtime.spec import ProcessSpec
+    from tth_grok.runtime.supervisor import ProcessSupervisor
+
+    marker = tmp_path / "env.txt"
+    launch = LaunchSnapshot(
+        resolved_executable=sys.executable,
+        harness_version="1",
+        working_directory=str(tmp_path),
+        adapter_version="test",
+        capabilities=HarnessCapabilities(kind=HarnessKind.GROK, version="1"),
+    )
+    script = (
+        "import os, pathlib, sys; "
+        f"pathlib.Path({str(marker)!r}).write_text("
+        "os.environ['XDG_CONFIG_HOME'] + '|' + str('PATH' in os.environ))"
+    )
+    spec = ProcessSpec(
+        conversation_id=uuid4(),
+        binding_id=uuid4(),
+        process_id=uuid4(),
+        launch=launch,
+        argv=("-c", script),
+        environment={"XDG_CONFIG_HOME": str(tmp_path / "private-xdg")},
+    )
+
+    handle = await ProcessSupervisor().spawn(spec)
+    try:
+        await asyncio.wait_for(handle.wait(), timeout=30)
+    finally:
+        await handle.close()
+
+    assert marker.read_text() == f"{tmp_path / 'private-xdg'}|True"

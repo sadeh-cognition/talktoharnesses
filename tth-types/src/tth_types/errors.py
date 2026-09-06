@@ -53,16 +53,13 @@ _SAFE_VERSION_VALUE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 .()_\[\]\-]{0,127}$")
 # table fall back to the generic sandbox_unavailable message.
 _SANDBOX_UNAVAILABLE_REASONS: Final[dict[str, str]] = {
     "docker_unavailable": "Docker is not reachable on the TalkToHarnesses host",
-    "image_build_failed": (
-        "sandbox image build failed; check TalkToHarnesses server logs"
-    ),
+    "image_build_failed": ("sandbox image build failed; check TalkToHarnesses server logs"),
     "build_context_missing": (
         "sandbox image is missing and no build context is available; "
         "build it with deploy/build-splits.sh"
     ),
     "auth_file_missing": (
-        "provider credential file for this harness was not found on the "
-        "TalkToHarnesses host"
+        "provider credential file for this harness was not found on the TalkToHarnesses host"
     ),
     "health_timeout": "sandbox container did not become healthy",
     "port_conflict": "sandbox port is already in use on the TalkToHarnesses host",
@@ -72,9 +69,7 @@ _SANDBOX_UNAVAILABLE_REASONS: Final[dict[str, str]] = {
 }
 
 
-def public_message(
-    code: ErrorCode, *, details: Mapping[str, Any] | None = None
-) -> str:
+def public_message(code: ErrorCode, *, details: Mapping[str, Any] | None = None) -> str:
     """Return a short generic message for a stable error code."""
     if code is ErrorCode.PROVIDER_INCOMPATIBLE:
         if details is not None and details.get("reason") in (
@@ -118,13 +113,10 @@ def _version_mismatch_message(details: Mapping[str, Any] | None) -> str | None:
         if not _SAFE_VERSION_VALUE.fullmatch(raw_item):
             return None
         versions.append(raw_item)
-    if not _SAFE_VERSION_VALUE.fullmatch(provider) or not _SAFE_VERSION_VALUE.fullmatch(
-        installed
-    ):
+    if not _SAFE_VERSION_VALUE.fullmatch(provider) or not _SAFE_VERSION_VALUE.fullmatch(installed):
         return None
     return (
-        f"{provider} version {installed} is incompatible; supported versions: "
-        f"{', '.join(versions)}"
+        f"{provider} version {installed} is incompatible; supported versions: {', '.join(versions)}"
     )
 
 

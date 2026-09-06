@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Callable, Coroutine
 
 from tth_types.split_api import FRAME_END
 
@@ -33,7 +33,9 @@ async def _frames(entry: SessionEntry) -> AsyncIterator[bytes]:
 class SessionFrameStream:
     """Async frame iterator with a synchronous Django response closer."""
 
-    def __init__(self, entry: SessionEntry, close_session: Callable[[], Awaitable[None]]) -> None:
+    def __init__(
+        self, entry: SessionEntry, close_session: Callable[[], Coroutine[object, object, None]]
+    ) -> None:
         self._iterator = _frames(entry)
         self._close_session = close_session
         self._loop = asyncio.get_running_loop()
@@ -58,6 +60,6 @@ class SessionFrameStream:
 
 
 def stream_frames(
-    entry: SessionEntry, close_session: Callable[[], Awaitable[None]]
+    entry: SessionEntry, close_session: Callable[[], Coroutine[object, object, None]]
 ) -> SessionFrameStream:
     return SessionFrameStream(entry, close_session)

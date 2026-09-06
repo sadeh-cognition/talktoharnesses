@@ -96,7 +96,7 @@ def configure_opentelemetry(*, log_level: str = "INFO") -> None:
 
     try:
         # Only the splits that ship httpx carry its instrumentation package;
-        # the guard keeps this module identical across all six splits.
+        # the guard keeps this module identical across the splits.
         from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor  # pyright: ignore
     except ImportError:
         pass

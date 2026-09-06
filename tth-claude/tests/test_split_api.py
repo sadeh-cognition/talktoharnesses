@@ -180,7 +180,7 @@ async def test_event_disconnect_closes_split_session(
     created = await _create_session(client, str(tmp_path))
     entry = get_session_store().get(created.session_id)
     entry.queue.put_nowait((FRAME_HARNESS_EVENT, "{}"))
-    response = await client.get(f"/v1/sessions/{created.session_id}/events")
+    response: Any = await client.get(f"/v1/sessions/{created.session_id}/events")
     content: AsyncIterator[bytes] = response.streaming_content
 
     await anext(content)

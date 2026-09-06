@@ -48,8 +48,8 @@ def _frame(*, event: str, data: str, event_id: int | None = None) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _event_frame(event: ConversationEvent) -> str:
-    return _frame(event=event.type, data=event.model_dump_json(), event_id=event.sequence)
+def _event_frame(event: ConversationEvent, data: str) -> str:
+    return _frame(event=event.type, data=data, event_id=event.sequence)
 
 
 def _snapshot_frame(snapshot: ConversationSnapshot) -> str:
@@ -72,16 +72,14 @@ def _keepalive_frame() -> str:
     return ": keepalive\n\n"
 
 
-def _byte_size(event: ConversationEvent) -> int:
-    return len(event.model_dump_json().encode("utf-8"))
-
-
-def _exceeds_caps(events: list[ConversationEvent], *, after: int, high_water: int) -> bool:
+def _exceeds_caps(
+    events: list[ConversationEvent], encoded: list[str], *, after: int, high_water: int
+) -> bool:
     if len(events) > _EVENT_COUNT_LIMIT:
         return True
     total = 0
-    for event in events:
-        size = _byte_size(event)
+    for data in encoded:
+        size = len(data.encode("utf-8"))
         if size > _BYTE_LIMIT or total + size > _BYTE_LIMIT:
             return True
         total += size
@@ -108,8 +106,10 @@ async def _bounded_replay(
                 byte_limit=_BYTE_LIMIT + 1,
             )
         )
-        if not _exceeds_caps(events, after=after, high_water=high_water):
-            frames = [_event_frame(e) for e in events]
+        # Serialize once: the same JSON feeds the byte cap and the frame body.
+        encoded = [event.model_dump_json() for event in events]
+        if not _exceeds_caps(events, encoded, after=after, high_water=high_water):
+            frames = [_event_frame(e, data) for e, data in zip(events, encoded, strict=True)]
             last_sent = events[-1].sequence if events else after
             deleted = any(
                 isinstance(event.payload, ConversationMetadataChangedPayload)

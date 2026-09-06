@@ -27,7 +27,7 @@ SQLite is single-supervisor. PostgreSQL is the multi-worker profile. Harness kin
 Muse Code uses port 8117 and image `tth-muse`. The proxy forwards
 `META_API_KEY` and seeds `~/.config/muse/auth.json` when present;
 `TTH_SANDBOX_MUSE_AUTH_FILE` overrides the source. Deployment evidence:
-`src/talktoharnesses/remote/sandbox.py` and `tth-muse/Dockerfile`.
+`src/talktoharnesses/remote/sandbox.py`, `src/talktoharnesses/remote/sandbox_auth.py`, and `tth-muse/Dockerfile`.
 
 ## Related
 

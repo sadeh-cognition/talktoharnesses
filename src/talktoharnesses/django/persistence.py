@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import json
-from collections.abc import Sequence
+import functools
+from collections.abc import Callable, Coroutine, Sequence
 from datetime import UTC, datetime, timedelta
-from typing import Any, TypeVar, cast
+from typing import Any, TypeVar, cast, overload
 from uuid import UUID, uuid4
 
 from asgiref.sync import sync_to_async
@@ -83,6 +83,7 @@ from talktoharnesses.domain.models import (
     ApprovalRuleScope,
     CanonicalToolResult,
     Command,
+    CommandProjection,
     ConversationDetail,
     ConversationSearchHit,
     ConversationShell,
@@ -140,7 +141,6 @@ from .projections import (
     apply_asc_datetime_cursor,
     apply_desc_datetime_cursor,
     apply_desc_int_cursor,
-    command_projection,
     harness_from_row,
     interaction_from_row,
     message_from_row,
@@ -165,9 +165,45 @@ _RENEWABLE_COMMAND_STATUSES = (
 )
 
 
+_AsyncMethodT = TypeVar("_AsyncMethodT", bound=Callable[..., Coroutine[Any, Any, Any]])
+
+
+@overload
+def _db_thread(target: _AsyncMethodT, /) -> _AsyncMethodT: ...
+
+
+@overload
+def _db_thread(target: str, /) -> Callable[[_AsyncMethodT], _AsyncMethodT]: ...
+
+
+def _db_thread(
+    target: _AsyncMethodT | str, /
+) -> _AsyncMethodT | Callable[[_AsyncMethodT], _AsyncMethodT]:
+    """Run the decorated coroutine's synchronous twin on the DB thread.
+
+    The decorated ``async def`` is a typed signature only (body ``...``); calls are
+    forwarded unchanged to ``self.<twin>`` via ``sync_to_async``. The twin defaults
+    to ``_<name>``; pass a string to name it explicitly.
+    """
+
+    def decorate(method: _AsyncMethodT, twin: str) -> _AsyncMethodT:
+        @functools.wraps(method)
+        async def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
+            sync_twin: Callable[..., Any] = getattr(self, twin)
+            return await sync_to_async(sync_twin, thread_sensitive=True)(*args, **kwargs)
+
+        return cast(_AsyncMethodT, wrapper)
+
+    if isinstance(target, str):
+        return lambda method: decorate(method, target)
+    return decorate(target, "_" + target.__name__)
+
+
 def _json(model: BaseModel) -> dict[str, object]:
     return model.model_dump(mode="json")
 
+
+_SNAPSHOT_READ_ATTEMPTS = 3
 
 _TERMINAL_TURN_STATUSES = (
     TurnStatus.COMPLETED.value,
@@ -181,9 +217,10 @@ ModelT = TypeVar("ModelT", bound=BaseModel)
 
 
 def _load(model: type[ModelT], value: object) -> ModelT:
-    # Strict domain models intentionally accept serialized UUIDs/enums only
-    # through Pydantic's JSON validation path.
-    return model.model_validate_json(json.dumps(value))
+    # Rows hold ``model_dump(mode="json")`` output. Domain models are strict, so
+    # validate in lax mode to accept the serialized UUID/enum/datetime forms
+    # without re-encoding the row to JSON text first.
+    return model.model_validate(value, strict=False)
 
 
 def _insert_events(
@@ -299,11 +336,11 @@ def _rule_domain_from_row(row: ApprovalRuleRecord) -> ApprovalRule:
 
     scope = cast(
         ApprovalRuleScope,
-        TypeAdapter(ApprovalRuleScope).validate_json(json.dumps(row.scope)),
+        TypeAdapter(ApprovalRuleScope).validate_python(row.scope, strict=False),
     )
     matcher = cast(
         ApprovalMatcher,
-        TypeAdapter(ApprovalMatcher).validate_json(json.dumps(row.matcher)),
+        TypeAdapter(ApprovalMatcher).validate_python(row.matcher, strict=False),
     )
     return ApprovalRule(
         id=row.rule_id,
@@ -322,7 +359,7 @@ def _audit_from_row(row: InteractionAuditRecord) -> InteractionAuditProjection:
     scope = (
         cast(
             ApprovalRuleScope,
-            TypeAdapter(ApprovalRuleScope).validate_json(json.dumps(row.rule_scope)),
+            TypeAdapter(ApprovalRuleScope).validate_python(row.rule_scope, strict=False),
         )
         if row.rule_scope is not None
         else None
@@ -330,7 +367,7 @@ def _audit_from_row(row: InteractionAuditRecord) -> InteractionAuditProjection:
     matcher = (
         cast(
             ApprovalMatcher,
-            TypeAdapter(ApprovalMatcher).validate_json(json.dumps(row.rule_matcher)),
+            TypeAdapter(ApprovalMatcher).validate_python(row.rule_matcher, strict=False),
         )
         if row.rule_matcher is not None
         else None
@@ -338,7 +375,7 @@ def _audit_from_row(row: InteractionAuditRecord) -> InteractionAuditProjection:
     action = (
         cast(
             ApprovalAction,
-            TypeAdapter(ApprovalAction).validate_json(json.dumps(row.request_action)),
+            TypeAdapter(ApprovalAction).validate_python(row.request_action, strict=False),
         )
         if row.request_action is not None
         else None
@@ -381,10 +418,8 @@ class DjangoPersistence:
     bridge so Django connections and atomic blocks stay on one worker thread.
     """
 
-    async def get_snapshot(self, conversation_id: UUID, owner_id: str) -> ConversationState:
-        return await sync_to_async(self._get_snapshot, thread_sensitive=True)(
-            conversation_id, owner_id
-        )
+    @_db_thread
+    async def get_snapshot(self, conversation_id: UUID, owner_id: str) -> ConversationState: ...
 
     def _get_snapshot(self, conversation_id: UUID, owner_id: str) -> ConversationState:
         try:
@@ -401,10 +436,8 @@ class DjangoPersistence:
             ) from exc
         return _load(ConversationState, row.state)
 
-    async def get_worker_snapshot(self, conversation_id: UUID) -> ConversationState:
-        return await sync_to_async(self._get_worker_snapshot, thread_sensitive=True)(
-            conversation_id
-        )
+    @_db_thread
+    async def get_worker_snapshot(self, conversation_id: UUID) -> ConversationState: ...
 
     def _get_worker_snapshot(self, conversation_id: UUID) -> ConversationState:
         try:
@@ -426,8 +459,8 @@ class DjangoPersistence:
                 state = state.model_copy(update={"commands": {**state.commands, **overlay}})
         return state
 
-    async def save_snapshot(self, state: ConversationState) -> ConversationState:
-        return await sync_to_async(self._save_snapshot, thread_sensitive=True)(state)
+    @_db_thread
+    async def save_snapshot(self, state: ConversationState) -> ConversationState: ...
 
     @transaction.atomic
     def _save_snapshot(self, state: ConversationState) -> ConversationState:
@@ -448,8 +481,8 @@ class DjangoPersistence:
         materialize_projections(state, ())
         return state
 
-    async def accept_command(self, command: Command) -> Command:
-        return await sync_to_async(self._accept_command, thread_sensitive=True)(command)
+    @_db_thread
+    async def accept_command(self, command: Command) -> Command: ...
 
     @transaction.atomic
     def _accept_command(self, command: Command) -> Command:
@@ -460,16 +493,14 @@ class DjangoPersistence:
         )
         return command if created else _load(Command, row.data)
 
+    @_db_thread
     async def claim_commands(
         self,
         worker_id: str,
         limit: int,
         *,
         lease_duration: float,
-    ) -> Sequence[ClaimedCommand]:
-        return await sync_to_async(self._claim_commands, thread_sensitive=True)(
-            worker_id, limit, lease_duration
-        )
+    ) -> Sequence[ClaimedCommand]: ...
 
     @transaction.atomic
     def _claim_commands(
@@ -554,23 +585,21 @@ class DjangoPersistence:
         row.data = _json(command)
         row.save(update_fields=("lease_expires_at", "data"))
 
+    @_db_thread
     async def update_command(
         self,
         command: Command,
         *,
         worker_id: str | None = None,
         fence: int | None = None,
-    ) -> Command:
-        return await sync_to_async(self._update_command, thread_sensitive=True)(
-            command, worker_id, fence
-        )
+    ) -> Command: ...
 
     @transaction.atomic
     def _update_command(
         self,
         command: Command,
-        worker_id: str | None,
-        fence: int | None,
+        worker_id: str | None = None,
+        fence: int | None = None,
     ) -> Command:
         if worker_id is not None or fence is not None:
             self._require_conversation_owner(command.conversation_id, worker_id, fence)
@@ -601,6 +630,7 @@ class DjangoPersistence:
             fence=fence,
         )
 
+    @_db_thread
     async def commit_turn_batch(
         self,
         conversation_id: UUID,
@@ -611,16 +641,7 @@ class DjangoPersistence:
         *,
         worker_id: str | None = None,
         fence: int | None = None,
-    ) -> Sequence[ConversationEvent]:
-        return await sync_to_async(self._commit_turn_batch, thread_sensitive=True)(
-            conversation_id,
-            expected_version,
-            state,
-            tuple(events),
-            tuple(commands),
-            worker_id,
-            fence,
-        )
+    ) -> Sequence[ConversationEvent]: ...
 
     @transaction.atomic
     def _commit_turn_batch(
@@ -628,25 +649,19 @@ class DjangoPersistence:
         conversation_id: UUID,
         expected_version: int,
         state: ConversationState,
-        events: tuple[ConversationEvent, ...],
-        commands: tuple[Command, ...],
+        events: Sequence[ConversationEvent],
+        commands: Sequence[Command] = (),
         worker_id: str | None = None,
         fence: int | None = None,
-    ) -> tuple[ConversationEvent, ...]:
-        committed = self._commit_runtime_lifecycle(
-            conversation_id,
-            expected_version,
-            state,
-            None,
-            None,
-            events,
-            worker_id=worker_id,
-            fence=fence,
+    ) -> Sequence[ConversationEvent]:
+        committed = self._commit_batch(
+            conversation_id, expected_version, state, events, worker_id=worker_id, fence=fence
         )
         for command in commands:
             self._settle_command(command)
         return committed
 
+    @_db_thread
     async def commit_runtime_lifecycle(
         self,
         conversation_id: UUID,
@@ -658,17 +673,7 @@ class DjangoPersistence:
         *,
         worker_id: str | None = None,
         fence: int | None = None,
-    ) -> Sequence[ConversationEvent]:
-        return await sync_to_async(self._commit_runtime_lifecycle, thread_sensitive=True)(
-            conversation_id,
-            expected_version,
-            state,
-            process,
-            launch_history_entry,
-            tuple(events),
-            worker_id,
-            fence,
-        )
+    ) -> Sequence[ConversationEvent]: ...
 
     @transaction.atomic
     def _commit_runtime_lifecycle(
@@ -678,22 +683,43 @@ class DjangoPersistence:
         state: ConversationState,
         process: ProcessRecord | None,
         launch_history_entry: LaunchSnapshot | None,
-        events: tuple[ConversationEvent, ...],
+        events: Sequence[ConversationEvent],
         worker_id: str | None = None,
         fence: int | None = None,
-    ) -> tuple[ConversationEvent, ...]:
-        try:
-            row = ConversationAggregate.objects.select_for_update().get(
-                conversation_id=conversation_id
-            )
-        except ConversationAggregate.DoesNotExist as exc:
-            raise DomainError(ErrorCode.INVALID_STATE, "conversation not found") from exc
+    ) -> Sequence[ConversationEvent]:
+        return self._commit_batch(
+            conversation_id,
+            expected_version,
+            state,
+            events,
+            process=process,
+            launch_history_entry=launch_history_entry,
+            worker_id=worker_id,
+            fence=fence,
+        )
+
+    def _lock_aggregate_for_commit(
+        self,
+        conversation_id: UUID,
+        expected_version: int,
+        state: ConversationState,
+        events: Sequence[ConversationEvent],
+        worker_id: str | None,
+        fence: int | None,
+    ) -> ConversationAggregate:
+        """Lock the aggregate row and run every optimistic-concurrency check."""
+        row = (
+            ConversationAggregate.objects.select_for_update()
+            .filter(conversation_id=conversation_id)
+            .first()
+        )
+        if row is None:
+            raise DomainError(ErrorCode.INVALID_STATE, "conversation not found")
         self._require_owner_on_row(row, worker_id, fence)
         if row.version != expected_version:
             raise _conflict(expected_version, row.version)
         if state.conversation.id != conversation_id:
             raise DomainError(ErrorCode.INVALID_STATE, "aggregate belongs to another conversation")
-
         expected_sequence = row.next_event_sequence
         for event in events:
             if event.conversation_id != conversation_id or event.sequence != expected_sequence:
@@ -701,7 +727,29 @@ class DjangoPersistence:
             expected_sequence += 1
         if state.conversation.next_event_sequence != expected_sequence:
             raise DomainError(ErrorCode.OPTIMISTIC_CONFLICT, "aggregate sequence conflict")
+        return row
 
+    def _commit_batch(
+        self,
+        conversation_id: UUID,
+        expected_version: int,
+        state: ConversationState,
+        events: Sequence[ConversationEvent],
+        *,
+        commands: Sequence[Command] = (),
+        process: ProcessRecord | None = None,
+        launch_history_entry: LaunchSnapshot | None = None,
+        worker_id: str | None = None,
+        fence: int | None = None,
+    ) -> Sequence[ConversationEvent]:
+        """Shared commit body: OCC checks, aggregate, process/launch, events, projections.
+
+        Must run inside a transaction. ``commands`` are upserted as-is; callers
+        that need progress merging settle them separately via ``_settle_command``.
+        """
+        row = self._lock_aggregate_for_commit(
+            conversation_id, expected_version, state, events, worker_id, fence
+        )
         self._store_aggregate(row, state)
         if process is not None:
             process_row, _ = RuntimeProcess.objects.update_or_create(
@@ -733,21 +781,28 @@ class DjangoPersistence:
             raise DomainError(ErrorCode.INVALID_STATE, "launch history requires a process")
 
         _insert_events(conversation_id, events, state)
+        for command in commands:
+            CommandRecord.objects.update_or_create(
+                command_id=command.id,
+                defaults={
+                    "conversation_id": conversation_id,
+                    "idempotency_key": command.idempotency_key,
+                    **self._command_values(command),
+                },
+            )
         from talktoharnesses.django.materialize import materialize_projections
 
         materialize_projections(state, events)
         return events
 
+    @_db_thread
     async def replay(
         self,
         conversation_id: UUID,
         after_sequence: int,
         event_count_limit: int,
         byte_limit: int,
-    ) -> Sequence[ConversationEvent]:
-        return await sync_to_async(self._replay, thread_sensitive=True)(
-            conversation_id, after_sequence, event_count_limit, byte_limit
-        )
+    ) -> Sequence[ConversationEvent]: ...
 
     def _replay(
         self,
@@ -755,7 +810,7 @@ class DjangoPersistence:
         after_sequence: int,
         event_count_limit: int,
         byte_limit: int,
-    ) -> tuple[ConversationEvent, ...]:
+    ) -> Sequence[ConversationEvent]:
         rows = ConversationEventRecord.objects.filter(
             conversation_id=conversation_id,
             sequence__gt=after_sequence,
@@ -773,6 +828,7 @@ class DjangoPersistence:
             size += encoded_size
         return tuple(events)
 
+    @_db_thread
     async def commit_interaction_request(
         self,
         conversation_id: UUID,
@@ -785,18 +841,7 @@ class DjangoPersistence:
         request_event_sequence: int,
         worker_id: str | None = None,
         fence: int | None = None,
-    ) -> Sequence[ConversationEvent]:
-        return await sync_to_async(self._commit_interaction_request, thread_sensitive=True)(
-            conversation_id,
-            expected_version,
-            state,
-            tuple(events),
-            interaction_id,
-            provider_correlation,
-            request_event_sequence,
-            worker_id,
-            fence,
-        )
+    ) -> Sequence[ConversationEvent]: ...
 
     @transaction.atomic
     def _commit_interaction_request(
@@ -804,19 +849,19 @@ class DjangoPersistence:
         conversation_id: UUID,
         expected_version: int,
         state: ConversationState,
-        events: tuple[ConversationEvent, ...],
+        events: Sequence[ConversationEvent],
+        *,
         interaction_id: UUID,
-        provider_correlation: dict[str, str] | None,
+        provider_correlation: dict[str, str] | None = None,
         request_event_sequence: int,
         worker_id: str | None = None,
         fence: int | None = None,
-    ) -> tuple[ConversationEvent, ...]:
-        committed = self._commit_turn_batch_sync(
+    ) -> Sequence[ConversationEvent]:
+        committed = self._commit_batch(
             conversation_id,
             expected_version,
             state,
             events,
-            (),
             worker_id=worker_id,
             fence=fence,
         )
@@ -826,6 +871,7 @@ class DjangoPersistence:
         )
         return committed
 
+    @_db_thread
     async def commit_interaction_resolution(
         self,
         conversation_id: UUID,
@@ -846,26 +892,7 @@ class DjangoPersistence:
         suppress_answer_command: bool = False,
         worker_id: str | None = None,
         fence: int | None = None,
-    ) -> InteractionResolutionResult:
-        return await sync_to_async(self._commit_interaction_resolution, thread_sensitive=True)(
-            conversation_id,
-            owner_id,
-            expected_version,
-            state,
-            tuple(events),
-            answer,
-            automatic,
-            create_rule,
-            deciding_rule,
-            provider_kind,
-            provider_request_ids,
-            resolution_event_sequence,
-            mark_policy_evaluated,
-            interaction_id,
-            suppress_answer_command,
-            worker_id,
-            fence,
-        )
+    ) -> InteractionResolutionResult: ...
 
     @transaction.atomic
     def _commit_interaction_resolution(
@@ -874,19 +901,20 @@ class DjangoPersistence:
         owner_id: str,
         expected_version: int,
         state: ConversationState,
-        events: tuple[ConversationEvent, ...],
+        events: Sequence[ConversationEvent],
         answer: InteractionAnswer,
-        automatic: bool,
-        create_rule: ApprovalRule | None,
-        deciding_rule: ApprovalRule | None,
-        provider_kind: str | None,
-        provider_request_ids: dict[str, str] | None,
+        *,
+        automatic: bool = False,
+        create_rule: ApprovalRule | None = None,
+        deciding_rule: ApprovalRule | None = None,
+        provider_kind: str | None = None,
+        provider_request_ids: dict[str, str] | None = None,
         resolution_event_sequence: int,
-        mark_policy_evaluated: bool,
-        interaction_id: UUID | None,
-        suppress_answer_command: bool,
-        worker_id: str | None,
-        fence: int | None,
+        mark_policy_evaluated: bool = False,
+        interaction_id: UUID | None = None,
+        suppress_answer_command: bool = False,
+        worker_id: str | None = None,
+        fence: int | None = None,
     ) -> InteractionResolutionResult:
         iid = interaction_id or answer.interaction_id
         existing = InteractionAnswerRecord.objects.filter(interaction_id=iid).first()
@@ -1037,12 +1065,11 @@ class DjangoPersistence:
                 )
 
         if events:
-            self._commit_turn_batch_sync(
+            self._commit_batch(
                 conversation_id,
                 expected_version,
                 state,
                 events,
-                (),
                 worker_id=worker_id,
                 fence=fence,
             )
@@ -1158,6 +1185,7 @@ class DjangoPersistence:
         )
         return audit
 
+    @_db_thread
     async def release_interaction_answer(
         self,
         conversation_id: UUID,
@@ -1169,17 +1197,7 @@ class DjangoPersistence:
         state: ConversationState,
         worker_id: str | None = None,
         fence: int | None = None,
-    ) -> Command:
-        return await sync_to_async(self._release_interaction_answer, thread_sensitive=True)(
-            conversation_id,
-            owner_id,
-            interaction_id,
-            command,
-            expected_version,
-            state,
-            worker_id,
-            fence,
-        )
+    ) -> Command: ...
 
     @transaction.atomic
     def _release_interaction_answer(
@@ -1190,8 +1208,8 @@ class DjangoPersistence:
         command: Command,
         expected_version: int,
         state: ConversationState,
-        worker_id: str | None,
-        fence: int | None,
+        worker_id: str | None = None,
+        fence: int | None = None,
     ) -> Command:
         answer_row = (
             InteractionAnswerRecord.objects.select_for_update()
@@ -1227,15 +1245,12 @@ class DjangoPersistence:
         self._store_aggregate(row, current_state.model_copy(update={"commands": commands}))
         return command
 
+    @_db_thread
     async def get_interaction_resolution_event(
         self,
         conversation_id: UUID,
         interaction_id: UUID,
-    ) -> ConversationEvent:
-        return await sync_to_async(self._get_interaction_resolution_event, thread_sensitive=True)(
-            conversation_id,
-            interaction_id,
-        )
+    ) -> ConversationEvent: ...
 
     def _get_interaction_resolution_event(
         self,
@@ -1262,15 +1277,12 @@ class DjangoPersistence:
             raise DomainError(ErrorCode.INVALID_STATE, "recorded resolution event mismatch")
         return event
 
+    @_db_thread
     async def get_interaction_request_event(
         self,
         conversation_id: UUID,
         interaction_id: UUID,
-    ) -> ConversationEvent:
-        return await sync_to_async(self._get_interaction_request_event, thread_sensitive=True)(
-            conversation_id,
-            interaction_id,
-        )
+    ) -> ConversationEvent: ...
 
     def _get_interaction_request_event(
         self,
@@ -1297,15 +1309,12 @@ class DjangoPersistence:
             raise DomainError(ErrorCode.INVALID_STATE, "recorded request event mismatch")
         return event
 
+    @_db_thread
     async def complete_suppressed_interaction_resolution(
         self,
         interaction_id: UUID,
         published_at: datetime,
-    ) -> bool:
-        return await sync_to_async(
-            self._complete_suppressed_interaction_resolution,
-            thread_sensitive=True,
-        )(interaction_id, published_at)
+    ) -> bool: ...
 
     @transaction.atomic
     def _complete_suppressed_interaction_resolution(
@@ -1341,8 +1350,8 @@ class DjangoPersistence:
             policy_evaluated_at=evaluated_at
         )
 
-    async def list_unevaluated_open_interactions(self) -> Sequence[tuple[UUID, UUID]]:
-        return await sync_to_async(self._list_unevaluated, thread_sensitive=True)()
+    @_db_thread("_list_unevaluated")
+    async def list_unevaluated_open_interactions(self) -> Sequence[tuple[UUID, UUID]]: ...
 
     def _list_unevaluated(self) -> tuple[tuple[UUID, UUID], ...]:
         rows = InteractionRecord.objects.filter(
@@ -1351,8 +1360,8 @@ class DjangoPersistence:
         ).values_list("conversation_id", "interaction_id")
         return tuple((cid, iid) for cid, iid in rows)
 
-    async def list_unreleased_resolutions(self) -> Sequence[tuple[UUID, UUID]]:
-        return await sync_to_async(self._list_unreleased, thread_sensitive=True)()
+    @_db_thread("_list_unreleased")
+    async def list_unreleased_resolutions(self) -> Sequence[tuple[UUID, UUID]]: ...
 
     def _list_unreleased(self) -> tuple[tuple[UUID, UUID], ...]:
         rows = InteractionAnswerRecord.objects.filter(released_at__isnull=True).values_list(
@@ -1360,8 +1369,8 @@ class DjangoPersistence:
         )
         return tuple((cid, iid) for cid, iid in rows if cid is not None)
 
-    async def create_approval_rule(self, rule: ApprovalRule) -> ApprovalRuleProjection:
-        return await sync_to_async(self._create_rule, thread_sensitive=True)(rule)
+    @_db_thread("_create_rule")
+    async def create_approval_rule(self, rule: ApprovalRule) -> ApprovalRuleProjection: ...
 
     def _create_rule(self, rule: ApprovalRule) -> ApprovalRuleProjection:
         ApprovalRuleRecord.objects.create(
@@ -1377,8 +1386,10 @@ class DjangoPersistence:
         )
         return _rule_projection(rule)
 
-    async def get_approval_rule(self, rule_id: UUID, principal_id: str) -> ApprovalRuleProjection:
-        return await sync_to_async(self._get_rule, thread_sensitive=True)(rule_id, principal_id)
+    @_db_thread("_get_rule")
+    async def get_approval_rule(
+        self, rule_id: UUID, principal_id: str
+    ) -> ApprovalRuleProjection: ...
 
     def _get_rule(self, rule_id: UUID, principal_id: str) -> ApprovalRuleProjection:
         row = ApprovalRuleRecord.objects.filter(rule_id=rule_id, principal_id=principal_id).first()
@@ -1386,8 +1397,8 @@ class DjangoPersistence:
             raise not_found("approval rule")
         return _rule_from_row(row)
 
-    async def replace_approval_rule(self, rule: ApprovalRule) -> ApprovalRuleProjection:
-        return await sync_to_async(self._replace_rule, thread_sensitive=True)(rule)
+    @_db_thread("_replace_rule")
+    async def replace_approval_rule(self, rule: ApprovalRule) -> ApprovalRuleProjection: ...
 
     def _replace_rule(self, rule: ApprovalRule) -> ApprovalRuleProjection:
         updated = ApprovalRuleRecord.objects.filter(
@@ -1414,19 +1425,17 @@ class DjangoPersistence:
         if not deleted:
             raise not_found("approval rule")
 
+    @_db_thread("_page_rules")
     async def page_approval_rules(
         self,
         principal_id: str,
         *,
         cursor: str | None = None,
         limit: int = 50,
-    ) -> Page[ApprovalRuleProjection]:
-        return await sync_to_async(self._page_rules, thread_sensitive=True)(
-            principal_id, cursor, limit
-        )
+    ) -> Page[ApprovalRuleProjection]: ...
 
     def _page_rules(
-        self, principal_id: str, cursor: str | None, limit: int
+        self, principal_id: str, cursor: str | None = None, limit: int = 50
     ) -> Page[ApprovalRuleProjection]:
         limit = clamp_page_limit(limit)
         qs = ApprovalRuleRecord.objects.filter(principal_id=principal_id).order_by(
@@ -1441,17 +1450,17 @@ class DjangoPersistence:
             next_cursor = encode_cursor(sort=last.created_at.isoformat(), id=last.rule_id)
         return Page(items=tuple(items), next_cursor=next_cursor)
 
-    async def list_applicable_approval_rules(self, principal_id: str) -> Sequence[ApprovalRule]:
-        return await sync_to_async(self._list_rules, thread_sensitive=True)(principal_id)
+    @_db_thread("_list_rules")
+    async def list_applicable_approval_rules(self, principal_id: str) -> Sequence[ApprovalRule]: ...
 
     def _list_rules(self, principal_id: str) -> tuple[ApprovalRule, ...]:
         rows = ApprovalRuleRecord.objects.filter(principal_id=principal_id)
         return tuple(_rule_domain_from_row(r) for r in rows)
 
+    @_db_thread("_get_audit")
     async def get_interaction_audit(
         self, audit_id: UUID, principal_id: str
-    ) -> InteractionAuditProjection:
-        return await sync_to_async(self._get_audit, thread_sensitive=True)(audit_id, principal_id)
+    ) -> InteractionAuditProjection: ...
 
     def _get_audit(self, audit_id: UUID, principal_id: str) -> InteractionAuditProjection:
         row = InteractionAuditRecord.objects.filter(
@@ -1461,19 +1470,17 @@ class DjangoPersistence:
             raise not_found("interaction audit")
         return _audit_from_row(row)
 
+    @_db_thread("_page_audits")
     async def page_interaction_audits(
         self,
         principal_id: str,
         *,
         cursor: str | None = None,
         limit: int = 50,
-    ) -> Page[InteractionAuditProjection]:
-        return await sync_to_async(self._page_audits, thread_sensitive=True)(
-            principal_id, cursor, limit
-        )
+    ) -> Page[InteractionAuditProjection]: ...
 
     def _page_audits(
-        self, principal_id: str, cursor: str | None, limit: int
+        self, principal_id: str, cursor: str | None = None, limit: int = 50
     ) -> Page[InteractionAuditProjection]:
         limit = clamp_page_limit(limit)
         qs = InteractionAuditRecord.objects.filter(principal_id=principal_id).order_by(
@@ -1488,65 +1495,18 @@ class DjangoPersistence:
             next_cursor = encode_cursor(sort=last.created_at.isoformat(), id=last.audit_id)
         return Page(items=tuple(items), next_cursor=next_cursor)
 
-    def _commit_turn_batch_sync(
-        self,
-        conversation_id: UUID,
-        expected_version: int,
-        state: ConversationState,
-        events: tuple[ConversationEvent, ...],
-        commands: tuple[Command, ...],
-        *,
-        worker_id: str | None = None,
-        fence: int | None = None,
-    ) -> tuple[ConversationEvent, ...]:
-        """Synchronous body shared with commit_turn_batch (must be in a transaction)."""
-        row = (
-            ConversationAggregate.objects.select_for_update()
-            .filter(conversation_id=conversation_id)
-            .first()
-        )
-        if row is None:
-            raise DomainError(ErrorCode.NOT_FOUND, "conversation not found")
-        self._require_owner_on_row(row, worker_id, fence)
-        if row.version != expected_version:
-            raise _conflict(expected_version, row.version)
-        expected_sequence = row.next_event_sequence
-        for event in events:
-            if event.conversation_id != conversation_id or event.sequence != expected_sequence:
-                raise DomainError(ErrorCode.OPTIMISTIC_CONFLICT, "event sequence conflict")
-            expected_sequence += 1
-        if state.conversation.next_event_sequence != expected_sequence:
-            raise DomainError(ErrorCode.OPTIMISTIC_CONFLICT, "aggregate sequence conflict")
-        self._store_aggregate(row, state)
-        _insert_events(conversation_id, events, state)
-        for command in commands:
-            CommandRecord.objects.update_or_create(
-                command_id=command.id,
-                defaults={
-                    "conversation_id": conversation_id,
-                    "idempotency_key": command.idempotency_key,
-                    **self._command_values(command),
-                },
-            )
-        from talktoharnesses.django.materialize import materialize_projections
-
-        materialize_projections(state, events)
-        return events
-
+    @_db_thread
     async def read_retained_handoff(
         self,
         conversation_id: UUID,
         *,
         owner_id: str | None = None,
-    ) -> HandoffDocument:
-        return await sync_to_async(self._read_retained_handoff, thread_sensitive=True)(
-            conversation_id, owner_id
-        )
+    ) -> HandoffDocument: ...
 
     def _read_retained_handoff(
         self,
         conversation_id: UUID,
-        owner_id: str | None,
+        owner_id: str | None = None,
     ) -> HandoffDocument:
         if owner_id is not None:
             self._require_owned_conversation(conversation_id, owner_id)
@@ -1589,14 +1549,12 @@ class DjangoPersistence:
             )
         return HandoffDocument(entries=tuple(sorted(entries, key=handoff_sort_key)))
 
+    @_db_thread
     async def read_retained_export(
         self,
         conversation_id: UUID,
         owner_id: str,
-    ) -> tuple[HandoffDocument, str]:
-        return await sync_to_async(self._read_retained_export, thread_sensitive=True)(
-            conversation_id, owner_id
-        )
+    ) -> tuple[HandoffDocument, str]: ...
 
     @transaction.atomic
     def _read_retained_export(
@@ -1618,6 +1576,7 @@ class DjangoPersistence:
         state = _load(ConversationState, row.state)
         return self._read_retained_handoff(conversation_id, None), state.conversation.display_title
 
+    @_db_thread
     async def commit_transcript_import(
         self,
         state: ConversationState,
@@ -1626,24 +1585,17 @@ class DjangoPersistence:
         *,
         process: ProcessRecord | None = None,
         launch_history_entry: LaunchSnapshot | None = None,
-    ) -> Sequence[ConversationEvent]:
-        return await sync_to_async(self._commit_transcript_import, thread_sensitive=True)(
-            state,
-            handoff,
-            tuple(events),
-            process,
-            launch_history_entry,
-        )
+    ) -> Sequence[ConversationEvent]: ...
 
     @transaction.atomic
     def _commit_transcript_import(
         self,
         state: ConversationState,
         handoff: HandoffDocument,
-        events: tuple[ConversationEvent, ...],
-        process: ProcessRecord | None,
-        launch_history_entry: LaunchSnapshot | None,
-    ) -> tuple[ConversationEvent, ...]:
+        events: Sequence[ConversationEvent],
+        process: ProcessRecord | None = None,
+        launch_history_entry: LaunchSnapshot | None = None,
+    ) -> Sequence[ConversationEvent]:
         cid = state.conversation.id
         if ConversationAggregate.objects.filter(conversation_id=cid).exists():
             raise DomainError(ErrorCode.INVALID_STATE, "conversation already exists")
@@ -1758,10 +1710,8 @@ class DjangoPersistence:
                         order_index=entry.order_index,
                     )
 
-    async def prepare_harness_switch(self, conversation_id: UUID) -> SwitchPreparation:
-        return await sync_to_async(self._prepare_harness_switch, thread_sensitive=True)(
-            conversation_id
-        )
+    @_db_thread
+    async def prepare_harness_switch(self, conversation_id: UUID) -> SwitchPreparation: ...
 
     @transaction.atomic
     def _prepare_harness_switch(self, conversation_id: UUID) -> SwitchPreparation:
@@ -1777,6 +1727,7 @@ class DjangoPersistence:
             handoff=self._read_retained_handoff(conversation_id, None),
         )
 
+    @_db_thread
     async def commit_harness_switch(
         self,
         conversation_id: UUID,
@@ -1789,18 +1740,7 @@ class DjangoPersistence:
         launch_history_entry: LaunchSnapshot | None = None,
         worker_id: str | None = None,
         fence: int | None = None,
-    ) -> Sequence[ConversationEvent]:
-        return await sync_to_async(self._commit_harness_switch, thread_sensitive=True)(
-            conversation_id,
-            expected_version,
-            state,
-            tuple(events),
-            command,
-            process,
-            launch_history_entry,
-            worker_id,
-            fence,
-        )
+    ) -> Sequence[ConversationEvent]: ...
 
     @transaction.atomic
     def _commit_harness_switch(
@@ -1808,13 +1748,13 @@ class DjangoPersistence:
         conversation_id: UUID,
         expected_version: int,
         state: ConversationState,
-        events: tuple[ConversationEvent, ...],
+        events: Sequence[ConversationEvent],
         command: Command,
-        process: ProcessRecord | None,
-        launch_history_entry: LaunchSnapshot | None,
+        process: ProcessRecord | None = None,
+        launch_history_entry: LaunchSnapshot | None = None,
         worker_id: str | None = None,
         fence: int | None = None,
-    ) -> tuple[ConversationEvent, ...]:
+    ) -> Sequence[ConversationEvent]:
         # Binding history follows ``state.binding``: projection materialization
         # closes the previous active row and writes the accepted candidate's.
         committed = self._commit_runtime_lifecycle(
@@ -1863,8 +1803,8 @@ class DjangoPersistence:
         merged = merge_command_progress(_load(Command, row.data), command)
         CommandRecord.objects.filter(command_id=command.id).update(**self._command_values(merged))
 
-    async def get_retention_policy(self, owner_id: str) -> RetentionPolicyProjection:
-        return await sync_to_async(self._get_retention_policy, thread_sensitive=True)(owner_id)
+    @_db_thread
+    async def get_retention_policy(self, owner_id: str) -> RetentionPolicyProjection: ...
 
     def _get_retention_policy(self, owner_id: str) -> RetentionPolicyProjection:
         from talktoharnesses.application.retention import DEFAULT_RETENTION_MONTHS
@@ -1874,16 +1814,14 @@ class DjangoPersistence:
             return RetentionPolicyProjection(months=DEFAULT_RETENTION_MONTHS, updated_at=None)
         return RetentionPolicyProjection(months=row.months, updated_at=row.updated_at)
 
+    @_db_thread
     async def replace_retention_policy(
         self,
         owner_id: str,
         months: int,
         *,
         now: datetime,
-    ) -> RetentionPolicyProjection:
-        return await sync_to_async(self._replace_retention_policy, thread_sensitive=True)(
-            owner_id, months, now
-        )
+    ) -> RetentionPolicyProjection: ...
 
     def _replace_retention_policy(
         self,
@@ -1898,13 +1836,13 @@ class DjangoPersistence:
         )
         return policy
 
+    @_db_thread
     async def preview_retention(
         self,
         owner_id: str,
         *,
         now: datetime,
-    ) -> RetentionPreviewProjection:
-        return await sync_to_async(self._preview_retention, thread_sensitive=True)(owner_id, now)
+    ) -> RetentionPreviewProjection: ...
 
     def _preview_retention(self, owner_id: str, now: datetime) -> RetentionPreviewProjection:
         from talktoharnesses.application.retention import (
@@ -1951,8 +1889,8 @@ class DjangoPersistence:
             waiting_turns=waiting_turns,
         )
 
-    async def list_retention_owner_ids(self) -> Sequence[str]:
-        return await sync_to_async(self._list_retention_owner_ids, thread_sensitive=True)()
+    @_db_thread
+    async def list_retention_owner_ids(self) -> Sequence[str]: ...
 
     def _list_retention_owner_ids(self) -> Sequence[str]:
         return list(
@@ -1961,8 +1899,8 @@ class DjangoPersistence:
             .distinct()
         )
 
-    async def list_cleanup_conversation_ids(self) -> Sequence[tuple[UUID, str]]:
-        return await sync_to_async(self._list_cleanup_conversation_ids, thread_sensitive=True)()
+    @_db_thread
+    async def list_cleanup_conversation_ids(self) -> Sequence[tuple[UUID, str]]: ...
 
     def _list_cleanup_conversation_ids(self) -> Sequence[tuple[UUID, str]]:
         return list(
@@ -1971,14 +1909,12 @@ class DjangoPersistence:
             .values_list("conversation_id", "owner_id")
         )
 
+    @_db_thread
     async def prune_expired_history(
         self,
         conversation_id: UUID,
         cutoff: datetime,
-    ) -> PruneResult | None:
-        return await sync_to_async(self._prune_expired_history, thread_sensitive=True)(
-            conversation_id, cutoff
-        )
+    ) -> PruneResult | None: ...
 
     @transaction.atomic
     def _prune_expired_history(
@@ -2016,7 +1952,7 @@ class DjangoPersistence:
             return None
 
         now = datetime.now(UTC)
-        events: tuple[ConversationEvent, ...] = ()
+        events: Sequence[ConversationEvent] = ()
         if waiting_expired:
             # Cancels the turn's open interactions and settles its command
             # before the answer could reach a session about to be invalidated.
@@ -2215,8 +2151,8 @@ class DjangoPersistence:
         self._store_aggregate(row, state)
         sync_active_binding(state)
 
-    async def purge_soft_deleted(self, now: datetime) -> int:
-        return await sync_to_async(self._purge_soft_deleted, thread_sensitive=True)(now)
+    @_db_thread
+    async def purge_soft_deleted(self, now: datetime) -> int: ...
 
     def _purge_soft_deleted(self, now: datetime) -> int:
         from talktoharnesses.application.retention import months_before
@@ -2497,6 +2433,7 @@ class DjangoPersistence:
         lease_slot = self._worker_lease_slot(worker_id, None)
         WorkerLeaseRecord.objects.filter(slot=lease_slot, worker_id=worker_id).delete()
 
+    @_db_thread
     async def claim_expired_conversations(
         self,
         worker_id: str,
@@ -2504,10 +2441,7 @@ class DjangoPersistence:
         *,
         lease_duration: float,
         trigger: str = RecoveryTrigger.TAKEOVER.value,
-    ) -> Sequence[ConversationOwnership]:
-        return await sync_to_async(self._claim_expired_conversations, thread_sensitive=True)(
-            worker_id, limit, lease_duration, trigger
-        )
+    ) -> Sequence[ConversationOwnership]: ...
 
     @transaction.atomic
     def _claim_expired_conversations(
@@ -2515,7 +2449,7 @@ class DjangoPersistence:
         worker_id: str,
         limit: int,
         lease_duration: float,
-        trigger: str,
+        trigger: str = RecoveryTrigger.TAKEOVER.value,
     ) -> tuple[ConversationOwnership, ...]:
         now = _db_now()
         lease_expires = now + timedelta(seconds=lease_duration)
@@ -2617,15 +2551,13 @@ class DjangoPersistence:
             )
         return tuple(claimed)
 
+    @_db_thread
     async def renew_owned_conversation_leases(
         self,
         worker_id: str,
         *,
         lease_duration: float,
-    ) -> Sequence[LostLease]:
-        return await sync_to_async(self._renew_owned_conversation_leases, thread_sensitive=True)(
-            worker_id, lease_duration
-        )
+    ) -> Sequence[LostLease]: ...
 
     @transaction.atomic
     def _renew_owned_conversation_leases(
@@ -2683,12 +2615,10 @@ class DjangoPersistence:
         row.runtime_lease_expires_at = None
         row.save(update_fields=("runtime_worker_id", "runtime_lease_expires_at"))
 
+    @_db_thread
     async def get_conversation_ownership(
         self, conversation_id: UUID
-    ) -> ConversationOwnership | None:
-        return await sync_to_async(self._get_conversation_ownership, thread_sensitive=True)(
-            conversation_id
-        )
+    ) -> ConversationOwnership | None: ...
 
     def _get_conversation_ownership(self, conversation_id: UUID) -> ConversationOwnership | None:
         row = (
@@ -2707,8 +2637,8 @@ class DjangoPersistence:
             lease_expires_at=row.runtime_lease_expires_at,
         )
 
-    async def has_live_process(self, conversation_id: UUID) -> bool:
-        return await sync_to_async(self._has_live_process, thread_sensitive=True)(conversation_id)
+    @_db_thread
+    async def has_live_process(self, conversation_id: UUID) -> bool: ...
 
     def _has_live_process(self, conversation_id: UUID) -> bool:
         return RuntimeProcess.objects.filter(
@@ -2728,6 +2658,7 @@ class DjangoPersistence:
             attempt_id, result, reason_code, completed_at
         )
 
+    @_db_thread
     async def commit_recovery_batch(
         self,
         conversation_id: UUID,
@@ -2748,26 +2679,7 @@ class DjangoPersistence:
         completed_at: datetime,
         worker_id: str,
         fence: int,
-    ) -> Sequence[ConversationEvent]:
-        return await sync_to_async(self._commit_recovery_batch, thread_sensitive=True)(
-            conversation_id,
-            expected_version,
-            state,
-            tuple(events),
-            tuple(commands),
-            interrupted_turn_id,
-            attempt_id,
-            command_id,
-            turn_id,
-            trigger,
-            observed_delivery_phase,
-            action,
-            result,
-            reason_code,
-            completed_at,
-            worker_id,
-            fence,
-        )
+    ) -> Sequence[ConversationEvent]: ...
 
     @transaction.atomic
     def _commit_recovery_batch(
@@ -2775,8 +2687,8 @@ class DjangoPersistence:
         conversation_id: UUID,
         expected_version: int,
         state: ConversationState,
-        events: tuple[ConversationEvent, ...],
-        commands: tuple[Command, ...],
+        events: Sequence[ConversationEvent],
+        commands: Sequence[Command],
         interrupted_turn_id: UUID | None,
         attempt_id: UUID | None,
         command_id: UUID | None,
@@ -2789,16 +2701,16 @@ class DjangoPersistence:
         completed_at: datetime,
         worker_id: str,
         fence: int,
-    ) -> tuple[ConversationEvent, ...]:
+    ) -> Sequence[ConversationEvent]:
         row = ConversationAggregate.objects.select_for_update().get(conversation_id=conversation_id)
         self._require_owner_on_row(row, worker_id, fence)
         previous = _load(ConversationState, row.state)
-        committed = self._commit_turn_batch_sync(
+        committed = self._commit_batch(
             conversation_id,
             expected_version,
             state,
             events,
-            commands,
+            commands=commands,
             worker_id=worker_id,
             fence=fence,
         )
@@ -2887,15 +2799,13 @@ class DjangoPersistence:
                 details={"attempt_id": str(attempt_id)},
             )
 
+    @_db_thread
     async def get_open_recovery_attempt(
         self,
         conversation_id: UUID,
         worker_id: str,
         fence: int,
-    ) -> RecoveryAttempt | None:
-        return await sync_to_async(self._get_open_recovery_attempt, thread_sensitive=True)(
-            conversation_id, worker_id, fence
-        )
+    ) -> RecoveryAttempt | None: ...
 
     async def update_recovery_attempt(
         self,
@@ -3020,8 +2930,8 @@ class DjangoPersistence:
     # Phase 5 facade projection surface
     # ------------------------------------------------------------------
 
-    async def create_harness(self, harness: HarnessInstance) -> HarnessProjection:
-        return await sync_to_async(self._create_harness, thread_sensitive=True)(harness)
+    @_db_thread
+    async def create_harness(self, harness: HarnessInstance) -> HarnessProjection: ...
 
     @transaction.atomic
     def _create_harness(self, harness: HarnessInstance) -> HarnessProjection:
@@ -3035,22 +2945,20 @@ class DjangoPersistence:
         )
         return harness_from_row(row)
 
+    @_db_thread
     async def list_harnesses(
         self,
         owner_id: str,
         *,
         cursor: str | None = None,
         limit: int = 50,
-    ) -> Page[HarnessProjection]:
-        return await sync_to_async(self._list_harnesses, thread_sensitive=True)(
-            owner_id, cursor, limit
-        )
+    ) -> Page[HarnessProjection]: ...
 
     def _list_harnesses(
         self,
         owner_id: str,
-        cursor: str | None,
-        limit: int,
+        cursor: str | None = None,
+        limit: int = 50,
     ) -> Page[HarnessProjection]:
         page_size = clamp_page_limit(limit)
         qs = HarnessRecord.objects.filter(owner_id=owner_id).order_by("-created_at", "-harness_id")
@@ -3063,8 +2971,8 @@ class DjangoPersistence:
             next_cursor = encode_cursor(sort=last.created_at.isoformat(), id=last.harness_id)
         return Page(items=tuple(harness_from_row(r) for r in items), next_cursor=next_cursor)
 
-    async def get_harness(self, harness_id: UUID, owner_id: str) -> HarnessProjection:
-        return await sync_to_async(self._get_harness, thread_sensitive=True)(harness_id, owner_id)
+    @_db_thread
+    async def get_harness(self, harness_id: UUID, owner_id: str) -> HarnessProjection: ...
 
     def _get_harness(self, harness_id: UUID, owner_id: str) -> HarnessProjection:
         row = HarnessRecord.objects.filter(harness_id=harness_id, owner_id=owner_id).first()
@@ -3096,6 +3004,7 @@ class DjangoPersistence:
             raise DomainError(ErrorCode.HARNESS_IN_USE, "harness has an active turn")
         row.delete()
 
+    @_db_thread
     async def save_harness_probe(
         self,
         harness_id: UUID,
@@ -3103,10 +3012,7 @@ class DjangoPersistence:
         capabilities: HarnessCapabilities,
         *,
         probed_at: datetime,
-    ) -> HarnessProbeProjection:
-        return await sync_to_async(self._save_harness_probe, thread_sensitive=True)(
-            harness_id, owner_id, capabilities, probed_at
-        )
+    ) -> HarnessProbeProjection: ...
 
     @transaction.atomic
     def _save_harness_probe(
@@ -3128,14 +3034,12 @@ class DjangoPersistence:
         row.save(update_fields=("last_probe", "last_probed_at"))
         return probe_from_row(row)
 
+    @_db_thread
     async def get_harness_probe(
         self,
         harness_id: UUID,
         owner_id: str,
-    ) -> HarnessProbeProjection:
-        return await sync_to_async(self._get_harness_probe, thread_sensitive=True)(
-            harness_id, owner_id
-        )
+    ) -> HarnessProbeProjection: ...
 
     def _get_harness_probe(self, harness_id: UUID, owner_id: str) -> HarnessProbeProjection:
         row = HarnessRecord.objects.filter(harness_id=harness_id, owner_id=owner_id).first()
@@ -3143,29 +3047,26 @@ class DjangoPersistence:
             raise not_found("harness")
         return probe_from_row(row)
 
-    async def list_configured_harnesses_for_readiness(self) -> Sequence[HarnessProjection]:
-        return await sync_to_async(
-            self._list_configured_harnesses_for_readiness, thread_sensitive=True
-        )()
+    @_db_thread
+    async def list_configured_harnesses_for_readiness(self) -> Sequence[HarnessProjection]: ...
 
     def _list_configured_harnesses_for_readiness(self) -> Sequence[HarnessProjection]:
         rows = HarnessRecord.objects.order_by("harness_id")
         return tuple(harness_from_row(row) for row in rows)
 
+    @_db_thread
     async def has_fresh_harness_probe(
         self,
         *,
         now: datetime,
         max_age_seconds: int = 300,
-    ) -> bool:
-        return await sync_to_async(self._has_fresh_harness_probe, thread_sensitive=True)(
-            now, max_age_seconds
-        )
+    ) -> bool: ...
 
-    def _has_fresh_harness_probe(self, now: datetime, max_age_seconds: int) -> bool:
+    def _has_fresh_harness_probe(self, now: datetime, max_age_seconds: int = 300) -> bool:
         cutoff = now - timedelta(seconds=max_age_seconds)
         return HarnessRecord.objects.filter(last_probed_at__gt=cutoff).exists()
 
+    @_db_thread
     async def list_conversations(
         self,
         owner_id: str,
@@ -3173,17 +3074,14 @@ class DjangoPersistence:
         cursor: str | None = None,
         limit: int = 50,
         include_archived: bool = True,
-    ) -> Page[ConversationShell]:
-        return await sync_to_async(self._list_conversations, thread_sensitive=True)(
-            owner_id, cursor, limit, include_archived
-        )
+    ) -> Page[ConversationShell]: ...
 
     def _list_conversations(
         self,
         owner_id: str,
-        cursor: str | None,
-        limit: int,
-        include_archived: bool,
+        cursor: str | None = None,
+        limit: int = 50,
+        include_archived: bool = True,
     ) -> Page[ConversationShell]:
         page_size = clamp_page_limit(limit)
         qs = ConversationAggregate.objects.filter(
@@ -3202,6 +3100,7 @@ class DjangoPersistence:
             next_cursor = encode_cursor(sort=last.updated_at.isoformat(), id=last.conversation_id)
         return Page(items=tuple(shell_from_row(r) for r in items), next_cursor=next_cursor)
 
+    @_db_thread
     async def search_conversations(
         self,
         owner_id: str,
@@ -3209,17 +3108,14 @@ class DjangoPersistence:
         *,
         cursor: str | None = None,
         limit: int = 50,
-    ) -> Page[ConversationSearchHit]:
-        return await sync_to_async(self._search_conversations, thread_sensitive=True)(
-            owner_id, query, cursor, limit
-        )
+    ) -> Page[ConversationSearchHit]: ...
 
     def _search_conversations(
         self,
         owner_id: str,
         query: str,
-        cursor: str | None,
-        limit: int,
+        cursor: str | None = None,
+        limit: int = 50,
     ) -> Page[ConversationSearchHit]:
         page_size = clamp_page_limit(limit)
         parsed = parse_search_query(query)
@@ -3355,33 +3251,50 @@ class DjangoPersistence:
             )
         return Page(items=tuple(hits), next_cursor=next_cursor)
 
+    @_db_thread
     async def get_conversation_snapshot(
         self,
         conversation_id: UUID,
         owner_id: str,
         *,
         include_deleted: bool = False,
-    ) -> ConversationSnapshot:
-        return await sync_to_async(self._get_conversation_snapshot, thread_sensitive=True)(
-            conversation_id, owner_id, include_deleted
-        )
+    ) -> ConversationSnapshot: ...
 
-    @transaction.atomic
     def _get_conversation_snapshot(
         self,
         conversation_id: UUID,
         owner_id: str,
-        include_deleted: bool,
+        include_deleted: bool = False,
     ) -> ConversationSnapshot:
-        query = ConversationAggregate.objects.select_for_update().filter(
+        """Read a consistent snapshot without taking the aggregate write lock.
+
+        Projection rows are written in the same transaction as the aggregate, so a
+        commit landing between the aggregate read and the projection reads would
+        return rows newer than ``sequence``. Detect that by re-reading the sequence
+        afterwards and retry; commits are short, so a retry is rare.
+        """
+        query = ConversationAggregate.objects.filter(
             conversation_id=conversation_id,
             owner_id=owner_id,
         )
         if not include_deleted:
             query = query.filter(deleted_at__isnull=True)
-        row = query.first()
-        if row is None:
-            raise not_found("conversation")
+        for _ in range(_SNAPSHOT_READ_ATTEMPTS):
+            row = query.first()
+            if row is None:
+                raise not_found("conversation")
+            snapshot = self._build_conversation_snapshot(row)
+            current = query.values_list("version", "next_event_sequence").first()
+            if current == (row.version, row.next_event_sequence):
+                return snapshot
+        with transaction.atomic():
+            row = query.select_for_update().first()
+            if row is None:
+                raise not_found("conversation")
+            return self._build_conversation_snapshot(row)
+
+    def _build_conversation_snapshot(self, row: ConversationAggregate) -> ConversationSnapshot:
+        conversation_id = row.conversation_id
         state = _load(ConversationState, row.state)
         high_water = max(0, row.next_event_sequence - 1)
 
@@ -3430,11 +3343,11 @@ class DjangoPersistence:
         if state.active_turn is not None and state.active_turn.command_id is not None:
             cmd = state.commands.get(state.active_turn.command_id)
             if cmd is not None:
-                active_command = command_projection(cmd)
+                active_command = CommandProjection.from_command(cmd)
         elif state.queued_turn is not None and state.queued_turn.command_id is not None:
             cmd = state.commands.get(state.queued_turn.command_id)
             if cmd is not None:
-                active_command = command_projection(cmd)
+                active_command = CommandProjection.from_command(cmd)
 
         detail = ConversationDetail(
             conversation=state.conversation,
@@ -3452,22 +3365,20 @@ class DjangoPersistence:
         )
         return ConversationSnapshot(sequence=high_water, detail=detail)
 
+    @_db_thread
     async def get_high_water_sequence(
         self,
         conversation_id: UUID,
         owner_id: str,
         *,
         include_deleted: bool = False,
-    ) -> int:
-        return await sync_to_async(self._get_high_water_sequence, thread_sensitive=True)(
-            conversation_id, owner_id, include_deleted
-        )
+    ) -> int: ...
 
     def _get_high_water_sequence(
         self,
         conversation_id: UUID,
         owner_id: str,
-        include_deleted: bool,
+        include_deleted: bool = False,
     ) -> int:
         query = ConversationAggregate.objects.filter(
             conversation_id=conversation_id,
@@ -3480,6 +3391,7 @@ class DjangoPersistence:
             raise not_found("conversation")
         return max(0, row.next_event_sequence - 1)
 
+    @_db_thread
     async def page_turns(
         self,
         conversation_id: UUID,
@@ -3487,17 +3399,14 @@ class DjangoPersistence:
         *,
         cursor: str | None = None,
         limit: int = 50,
-    ) -> Page[TurnProjection]:
-        return await sync_to_async(self._page_turns, thread_sensitive=True)(
-            conversation_id, owner_id, cursor, limit
-        )
+    ) -> Page[TurnProjection]: ...
 
     def _page_turns(
         self,
         conversation_id: UUID,
         owner_id: str,
-        cursor: str | None,
-        limit: int,
+        cursor: str | None = None,
+        limit: int = 50,
     ) -> Page[TurnProjection]:
         self._require_owned_conversation(conversation_id, owner_id)
         page_size = clamp_page_limit(limit)
@@ -3513,6 +3422,7 @@ class DjangoPersistence:
             next_cursor = encode_cursor(sort=str(last.order_index), id=last.turn_id)
         return Page(items=tuple(turn_from_row(r) for r in items), next_cursor=next_cursor)
 
+    @_db_thread
     async def page_messages(
         self,
         conversation_id: UUID,
@@ -3520,17 +3430,14 @@ class DjangoPersistence:
         *,
         cursor: str | None = None,
         limit: int = 50,
-    ) -> Page[MessageProjection]:
-        return await sync_to_async(self._page_messages, thread_sensitive=True)(
-            conversation_id, owner_id, cursor, limit
-        )
+    ) -> Page[MessageProjection]: ...
 
     def _page_messages(
         self,
         conversation_id: UUID,
         owner_id: str,
-        cursor: str | None,
-        limit: int,
+        cursor: str | None = None,
+        limit: int = 50,
     ) -> Page[MessageProjection]:
         self._require_owned_conversation(conversation_id, owner_id)
         page_size = clamp_page_limit(limit)
@@ -3546,6 +3453,7 @@ class DjangoPersistence:
             next_cursor = encode_cursor(sort=last.created_at.isoformat(), id=last.message_id)
         return Page(items=tuple(message_from_row(r) for r in items), next_cursor=next_cursor)
 
+    @_db_thread
     async def page_tools(
         self,
         conversation_id: UUID,
@@ -3553,17 +3461,14 @@ class DjangoPersistence:
         *,
         cursor: str | None = None,
         limit: int = 50,
-    ) -> Page[ToolProjection]:
-        return await sync_to_async(self._page_tools, thread_sensitive=True)(
-            conversation_id, owner_id, cursor, limit
-        )
+    ) -> Page[ToolProjection]: ...
 
     def _page_tools(
         self,
         conversation_id: UUID,
         owner_id: str,
-        cursor: str | None,
-        limit: int,
+        cursor: str | None = None,
+        limit: int = 50,
     ) -> Page[ToolProjection]:
         self._require_owned_conversation(conversation_id, owner_id)
         page_size = clamp_page_limit(limit)
@@ -3579,6 +3484,7 @@ class DjangoPersistence:
             next_cursor = encode_cursor(sort=str(last.order_index), id=last.tool_id)
         return Page(items=tuple(tool_from_row(r) for r in items), next_cursor=next_cursor)
 
+    @_db_thread
     async def page_plans(
         self,
         conversation_id: UUID,
@@ -3586,17 +3492,14 @@ class DjangoPersistence:
         *,
         cursor: str | None = None,
         limit: int = 50,
-    ) -> Page[PlanProjection]:
-        return await sync_to_async(self._page_plans, thread_sensitive=True)(
-            conversation_id, owner_id, cursor, limit
-        )
+    ) -> Page[PlanProjection]: ...
 
     def _page_plans(
         self,
         conversation_id: UUID,
         owner_id: str,
-        cursor: str | None,
-        limit: int,
+        cursor: str | None = None,
+        limit: int = 50,
     ) -> Page[PlanProjection]:
         self._require_owned_conversation(conversation_id, owner_id)
         page_size = clamp_page_limit(limit)
@@ -3612,6 +3515,7 @@ class DjangoPersistence:
             next_cursor = encode_cursor(sort=str(last.order_index), id=last.plan_id)
         return Page(items=tuple(plan_from_row(r) for r in items), next_cursor=next_cursor)
 
+    @_db_thread
     async def page_activity(
         self,
         conversation_id: UUID,
@@ -3619,17 +3523,14 @@ class DjangoPersistence:
         *,
         cursor: str | None = None,
         limit: int = 50,
-    ) -> Page[ActivityProjection]:
-        return await sync_to_async(self._page_activity, thread_sensitive=True)(
-            conversation_id, owner_id, cursor, limit
-        )
+    ) -> Page[ActivityProjection]: ...
 
     def _page_activity(
         self,
         conversation_id: UUID,
         owner_id: str,
-        cursor: str | None,
-        limit: int,
+        cursor: str | None = None,
+        limit: int = 50,
     ) -> Page[ActivityProjection]:
         self._require_owned_conversation(conversation_id, owner_id)
         page_size = clamp_page_limit(limit)
@@ -3645,6 +3546,7 @@ class DjangoPersistence:
             next_cursor = encode_cursor(sort=last.created_at.isoformat(), id=last.activity_id)
         return Page(items=tuple(activity_from_row(r) for r in items), next_cursor=next_cursor)
 
+    @_db_thread
     async def page_pending_interactions(
         self,
         conversation_id: UUID,
@@ -3652,17 +3554,14 @@ class DjangoPersistence:
         *,
         cursor: str | None = None,
         limit: int = 50,
-    ) -> Page[InteractionProjection]:
-        return await sync_to_async(self._page_pending_interactions, thread_sensitive=True)(
-            conversation_id, owner_id, cursor, limit
-        )
+    ) -> Page[InteractionProjection]: ...
 
     def _page_pending_interactions(
         self,
         conversation_id: UUID,
         owner_id: str,
-        cursor: str | None,
-        limit: int,
+        cursor: str | None = None,
+        limit: int = 50,
     ) -> Page[InteractionProjection]:
         self._require_owned_conversation(conversation_id, owner_id)
         page_size = clamp_page_limit(limit)
@@ -3679,6 +3578,7 @@ class DjangoPersistence:
             next_cursor = encode_cursor(sort=last.created_at.isoformat(), id=last.interaction_id)
         return Page(items=tuple(interaction_from_row(r) for r in items), next_cursor=next_cursor)
 
+    @_db_thread
     async def commit_facade_mutation(
         self,
         conversation_id: UUID,
@@ -3688,16 +3588,7 @@ class DjangoPersistence:
         events: Sequence[ConversationEvent],
         commands: Sequence[Command] = (),
         interaction_answers: Sequence[InteractionAnswer] = (),
-    ) -> Sequence[ConversationEvent]:
-        return await sync_to_async(self._commit_facade_mutation, thread_sensitive=True)(
-            conversation_id,
-            owner_id,
-            expected_version,
-            state,
-            tuple(events),
-            tuple(commands),
-            tuple(interaction_answers),
-        )
+    ) -> Sequence[ConversationEvent]: ...
 
     @transaction.atomic
     def _commit_facade_mutation(
@@ -3706,10 +3597,10 @@ class DjangoPersistence:
         owner_id: str,
         expected_version: int,
         state: ConversationState,
-        events: tuple[ConversationEvent, ...],
-        commands: tuple[Command, ...],
-        interaction_answers: tuple[InteractionAnswer, ...],
-    ) -> tuple[ConversationEvent, ...]:
+        events: Sequence[ConversationEvent],
+        commands: Sequence[Command] = (),
+        interaction_answers: Sequence[InteractionAnswer] = (),
+    ) -> Sequence[ConversationEvent]:
         row = (
             ConversationAggregate.objects.select_for_update()
             .filter(

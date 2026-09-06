@@ -7,8 +7,8 @@ audiences:
 tags:
   - type/decision
   - audience/developer
-last_verified: 2026-08-30
-verified_against_commit: 2920f5820783245bd5b871e61edd44642ebfe56a
+last_verified: 2026-09-06
+verified_against_commit: 1655a774b7b6f7f88b56d75497277dadcaa10c30
 sources:
   - raw/product/split-service-runtime-ownership.md
 ---
@@ -34,6 +34,11 @@ The monolith was split at the `HarnessAdapter` seam in commit `4764402`.
   the split API bodies/frames. Non-schema code shared between splits (ACP
   JSON-RPC machinery, the process supervisor, path checks) is duplicated into
   each split that needs it; a second shared package was explicitly rejected.
+  `scripts/check_split_drift.py` (run by the static CI gate) diffs every
+  vendored module across the splits after normalizing the per-split package,
+  kind, and executable tokens, so the copies cannot drift silently.
+  `tth-prime-agent` speaks JSONL rather than ACP JSON-RPC and vendors only the
+  frame decoder from the ACP package.
 
 ## Consequences and accepted trade-offs
 

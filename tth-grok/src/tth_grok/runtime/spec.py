@@ -23,3 +23,5 @@ class ProcessSpec(BaseModel):
     process_id: UUID
     launch: LaunchSnapshot
     argv: tuple[str, ...] = Field(default_factory=tuple)
+    # Extra environment for the child, layered over the split's own environment.
+    environment: dict[str, str] = Field(default_factory=dict)

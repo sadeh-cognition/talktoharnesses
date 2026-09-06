@@ -169,9 +169,10 @@ class ProcessSupervisor:
         program = spec.launch.resolved_executable
         args = list(spec.argv)
         cwd = spec.launch.working_directory
+        env = {**os.environ, **spec.environment} if spec.environment else None
 
         if sys.platform == "win32":
-            return await self._create_process_windows(program, args, cwd)
+            return await self._create_process_windows(program, args, cwd, env)
         process = await asyncio.create_subprocess_exec(
             program,
             *args,
@@ -179,6 +180,7 @@ class ProcessSupervisor:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=cwd,
+            env=env,
             start_new_session=True,
         )
         return process, None
@@ -188,6 +190,7 @@ class ProcessSupervisor:
         program: str,
         args: list[str],
         cwd: str,
+        env: dict[str, str] | None = None,
     ) -> tuple[asyncio.subprocess.Process, object]:
         """Create suspended process, attach kill-on-close Job Object, resume.
 
@@ -213,6 +216,7 @@ class ProcessSupervisor:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=cwd,
+            env=env,
             creationflags=creationflags,
         )
         job: object | None = None

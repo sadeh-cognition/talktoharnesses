@@ -69,12 +69,15 @@ def test_xai_session_notification_ignores_non_terminal_updates() -> None:
     normalizer = GrokNormalizer()
     normalizer.set_session("sess-1")
 
-    assert normalizer.on_xai_session_notification(
-        {
-            "sessionId": "sess-1",
-            "update": {"sessionUpdate": "model_changed", "model_id": "grok"},
-        }
-    ) == []
+    assert (
+        normalizer.on_xai_session_notification(
+            {
+                "sessionId": "sess-1",
+                "update": {"sessionUpdate": "model_changed", "model_id": "grok"},
+            }
+        )
+        == []
+    )
 
 
 def test_message_stream_and_terminal() -> None:

@@ -49,17 +49,6 @@ from talktoharnesses.domain.transitions import (
 logger = logging.getLogger(__name__)
 
 
-def _command_projection(command: Command) -> CommandProjection:
-    return CommandProjection(
-        id=command.id,
-        kind=command.kind,
-        status=command.status,
-        target_turn_id=command.target_turn_id,
-        idempotency_key=command.idempotency_key,
-        created_at=command.created_at,
-    )
-
-
 class InteractionBroker:
     """Single owner of interaction commit, rule evaluation, and answer release."""
 
@@ -188,7 +177,7 @@ class InteractionBroker:
         existing = self._find_answer_command(state, interaction_id)
         if interaction_id in state.answers and not state.answers[interaction_id].is_draft:
             if existing is not None:
-                return _command_projection(existing)
+                return CommandProjection.from_command(existing)
             await self._publish_resolution(conversation_id, interaction_id)
             state = await self._persistence.get_snapshot(conversation_id, owner_id)
             return await self._release_for(conversation_id, owner_id, interaction_id, state)
@@ -223,7 +212,7 @@ class InteractionBroker:
             state = await self._persistence.get_snapshot(conversation_id, owner_id)
             existing = self._find_answer_command(state, interaction_id)
             if existing is not None:
-                return _command_projection(existing)
+                return CommandProjection.from_command(existing)
             raise DomainError(
                 ErrorCode.INTERACTION_ALREADY_RESOLVED,
                 "interaction already resolved",
@@ -249,7 +238,7 @@ class InteractionBroker:
         state = await self._persistence.get_snapshot(conversation_id, owner_id)
         existing = self._find_answer_command(state, interaction_id)
         if existing is not None:
-            return _command_projection(existing)
+            return CommandProjection.from_command(existing)
         return await self._release_for(
             conversation_id,
             owner_id,
@@ -424,7 +413,7 @@ class InteractionBroker:
     ) -> CommandProjection:
         existing = self._find_answer_command(state, interaction_id)
         if existing is not None:
-            return _command_projection(existing)
+            return CommandProjection.from_command(existing)
         interaction = state.interactions.get(interaction_id)
         turn_id = interaction.turn_id if interaction is not None else None
         now = self._clock()
@@ -451,7 +440,7 @@ class InteractionBroker:
             worker_id=worker_id,
             fence=fence,
         )
-        return _command_projection(released)
+        return CommandProjection.from_command(released)
 
     @staticmethod
     def _find_answer_command(state: Any, interaction_id: UUID) -> Command | None:

@@ -675,6 +675,17 @@ class CommandProjection(BaseModel):
     idempotency_key: str
     created_at: UtcDateTime
 
+    @classmethod
+    def from_command(cls, command: Command) -> CommandProjection:
+        return cls(
+            id=command.id,
+            kind=command.kind,
+            status=command.status,
+            target_turn_id=command.target_turn_id,
+            idempotency_key=command.idempotency_key,
+            created_at=command.created_at,
+        )
+
 
 class InteractionResolutionResult(BaseModel):
     """First-write-wins resolution outcome returned to facade/broker callers."""

@@ -309,7 +309,6 @@ class _FakePrimeProcess(_FakeAcpProcess):
         await self.close()
 
 
-
 def _patch_probe(monkeypatch: Any, kind: HarnessKind) -> None:
     assert kind is HarnessKind.PRIME_AGENT
 
@@ -319,9 +318,8 @@ def _patch_probe(monkeypatch: Any, kind: HarnessKind) -> None:
         release = match_release("0.7.1", platform="linux")
         return release.to_harness_capabilities(), release
 
-    monkeypatch.setattr(
-        "tth_prime_agent.harness.adapter.probe_prime_agent", probe_prime_agent
-    )
+    monkeypatch.setattr("tth_prime_agent.harness.adapter.probe_prime_agent", probe_prime_agent)
+
 
 def make_adapter_factory(
     kind: HarnessKind,

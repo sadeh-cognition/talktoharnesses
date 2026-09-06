@@ -45,8 +45,7 @@ def _model(
         model=model,
         display_name=display_name,
         supported_reasoning_efforts=[
-            SimpleNamespace(reasoning_effort=SimpleNamespace(value=effort))
-            for effort in efforts
+            SimpleNamespace(reasoning_effort=SimpleNamespace(value=effort)) for effort in efforts
         ],
         is_default=is_default,
     )

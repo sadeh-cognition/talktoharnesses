@@ -223,6 +223,22 @@ Entries are appended using `## [YYYY-MM-DD] operation | Title`.
   `SUPPORTED_HARNESSES.md` regenerated. Updated the requirement, capability
   page, and README.
 
+## [2026-09-06] implementation | Refactoring pass: split drift guard and proxy write path
+
+- Re-synced the vendored split modules (supervisor `env` support, SSE callback
+  typing, per-kind executable tables, ACP outbound allowlist, runtime
+  re-exports, model discovery stderr fallback) and added
+  `scripts/check_split_drift.py` to the static CI gate. Removed the unused ACP
+  JSON-RPC package from `tth-prime-agent` and unused `sse_decoder` copies.
+- Proxy: projections are now incremental per commit and the search document
+  rebuilds only for text-bearing batches; one worker snapshot per delta batch;
+  lock-free owner-scoped snapshot reads; single serialization on SSE replay;
+  one shared commit body; `@_db_thread` replaces the hand-written
+  `sync_to_async` wrappers; `remote/sandbox.py` split into orchestration,
+  `docker_ops`, and `sandbox_auth`.
+- Updated the split-services decision, development guidelines, and
+  `docs/refactoring-scan.md`.
+
 ## Related
 
 - [Wiki index](index.md)

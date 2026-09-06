@@ -13,8 +13,8 @@ import pytest
 from tests.runtime.memory_persistence import MemoryPersistence
 
 from talktoharnesses.application.command_processor import (
-    _MAX_TRANSIENT_STARTUP_ATTEMPTS,
-    _TRANSIENT_STARTUP_ERRORS,
+    MAX_TRANSIENT_STARTUP_ATTEMPTS,
+    TRANSIENT_STARTUP_ERRORS,
     CommandProcessor,
 )
 from talktoharnesses.domain import (
@@ -48,6 +48,8 @@ from talktoharnesses.domain.models import (
     InterruptPayload,
 )
 from talktoharnesses.providers.adapter import HarnessSession, SteerRequest, TurnRequest
+
+_TRANSIENT_CODES: list[ErrorCode] = sorted(TRANSIENT_STARTUP_ERRORS, key=lambda c: c.value)
 
 
 class _Publisher:
@@ -863,8 +865,8 @@ async def test_startup_error_settles_command_instead_of_retrying(
     await persistence.accept_command(submitted.command)
     # Transient codes get a bounded number of retries; at the cap they settle.
     attempts = (
-        _MAX_TRANSIENT_STARTUP_ATTEMPTS
-        if isinstance(error, DomainError) and error.code in _TRANSIENT_STARTUP_ERRORS
+        MAX_TRANSIENT_STARTUP_ATTEMPTS
+        if isinstance(error, DomainError) and error.code in TRANSIENT_STARTUP_ERRORS
         else 1
     )
     claimed = submitted.command.model_copy(
@@ -1029,7 +1031,7 @@ def _claimed(command: Command, now: datetime, *, attempts: int = 1) -> Command:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("code", sorted(_TRANSIENT_STARTUP_ERRORS, key=lambda c: c.value))
+@pytest.mark.parametrize("code", _TRANSIENT_CODES)
 async def test_transient_startup_error_keeps_command_claimed_below_attempt_cap(
     code: ErrorCode,
 ) -> None:
@@ -1040,7 +1042,7 @@ async def test_transient_startup_error_keeps_command_claimed_below_attempt_cap(
     persistence = MemoryPersistence()
     persistence.seed(submitted.state)
     await persistence.accept_command(submitted.command)
-    claimed = _claimed(submitted.command, now, attempts=_MAX_TRANSIENT_STARTUP_ATTEMPTS - 1)
+    claimed = _claimed(submitted.command, now, attempts=MAX_TRANSIENT_STARTUP_ATTEMPTS - 1)
     persistence.commands[claimed.id] = claimed
 
     publisher = _Publisher()
@@ -1191,7 +1193,7 @@ async def test_startup_failure_cancels_lease_keepalive_before_settling() -> None
 
 @pytest.mark.asyncio
 async def test_stale_owner_cancels_sibling_tasks_and_refuses_unfenced_writes() -> None:
-    now, state = _bound_state()
+    _, state = _bound_state()
     conversation_id = state.conversation.id
     persistence = MemoryPersistence()
     persistence.seed(state)

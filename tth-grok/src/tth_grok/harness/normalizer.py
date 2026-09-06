@@ -76,4 +76,5 @@ def _as_dict(value: object) -> dict[str, Any] | None:
     raw = cast(dict[object, object], value)
     return {str(key): item for key, item in raw.items()}
 
+
 __all__ = ["GrokNormalizer"]

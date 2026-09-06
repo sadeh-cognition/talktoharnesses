@@ -7,8 +7,8 @@ audiences:
 tags:
   - type/operation
   - audience/developer
-last_verified: 2026-08-20
-verified_against_commit: bb3d2b755500fc663816d6cbd1a7cd7947a8920b
+last_verified: 2026-09-06
+verified_against_commit: 1655a774b7b6f7f88b56d75497277dadcaa10c30
 ---
 
 # Development Guidelines
@@ -26,6 +26,11 @@ uv run pytest -n auto --maxprocesses=4 --dist=worksteal \
 ```
 
 Build with `uv build --no-sources`. Public `__all__` surfaces are contract-tested. Core packages must import without Django.
+
+Code vendored into the `tth-<kind>` splits (ACP transport, process supervisor,
+path checks, the split HTTP surface) must stay identical across splits. The
+static gate runs `python scripts/check_split_drift.py`; when you change one
+copy, re-sync the others in the same change.
 
 ## Related
 

@@ -45,6 +45,6 @@ async def run_model_command(
                 "stderr": stderr.decode("utf-8", errors="replace")[:500],
             },
         )
-    # prime-agent prints the model table to stderr when not attached to a TTY.
+    # Some CLIs (prime-agent) print the model table to stderr when not attached to a TTY.
     output = stdout if stdout.strip() else stderr
     return output.decode("utf-8", errors="replace")

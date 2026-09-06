@@ -1,7 +1,7 @@
-"""Internal ACP/JSON-RPC transport (not a public generic client).
+"""Newline-delimited JSON framing for the Prime Agent stream.
 
-Implementation modules remain importable by path for adapters and tests.
-Nothing is exported as a supported public surface.
+Prime Agent speaks JSONL rather than ACP JSON-RPC 2.0, so only the frame
+decoder lives here. Nothing is exported as a supported public surface.
 """
 
 from __future__ import annotations

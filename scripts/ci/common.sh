@@ -18,6 +18,7 @@ ci_static() {
   uv run pyright
   uv run pytest tests/test_migration_drift.py -q --tb=short
   uv run python scripts/render_supported.py --check
+  uv run python scripts/check_split_drift.py
 }
 
 ci_coverage() {
@@ -82,6 +83,7 @@ ci_stable_gate() {
   uv run pyright
   uv run pytest tests/test_migration_drift.py -q --tb=short
   uv run python scripts/render_supported.py --validate stable --check
+  uv run python scripts/check_split_drift.py
   ci_coverage --cov-fail-under=91
   ci_providers
   ci_performance

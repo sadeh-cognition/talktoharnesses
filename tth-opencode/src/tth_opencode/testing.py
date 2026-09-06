@@ -122,9 +122,7 @@ class EchoAdapter:
     async def interrupt(self, session: HarnessSession) -> None:
         del session
 
-    async def answer_interaction(
-        self, session: HarnessSession, answer: InteractionAnswer
-    ) -> None:
+    async def answer_interaction(self, session: HarnessSession, answer: InteractionAnswer) -> None:
         del session, answer
 
     def events(

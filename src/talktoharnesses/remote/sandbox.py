@@ -14,19 +14,26 @@ import asyncio
 import logging
 import os
 import secrets
-import shutil
-import subprocess
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol, cast
-from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 from pydantic import BaseModel
 from tth_types.base import FROZEN
 from tth_types.enums import ErrorCode, HarnessKind
 from tth_types.errors import DomainError
+
+from talktoharnesses.remote import docker_ops, sandbox_auth
+from talktoharnesses.remote.docker_ops import HOST_GATEWAY_ALIAS as _HOST_GATEWAY_ALIAS
+from talktoharnesses.remote.docker_ops import container_otlp_endpoint as _container_otlp_endpoint
+from talktoharnesses.remote.docker_ops import (
+    ensure_docker_cli_available as ensure_docker_cli_available,
+)
+from talktoharnesses.remote.docker_ops import kind_slug as _kind_slug
+from talktoharnesses.remote.docker_ops import rewrite_loopback_url as rewrite_loopback_url
+from talktoharnesses.remote.sandbox_auth import AuthFileSpec as AuthFileSpec
 
 logger = logging.getLogger(__name__)
 
@@ -55,117 +62,9 @@ _OTEL_ENDPOINT_ENV = "OTEL_EXPORTER_OTLP_ENDPOINT"
 _OTEL_HEADERS_ENV = "OTEL_EXPORTER_OTLP_HEADERS"
 # Container env the manager owns; operator passthrough may never override it.
 _MANAGED_ENV_KEYS = frozenset({"TTH_SPLIT_TOKEN", _OTEL_ENDPOINT_ENV, _OTEL_HEADERS_ENV})
-_OTEL_OPT_OUT_VALUES = frozenset({"false", "0"})
-_HOST_GATEWAY_ALIAS = "host.docker.internal"
-_LOCAL_HOSTNAMES = frozenset({"localhost", "127.0.0.1", "::1"})
 
-
-def rewrite_loopback_url(url: str, alias: str) -> str:
-    """Point a loopback URL at ``alias`` so a container reaches the proxy host.
-
-    Scheme, port, path, and query are preserved; non-loopback hosts pass
-    through unchanged.
-    """
-    parts = urlsplit(url)
-    if parts.hostname and parts.hostname.lower() in _LOCAL_HOSTNAMES:
-        netloc = alias if parts.port is None else f"{alias}:{parts.port}"
-        return urlunsplit(parts._replace(netloc=netloc))
-    return url
-
-
-def _container_otlp_endpoint(raw: str | None) -> str:
-    """Map the host-side OTLP endpoint to the value a sandbox should see.
-
-    Unset/empty resolves to the host-gateway default; localhost endpoints are
-    rewritten to host.docker.internal preserving scheme, port, and path; the
-    false/0 opt-out sentinel passes through verbatim so splits disable
-    themselves too; remote endpoints pass through unchanged.
-    """
-    if raw is None or not raw.strip():
-        return f"http://{_HOST_GATEWAY_ALIAS}:4318"
-    value = raw.strip()
-    if value.lower() in _OTEL_OPT_OUT_VALUES:
-        return value
-    return rewrite_loopback_url(value, _HOST_GATEWAY_ALIAS)
-
-
-@dataclass(frozen=True)
-class AuthFileSpec:
-    """Where a kind's credential file lives on the host and in the container."""
-
-    environment_variable: str
-    default_relative_path: Path
-    target_directory: str
-    target_filename: str = "auth.json"
-
-
-_AUTH_FILE_DEFAULTS: dict[HarnessKind, AuthFileSpec] = {
-    HarnessKind.MUSE: AuthFileSpec(
-        "TTH_SANDBOX_MUSE_AUTH_FILE",
-        Path(".config/muse/auth.json"),
-        "/home/agent/.config/muse",
-    ),
-    HarnessKind.GROK: AuthFileSpec(
-        "TTH_SANDBOX_GROK_AUTH_FILE",
-        Path(".grok/auth.json"),
-        "/home/agent/.grok",
-    ),
-    HarnessKind.CURSOR: AuthFileSpec(
-        "TTH_SANDBOX_CURSOR_AUTH_FILE",
-        Path(".config/cursor/auth.json"),
-        "/home/agent/.config/cursor",
-    ),
-    HarnessKind.CODEX: AuthFileSpec(
-        "TTH_SANDBOX_CODEX_AUTH_FILE",
-        Path(".codex/auth.json"),
-        "/home/agent/.codex",
-    ),
-    HarnessKind.CLAUDE: AuthFileSpec(
-        "TTH_SANDBOX_CLAUDE_AUTH_FILE",
-        Path(".claude/.credentials.json"),
-        "/home/agent/.claude",
-        target_filename=".credentials.json",
-    ),
-    HarnessKind.OPENCODE: AuthFileSpec(
-        "TTH_SANDBOX_OPENCODE_AUTH_FILE",
-        Path(".local/share/opencode/auth.json"),
-        "/home/agent/.local/share/opencode",
-    ),
-    # ~/.prime/agent/auth.json holds third-party OAuth entries only; the
-    # prime-inference credential (api_key + endpoints) lives in config.json.
-    HarnessKind.PRIME_AGENT: AuthFileSpec(
-        "TTH_SANDBOX_PRIME_AGENT_AUTH_FILE",
-        Path(".prime/config.json"),
-        "/home/agent/.prime",
-        target_filename="config.json",
-    ),
-}
 
 _CONTAINER_PORT = 8010
-
-
-def ensure_docker_cli_available(kind: HarnessKind | None = None) -> str:
-    """Return the docker CLI path, failing closed when it is not installed.
-
-    Every harness runs in a Docker sandbox, so the backend calls this at
-    startup to refuse to serve without the CLI; image builds call it again
-    with the kind for an actionable per-kind error.
-    """
-    docker_bin = shutil.which("docker")
-    if docker_bin is None:
-        details: dict[str, str] = {"reason": "docker_unavailable"}
-        if kind is not None:
-            details["kind"] = kind.value
-        raise DomainError(
-            ErrorCode.SANDBOX_UNAVAILABLE,
-            "docker CLI is not installed",
-            details=details,
-        )
-    return docker_bin
-
-
-def _kind_slug(kind: HarnessKind) -> str:
-    return kind.value.replace("_", "-")
 
 
 def _split_port_env(kind: HarnessKind) -> str:
@@ -190,19 +89,6 @@ def _pids_limit(kind: HarnessKind) -> int:
         # exhaust 512 pids and panic with "OS can't spawn worker thread".
         return 2048
     return 512
-
-
-def _auth_file_from_env(
-    env: dict[str, str],
-    *,
-    environment_variable: str,
-    default_relative_path: Path,
-) -> str | None:
-    if environment_variable in env:
-        return env.get(environment_variable) or None
-    home = env.get("HOME")
-    default = Path(home) / default_relative_path if home else None
-    return str(default) if default is not None and default.is_file() else None
 
 
 class SandboxConfig(BaseModel):
@@ -236,15 +122,7 @@ class SandboxConfig(BaseModel):
             raw = env.get(f"TTH_SANDBOX_ENV_{kind.value.upper()}")
             if raw is not None:
                 passthrough[kind] = tuple(name.strip() for name in raw.split(",") if name.strip())
-        auth_files: dict[HarnessKind, str] = {}
-        for kind, spec in _AUTH_FILE_DEFAULTS.items():
-            auth_file = _auth_file_from_env(
-                env,
-                environment_variable=spec.environment_variable,
-                default_relative_path=spec.default_relative_path,
-            )
-            if auth_file is not None:
-                auth_files[kind] = auth_file
+        auth_files = sandbox_auth.auth_files_from_env(env)
         home = env.get("HOME")
         raw_mount_roots = env.get("TTH_SANDBOX_MOUNT_ROOTS")
         if raw_mount_roots is not None:
@@ -317,8 +195,8 @@ class SandboxManager:
     _prepare_tasks: dict[HarnessKind, asyncio.Task[SplitEndpoint]] = field(
         default_factory=dict[HarnessKind, asyncio.Task[SplitEndpoint]]
     )
-    _auth_signatures: dict[HarnessKind, tuple[str, int, int] | None] = field(
-        default_factory=dict[HarnessKind, tuple[str, int, int] | None]
+    _auth_signatures: dict[HarnessKind, sandbox_auth.AuthSignature | None] = field(
+        default_factory=dict[HarnessKind, sandbox_auth.AuthSignature | None]
     )
 
     def _lock_for(self, kind: HarnessKind) -> asyncio.Lock:
@@ -464,16 +342,7 @@ class SandboxManager:
         return await asyncio.to_thread(self._container_running, name)
 
     def _container_running(self, container_name: str) -> bool:
-        try:
-            import docker
-        except ImportError:
-            return False
-        try:
-            client: Any = docker.from_env()
-            container = client.containers.get(container_name)
-        except Exception:
-            return False
-        return getattr(container, "status", None) == "running"
+        return docker_ops.container_running(container_name)
 
     def _container_name(self, kind: HarnessKind) -> str:
         return f"tth-{_kind_slug(kind)}"
@@ -578,16 +447,8 @@ class SandboxManager:
     def _auth_file(self, kind: HarnessKind) -> str | None:
         return self.config.auth_files.get(kind)
 
-    def _auth_signature(self, kind: HarnessKind) -> tuple[str, int, int] | None:
-        auth_file = self._auth_file(kind)
-        if auth_file is None:
-            return None
-        path = Path(auth_file)
-        try:
-            stat = path.stat()
-        except OSError:
-            return str(path), -1, -1
-        return str(path), stat.st_mtime_ns, stat.st_size
+    def _auth_signature(self, kind: HarnessKind) -> sandbox_auth.AuthSignature | None:
+        return sandbox_auth.auth_signature(self._auth_file(kind))
 
     def _seed_auth_file(
         self,
@@ -601,64 +462,17 @@ class SandboxManager:
         auth_file = self._auth_file(kind)
         if auth_file is None:
             return
-        source = Path(auth_file)
-        if not source.is_file():
-            raise DomainError(
-                ErrorCode.SANDBOX_UNAVAILABLE,
-                f"{kind.value.title()} auth file was not found",
-                details={"kind": kind.value, "reason": "auth_file_missing", "path": str(source)},
-            )
-        spec = _AUTH_FILE_DEFAULTS[kind]
-        seed_path = f"/seed/{spec.target_filename}"
-        client.containers.run(
-            image,
-            command=[
-                "python",
-                "-c",
-                (
-                    "from pathlib import Path; import shutil; "
-                    f"target = Path({spec.target_directory!r}); "
-                    "target.mkdir(parents=True, exist_ok=True); "
-                    f"shutil.copy2({seed_path!r}, target / {spec.target_filename!r}); "
-                    f"(target / {spec.target_filename!r}).chmod(0o600)"
-                ),
-            ],
-            mounts=[
-                mount_type(
-                    target=seed_path,
-                    source=str(source),
-                    type="bind",
-                    read_only=True,
-                ),
-                mount_type(target="/home/agent", source=f"{name}-home", type="volume"),
-            ],
-            network_disabled=True,
-            cap_drop=["ALL"],
-            security_opt=["no-new-privileges:true"],
-            remove=True,
+        sandbox_auth.seed_auth_file(
+            client,
+            mount_type,
+            kind=kind,
+            auth_file=auth_file,
+            image=image,
+            home_volume=f"{name}-home",
         )
 
     def _docker_client(self, kind: HarnessKind) -> Any:
-        """Blocking docker-py client factory with actionable failures."""
-        try:
-            import docker
-        except ImportError as exc:  # pragma: no cover - dependency is declared
-            raise DomainError(
-                ErrorCode.SANDBOX_UNAVAILABLE,
-                "docker SDK is not installed",
-                details={"kind": kind.value, "reason": "docker_unavailable"},
-            ) from exc
-        from docker.errors import DockerException
-
-        try:
-            return docker.from_env()
-        except DockerException as exc:
-            logger.warning("docker daemon is unreachable for %s sandbox: %s", kind.value, exc)
-            raise DomainError(
-                ErrorCode.SANDBOX_UNAVAILABLE,
-                f"docker daemon is unreachable: {exc}",
-                details={"kind": kind.value, "reason": "docker_unavailable"},
-            ) from exc
+        return docker_ops.docker_client(kind)
 
     def _ensure_image(self, kind: HarnessKind) -> None:
         """Blocking; builds the split image locally when it is missing."""
@@ -680,77 +494,14 @@ class SandboxManager:
             ) from exc
 
     def _resolve_build_root(self, kind: HarnessKind) -> Path:
-        """Locate the repo root holding the per-kind build contexts.
-
-        Works for editable installs (the package sits at <root>/src/...); wheel
-        installs have no build contexts on disk and must pre-build images.
-        """
-        import talktoharnesses
-
-        root = Path(talktoharnesses.__file__).resolve().parents[2]
-        dockerfile = root / f"tth-{_kind_slug(kind)}" / "Dockerfile"
-        tth_types = root / "tth-types" / "pyproject.toml"
-        if not dockerfile.is_file() or not tth_types.is_file():
-            raise DomainError(
-                ErrorCode.SANDBOX_UNAVAILABLE,
-                f"no build context for {kind.value} under {root}",
-                details={"kind": kind.value, "reason": "build_context_missing"},
-            )
-        return root
+        return docker_ops.resolve_build_root(kind)
 
     def _build_image(self, kind: HarnessKind) -> None:
-        """Blocking replication of deploy/build-splits.sh for one kind.
-
-        buildx is required: the split Dockerfiles consume the shared tth-types
-        sources through a named build context, which docker-py cannot express.
-        """
+        """Blocking; builds the split image from the repo's per-kind context."""
         root = self._resolve_build_root(kind)
-        docker_bin = ensure_docker_cli_available(kind)
-        image = self._image(kind)
-        command = [
-            docker_bin,
-            "buildx",
-            "build",
-            "--build-context",
-            f"tth_types={root / 'tth-types'}",
-            "--build-arg",
-            f"UID={os.getuid()}",
-            "--build-arg",
-            f"GID={os.getgid()}",
-            "--load",
-            "-t",
-            image,
-            str(root / f"tth-{_kind_slug(kind)}"),
-        ]
-        logger.info("building sandbox image %s", image)
-        try:
-            result = subprocess.run(
-                command,
-                capture_output=True,
-                text=True,
-                timeout=self.config.build_timeout,
-                check=False,
-            )
-        except subprocess.TimeoutExpired as exc:
-            raise DomainError(
-                ErrorCode.SANDBOX_UNAVAILABLE,
-                f"sandbox image build for {kind.value} timed out",
-                details={"kind": kind.value, "reason": "image_build_failed"},
-            ) from exc
-        if result.returncode != 0:
-            output = f"{result.stdout}\n{result.stderr}".strip()
-            logger.error("sandbox image build failed for %s:\n%s", image, output)
-            tail = "\n".join(output.splitlines()[-20:])
-            raise DomainError(
-                ErrorCode.SANDBOX_UNAVAILABLE,
-                f"sandbox image build failed for {kind.value}",
-                details={
-                    "kind": kind.value,
-                    "reason": "image_build_failed",
-                    "build_tail": tail,
-                },
-            )
-        logger.info("built sandbox image %s", image)
+        docker_ops.build_image(
+            kind, self._image(kind), root=root, timeout=self.config.build_timeout
+        )
 
     def _ensure_container(self, kind: HarnessKind, token: str) -> None:
         """Blocking docker-py path; always called via asyncio.to_thread."""

@@ -104,17 +104,6 @@ from talktoharnesses.runtime.manager import RuntimeManager
 logger = logging.getLogger(__name__)
 
 
-def _command_projection(command: Command) -> CommandProjection:
-    return CommandProjection(
-        id=command.id,
-        kind=command.kind,
-        status=command.status,
-        target_turn_id=command.target_turn_id,
-        idempotency_key=command.idempotency_key,
-        created_at=command.created_at,
-    )
-
-
 def _turn_projection(turn: Turn) -> TurnProjection:
     return TurnProjection(
         id=turn.id,
@@ -780,7 +769,7 @@ class TalkToHarnessesService:
                     existing,
                 )
             return SubmitTurnResult(
-                command=_command_projection(existing),
+                command=CommandProjection.from_command(existing),
                 turn=turn_projection,
             )
 
@@ -795,7 +784,7 @@ class TalkToHarnessesService:
         await self._publish(events)
         turn = self._target_turn(result.state, result.command)
         return SubmitTurnResult(
-            command=_command_projection(result.command),
+            command=CommandProjection.from_command(result.command),
             turn=_turn_projection(turn),
         )
 
@@ -829,7 +818,7 @@ class TalkToHarnessesService:
         if queued_cmd_id is not None and queued_cmd_id in result.state.commands:
             settled = result.state.commands[queued_cmd_id]
             commands = (settled,)
-            projection = _command_projection(settled)
+            projection = CommandProjection.from_command(settled)
         events = await self._persistence.commit_facade_mutation(
             conversation_id,
             owner_id,
@@ -861,7 +850,7 @@ class TalkToHarnessesService:
         if result.command is None:
             raise DomainError(ErrorCode.INVALID_STATE, "steer produced no command")
         if not result.events:
-            return _command_projection(result.command)
+            return CommandProjection.from_command(result.command)
         events = await self._persistence.commit_facade_mutation(
             conversation_id,
             owner_id,
@@ -871,7 +860,7 @@ class TalkToHarnessesService:
             commands=(result.command,),
         )
         await self._publish(events)
-        return _command_projection(result.command)
+        return CommandProjection.from_command(result.command)
 
     async def close_runtime(self, owner_id: str, conversation_id: UUID) -> None:
         """Release the idle conversation's live runtime; the next turn resumes it.
@@ -931,7 +920,7 @@ class TalkToHarnessesService:
         key = idempotency_key or f"interrupt:{state.active_turn.id}:{uuid4()}"
         for existing in state.commands.values():
             if existing.idempotency_key == key:
-                return _command_projection(existing)
+                return CommandProjection.from_command(existing)
         command = Command(
             conversation_id=conversation_id,
             kind=CommandKind.INTERRUPT,
@@ -960,7 +949,7 @@ class TalkToHarnessesService:
             commands=(command,),
         )
         await self._publish(events)
-        return _command_projection(command)
+        return CommandProjection.from_command(command)
 
     # ------------------------------------------------------------------
     # Harness switching
@@ -991,7 +980,7 @@ class TalkToHarnessesService:
                     "idempotency key reused with a different payload",
                     details={"idempotency_key": idempotency_key},
                 )
-            return _command_projection(existing)
+            return CommandProjection.from_command(existing)
 
         harness = await self._persistence.get_harness(harness_id, owner_id)
         if (
@@ -1037,7 +1026,7 @@ class TalkToHarnessesService:
             commands=(command,),
         )
         await self._publish(events)
-        return _command_projection(command)
+        return CommandProjection.from_command(command)
 
     async def _validate_switch_target(self, owner_id: str, harness: HarnessProjection) -> None:
         """Require a successful probe and a supported finite model/mode."""

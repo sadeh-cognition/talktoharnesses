@@ -74,7 +74,6 @@ class _FakeClaude:
 # ---------------------------------------------------------------------------
 
 
-
 def _patch_probe(monkeypatch: Any, kind: HarnessKind) -> None:
     assert kind is HarnessKind.CLAUDE
 
@@ -90,6 +89,7 @@ def _patch_probe(monkeypatch: Any, kind: HarnessKind) -> None:
         return release.to_harness_capabilities(), release
 
     monkeypatch.setattr("tth_claude.harness.adapter.probe_claude", probe_claude)
+
 
 def make_adapter_factory(
     kind: HarnessKind,

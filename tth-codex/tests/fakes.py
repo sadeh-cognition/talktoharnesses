@@ -76,19 +76,17 @@ class _FakeCodex:
 # ---------------------------------------------------------------------------
 
 
-
 def _patch_probe(monkeypatch: Any, kind: HarnessKind) -> None:
     assert kind is HarnessKind.CODEX
 
     async def probe_codex(config: HarnessConfiguration):
         from tth_codex.harness.compatibility import match_release
 
-        release = match_release(
-            sdk_version="0.144.4", runtime_version="0.144.4", platform="linux"
-        )
+        release = match_release(sdk_version="0.144.4", runtime_version="0.144.4", platform="linux")
         return release.to_harness_capabilities(), release
 
     monkeypatch.setattr("tth_codex.harness.adapter.probe_codex", probe_codex)
+
 
 def make_adapter_factory(
     kind: HarnessKind,

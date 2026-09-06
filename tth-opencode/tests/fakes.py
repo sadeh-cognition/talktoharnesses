@@ -99,7 +99,6 @@ class _FakeOpenCodeHttp:
 # ---------------------------------------------------------------------------
 
 
-
 def _patch_probe(monkeypatch: Any, kind: HarnessKind) -> None:
     assert kind is HarnessKind.OPENCODE
 
@@ -110,6 +109,7 @@ def _patch_probe(monkeypatch: Any, kind: HarnessKind) -> None:
         return release.to_harness_capabilities(), release
 
     monkeypatch.setattr("tth_opencode.harness.adapter.probe_opencode", probe_opencode)
+
 
 def make_adapter_factory(
     kind: HarnessKind,

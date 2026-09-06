@@ -122,9 +122,7 @@ class FakeAdapter:
     async def interrupt(self, session: HarnessSession) -> None:
         self.interrupted = True
 
-    async def answer_interaction(
-        self, session: HarnessSession, answer: InteractionAnswer
-    ) -> None:
+    async def answer_interaction(self, session: HarnessSession, answer: InteractionAnswer) -> None:
         self.answers.append(answer)
 
     def events(
