@@ -8,7 +8,8 @@
       "supports_interrupt": true,
       "supports_steer": true,
       "supports_multi_interaction": false,
-      "supports_nested_activity": false
+      "supports_nested_activity": false,
+      "supports_mcp_servers": false
     },
     "notes": "Uses Prime Agent's official JSONL RPC mode. Create, resume, steer, and interrupt are published for the linux live gate."
   },

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Annotated, Any, Literal
+from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -38,6 +39,38 @@ class HarnessModeInfo(BaseModel):
     label: str | None = None
 
 
+class HarnessMcpHeader(BaseModel):
+    """One HTTP header a harness sends to a configured MCP server."""
+
+    model_config = FROZEN
+
+    name: str = Field(min_length=1, pattern=r"^[A-Za-z0-9!#$%&'*+.^_`|~-]+$")
+    value: str
+
+
+class HarnessMcpServer(BaseModel):
+    """A streamable HTTP MCP server the harness connects to for every session.
+
+    Only HTTP transports are accepted: splits run in sandboxes, so a command
+    on the proxy host would not be reachable from the harness process.
+    """
+
+    model_config = FROZEN
+
+    name: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
+    url: str
+    headers: tuple[HarnessMcpHeader, ...] = ()
+
+    @field_validator("url")
+    @classmethod
+    def _require_http_url(cls, value: str) -> str:
+        parts = urlsplit(value)
+        if parts.scheme not in {"http", "https"} or not parts.netloc:
+            msg = "mcp server url must be an absolute http(s) URL"
+            raise ValueError(msg)
+        return value
+
+
 class HarnessConfiguration(BaseModel):
     model_config = FROZEN
 
@@ -48,6 +81,18 @@ class HarnessConfiguration(BaseModel):
     yolo: bool = False
     working_directory: str
     workspace_roots: tuple[str, ...] = ()
+    mcp_servers: tuple[HarnessMcpServer, ...] = ()
+
+    @field_validator("mcp_servers")
+    @classmethod
+    def _require_unique_mcp_names(
+        cls, value: tuple[HarnessMcpServer, ...]
+    ) -> tuple[HarnessMcpServer, ...]:
+        names = [server.name for server in value]
+        if len(set(names)) != len(names):
+            msg = "mcp server names must be unique"
+            raise ValueError(msg)
+        return value
 
 
 class HarnessCapabilities(BaseModel):
@@ -60,6 +105,7 @@ class HarnessCapabilities(BaseModel):
     supports_interrupt: bool = True
     supports_multi_interaction: bool = False
     supports_nested_activity: bool = False
+    supports_mcp_servers: bool = False
     models: tuple[HarnessModelInfo, ...] = ()
     modes: tuple[HarnessModeInfo, ...] = ()
     efforts: tuple[HarnessEffortInfo, ...] = ()

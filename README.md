@@ -250,6 +250,20 @@ interactive. Yolo does not change model, workflow mode, workspace roots,
 sandbox selection, or provider hard denials. It is fixed at harness creation
 and applies to both new and resumed sessions.
 
+Set `mcp_servers` on a harness to attach streamable HTTP MCP servers to every
+new and resumed session. Each entry names a short identifier, an absolute
+`http(s)` URL, and optional request headers; only HTTP transports are accepted
+because splits run in sandboxes. Claude Code, Cursor, Grok, Codex, and Muse
+Code support the field (see `supports_mcp_servers` in
+`SUPPORTED_HARNESSES.md`); OpenCode and Prime Agent fail probe, start, and
+resume with `provider_incompatible` when servers are configured. Muse Code
+reads servers from its settings file, so its split renders a private
+`XDG_CONFIG_HOME` per host with the servers merged over the saved settings and
+links to the host's credential and trust files. For proxy-managed
+sandboxes, loopback URLs such as `http://127.0.0.1:8001/...` are rewritten to
+the sandbox host gateway on the way to the split; the stored configuration is
+unchanged.
+
 ## Development
 
 ```bash

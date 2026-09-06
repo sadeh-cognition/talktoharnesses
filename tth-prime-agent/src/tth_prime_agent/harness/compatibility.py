@@ -45,11 +45,7 @@ class PrimeAgentReleaseRecord(BaseModel):
         return HarnessCapabilities(
             kind=HarnessKind.PRIME_AGENT,
             version=self.cli_version,
-            supports_steer=self.capabilities.supports_steer,
-            supports_resume=self.capabilities.supports_resume,
-            supports_interrupt=self.capabilities.supports_interrupt,
-            supports_multi_interaction=self.capabilities.supports_multi_interaction,
-            supports_nested_activity=self.capabilities.supports_nested_activity,
+            **self.capabilities.model_dump(),
             efforts=tuple(
                 HarnessEffortInfo(id=level, label=level.title()) for level in THINKING_LEVELS
             ),

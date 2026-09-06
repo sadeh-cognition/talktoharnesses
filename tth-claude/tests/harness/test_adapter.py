@@ -18,7 +18,13 @@ from tth_types.adapter import (
 )
 from tth_types.enums import HarnessKind
 from tth_types.events import ToolCompletedPayload, TurnFailedPayload
-from tth_types.harness import HarnessCapabilities, HarnessConfiguration, LaunchSnapshot
+from tth_types.harness import (
+    HarnessCapabilities,
+    HarnessConfiguration,
+    HarnessMcpHeader,
+    HarnessMcpServer,
+    LaunchSnapshot,
+)
 
 from tth_claude.harness.adapter import ClaudeAdapter
 from tth_claude.harness.normalizer import ClaudeNormalizer
@@ -576,4 +582,53 @@ async def test_default_keeps_broker_permission_callback(
     )
     assert _option_get(clients[0].options, "permission_mode") == "default"
     assert _option_get(clients[0].options, "can_use_tool") is not None
+    await adapter.close(session)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("yolo", [False, True])
+async def test_start_passes_configured_mcp_servers_to_sdk_options(
+    monkeypatch: pytest.MonkeyPatch, yolo: bool
+) -> None:
+    monkeypatch.setattr(
+        "tth_claude.harness.adapter.probe_claude",
+        _claude_release_probe,
+    )
+    clients: list[FakeClaudeClient] = []
+
+    def factory(options: object) -> FakeClaudeClient:
+        client = FakeClaudeClient(options=options)
+        clients.append(client)
+        return client
+
+    config = HarnessConfiguration(
+        kind=HarnessKind.CLAUDE,
+        working_directory="/tmp",
+        yolo=yolo,
+        mcp_servers=(
+            HarnessMcpServer(
+                name="memory",
+                url="http://host.docker.internal:8001/mcp/projects/7/memory",
+                headers=(HarnessMcpHeader(name="Authorization", value="Bearer tok"),),
+            ),
+        ),
+    )
+    adapter = ClaudeAdapter(client_factory=factory)
+    capabilities = await adapter.probe(config)
+    assert capabilities.supports_mcp_servers is True
+    session = await adapter.start(
+        StartSessionRequest(
+            conversation_id=uuid4(),
+            binding_id=uuid4(),
+            configuration=config,
+            launch=_launch(),
+        )
+    )
+    assert _option_get(clients[0].options, "mcp_servers") == {
+        "memory": {
+            "type": "http",
+            "url": "http://host.docker.internal:8001/mcp/projects/7/memory",
+            "headers": {"Authorization": "Bearer tok"},
+        }
+    }
     await adapter.close(session)

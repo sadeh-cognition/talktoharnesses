@@ -17,6 +17,7 @@ from tth_types.harness import (
     ApprovalRequestPayload,
     HarnessCapabilities,
     HarnessConfiguration,
+    HarnessMcpServer,
     InteractionAnswer,
     LaunchSnapshot,
     VersionAdvisory,
@@ -548,3 +549,78 @@ async def test_aclose_releases_probe_only_client() -> None:
     assert adapter._client is None  # pyright: ignore[reportPrivateUsage]
     # Idempotent, and also safe when the client was never opened.
     await adapter.aclose()
+
+
+def _mcp_config(url: str) -> HarnessConfiguration:
+    return HarnessConfiguration(
+        kind=HarnessKind.CLAUDE,
+        working_directory="/work",
+        mcp_servers=(HarnessMcpServer(name="memory", url=url),),
+    )
+
+
+def _adapter_with_alias(split: FakeSplit, alias: str | None) -> RemoteHarnessAdapter:
+    transport = httpx.MockTransport(split.handler)
+
+    class _Client(httpx.AsyncClient):
+        def __init__(self, **kwargs: Any) -> None:
+            kwargs["transport"] = transport
+            super().__init__(**kwargs)
+
+    class _AliasEndpoints:
+        async def endpoint(
+            self,
+            kind: HarnessKind,
+            required_paths: tuple[str, ...] = (),
+        ) -> SplitEndpoint:
+            del kind, required_paths
+            return SplitEndpoint(base_url="http://split.test", token="tok-1", loopback_alias=alias)
+
+    return RemoteHarnessAdapter(
+        split.kind,
+        _AliasEndpoints(),
+        adapter_version="proxy-1",
+        client_factory=_Client,
+    )
+
+
+def _sent_mcp_urls(split: FakeSplit, path: str) -> list[str]:
+    bodies = [body for _method, sent_path, body in split.requests if sent_path == path]
+    assert bodies, f"no request to {path}"
+    return [server["url"] for server in bodies[-1]["configuration"]["mcp_servers"]]
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        (
+            "http://127.0.0.1:8001/mcp/projects/7/memory",
+            "http://host.docker.internal:8001/mcp/projects/7/memory",
+        ),
+        ("http://localhost/mcp?x=1", "http://host.docker.internal/mcp?x=1"),
+        ("https://memory.example.com/mcp", "https://memory.example.com/mcp"),
+    ],
+)
+async def test_sandboxed_split_receives_gateway_mcp_urls(url: str, expected: str) -> None:
+    split = FakeSplit()
+    adapter = _adapter_with_alias(split, "host.docker.internal")
+    config = _mcp_config(url)
+
+    await adapter.probe(config)
+    request = _start_request().model_copy(update={"configuration": config})
+    await adapter.start(request)
+
+    assert _sent_mcp_urls(split, "/v1/probe") == [expected]
+    assert _sent_mcp_urls(split, "/v1/sessions") == [expected]
+    # The proxy-side configuration is untouched.
+    assert config.mcp_servers[0].url == url
+
+
+async def test_split_without_loopback_alias_receives_urls_verbatim() -> None:
+    split = FakeSplit()
+    adapter = _adapter_with_alias(split, None)
+    url = "http://127.0.0.1:8001/mcp/projects/7/memory"
+
+    await adapter.probe(_mcp_config(url))
+
+    assert _sent_mcp_urls(split, "/v1/probe") == [url]

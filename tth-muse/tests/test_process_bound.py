@@ -181,3 +181,42 @@ async def test_spawn_terminate_and_process_frames(
     assert final.forced_reason == "test-kill"
     assert names[-1] == FRAME_END
     assert spawn_adapter.handle.returncode is not None
+
+
+async def test_spawn_layers_spec_environment_over_the_parent_environment(
+    tmp_path: Any,
+) -> None:
+    from tth_types.harness import LaunchSnapshot
+
+    from tth_muse.runtime.spec import ProcessSpec
+    from tth_muse.runtime.supervisor import ProcessSupervisor
+
+    marker = tmp_path / "env.txt"
+    launch = LaunchSnapshot(
+        resolved_executable=sys.executable,
+        harness_version="1",
+        working_directory=str(tmp_path),
+        adapter_version="test",
+        capabilities=HarnessCapabilities(kind=HarnessKind.MUSE, version="1"),
+    )
+    script = (
+        "import os, pathlib, sys; "
+        f"pathlib.Path({str(marker)!r}).write_text("
+        "os.environ['XDG_CONFIG_HOME'] + '|' + str('PATH' in os.environ))"
+    )
+    spec = ProcessSpec(
+        conversation_id=uuid4(),
+        binding_id=uuid4(),
+        process_id=uuid4(),
+        launch=launch,
+        argv=("-c", script),
+        environment={"XDG_CONFIG_HOME": str(tmp_path / "private-xdg")},
+    )
+
+    handle = await ProcessSupervisor().spawn(spec)
+    try:
+        await asyncio.wait_for(handle.wait(), timeout=30)
+    finally:
+        await handle.close()
+
+    assert marker.read_text() == f"{tmp_path / 'private-xdg'}|True"

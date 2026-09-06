@@ -9,7 +9,8 @@
       "supports_interrupt": true,
       "supports_steer": false,
       "supports_multi_interaction": true,
-      "supports_nested_activity": false
+      "supports_nested_activity": false,
+      "supports_mcp_servers": true
     },
     "notes": "Live create/resume/interaction proven on linux with SDK-bundled Claude Code CLI. Interrupt and multi-interaction are published for the same linux gate. Nested activity is not published: adapters do not emit activity_started. The SDK remains a pinned split dependency; explicit CLI paths at or above the floor are accepted."
   },

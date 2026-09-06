@@ -25,7 +25,7 @@ Each kind runs in a separate split service. Process-bound splits locate their ex
 
 ## Current implementation
 
-Each split implements `HarnessAdapter` with probe, start, resume, submit, steer, interrupt, answer_interaction, events, and close. The proxy registry constructs the same `RemoteHarnessAdapter` for all seven kinds. Cursor model selectors use the string `model` field (`model-id[key=value,...]`). `yolo: true` suppresses approval prompts through provider-native mechanisms.
+Each split implements `HarnessAdapter` with probe, start, resume, submit, steer, interrupt, answer_interaction, events, and close. The proxy registry constructs the same `RemoteHarnessAdapter` for all seven kinds. Cursor model selectors use the string `model` field (`model-id[key=value,...]`). `yolo: true` suppresses approval prompts through provider-native mechanisms. `mcp_servers` attaches streamable HTTP MCP servers on Claude Code, Cursor, Grok, Codex, and Muse Code (the last through a private per-host settings directory); OpenCode and Prime Agent reject the field with `provider_incompatible`, and every split advertises `supports_mcp_servers`.
 
 Adapters map provider-reported token counts into the canonical `usage_updated`
 event before successful turn completion. Categories remain absent when the

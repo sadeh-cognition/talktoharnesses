@@ -12,6 +12,8 @@ from talktoharnesses.domain.enums import ApprovalDecision, HarnessKind
 from talktoharnesses.domain.models import (
     ApprovalRuleInput,
     HarnessConfiguration,
+    HarnessMcpHeader,
+    HarnessMcpServer,
 )
 
 # Request models are non-strict so JSON strings coerce to enums.
@@ -22,6 +24,25 @@ _CURSOR_MODEL_SELECTOR_DESCRIPTION = (
     "`model[key=value,...]`, for example `composer-2.5[fast=false]`. "
     "Parameter names and values are model-specific and must be advertised by Cursor."
 )
+
+
+class HarnessMcpHeaderBody(HarnessMcpHeader):
+    model_config = _REQUEST
+
+
+class HarnessMcpServerBody(HarnessMcpServer):
+    """Wire request shape for one streamable HTTP MCP server.
+
+    Subclasses the domain model so the name/header patterns and the http(s)
+    URL rule live in one place; only the request config and the coercing
+    header type differ.
+    """
+
+    model_config = _REQUEST
+
+    # Narrows the element type to the coercing body model; the tuple stays
+    # covariant with the domain field.
+    headers: tuple[HarnessMcpHeaderBody, ...] = ()  # pyright: ignore[reportIncompatibleVariableOverride]
 
 
 class HarnessConfigurationBody(BaseModel):
@@ -60,6 +81,16 @@ class HarnessConfigurationBody(BaseModel):
     )
     working_directory: str
     workspace_roots: tuple[str, ...] = ()
+    mcp_servers: tuple[HarnessMcpServerBody, ...] = Field(
+        default=(),
+        description=(
+            "Streamable HTTP MCP servers the harness attaches to every new and "
+            "resumed session. Only kinds whose probe advertises "
+            "`supports_mcp_servers` accept a non-empty list; others fail with "
+            "`provider_incompatible`. Loopback URLs are rewritten to the sandbox "
+            "host gateway for proxy-managed splits."
+        ),
+    )
 
     def to_domain(self) -> HarnessConfiguration:
         return HarnessConfiguration(
@@ -70,6 +101,7 @@ class HarnessConfigurationBody(BaseModel):
             yolo=self.yolo,
             working_directory=self.working_directory,
             workspace_roots=self.workspace_roots,
+            mcp_servers=self.mcp_servers,
         )
 
 

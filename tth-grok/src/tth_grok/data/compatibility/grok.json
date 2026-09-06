@@ -8,7 +8,8 @@
       "supports_interrupt": true,
       "supports_steer": false,
       "supports_multi_interaction": true,
-      "supports_nested_activity": false
+      "supports_nested_activity": false,
+      "supports_mcp_servers": true
     },
     "agent_name": "grok",
     "acp_protocol_version": 1,

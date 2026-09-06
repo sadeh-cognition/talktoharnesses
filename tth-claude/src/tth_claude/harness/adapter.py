@@ -6,7 +6,7 @@ import asyncio
 import contextlib
 import logging
 from collections.abc import AsyncIterator, Callable
-from typing import Any, ClassVar, Literal, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
 from uuid import UUID, uuid4
 
 from tth_types.adapter import (
@@ -25,6 +25,7 @@ from tth_types.harness import (
     HarnessConfiguration,
     InteractionAnswer,
 )
+from tth_types.mcp import claude_mcp_servers
 
 from tth_claude.harness.compatibility import (
     ClaudeReleaseRecord,
@@ -35,6 +36,9 @@ from tth_claude.harness.probe import probe_claude
 from tth_claude.harness.schemas import parse_claude_message
 from tth_claude.shared.questions import canonical_answer_values, canonical_questions
 
+if TYPE_CHECKING:
+    from claude_agent_sdk.types import McpServerConfig
+
 logger = logging.getLogger(__name__)
 
 ClientFactory = Callable[[Any], Any]
@@ -43,6 +47,12 @@ _ClaudeEffort = Literal["low", "medium", "high", "max"]
 
 def _claude_effort(value: str | None) -> _ClaudeEffort | None:
     return cast(_ClaudeEffort | None, value)
+
+
+def _sdk_mcp_servers(config: HarnessConfiguration) -> dict[str, McpServerConfig]:
+    """The shared HTTP mapping already matches ``McpHttpServerConfig``; tth_types
+    cannot name the SDK type, so the cast lives here."""
+    return cast("dict[str, McpServerConfig]", claude_mcp_servers(config))
 
 
 class ClaudeAdapter:
@@ -313,6 +323,7 @@ class ClaudeAdapter:
                 "session_id": session_id,
                 "permission_mode": "bypassPermissions" if config.yolo else "default",
                 "cli_path": None,
+                "mcp_servers": claude_mcp_servers(config),
             }
             options["can_use_tool"] = self._can_use_tool_yolo if config.yolo else self._can_use_tool
             return options
@@ -330,6 +341,7 @@ class ClaudeAdapter:
                 cli_path=cli_path,
                 # Avoid project/local auto-allow settings; user auth still applies via SDK login.
                 setting_sources=[],
+                mcp_servers=_sdk_mcp_servers(config),
             )
 
         async def _force_broker_ask(
@@ -357,6 +369,7 @@ class ClaudeAdapter:
             cli_path=cli_path,
             # Avoid project/local auto-allow settings; user auth still applies via SDK login.
             setting_sources=[],
+            mcp_servers=_sdk_mcp_servers(config),
             hooks={
                 "PreToolUse": [
                     HookMatcher(matcher=None, hooks=[cast(Any, _force_broker_ask)]),

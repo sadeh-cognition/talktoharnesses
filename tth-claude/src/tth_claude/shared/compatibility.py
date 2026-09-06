@@ -51,6 +51,7 @@ class ReleaseCapabilities(BaseModel):
     supports_steer: bool = False
     supports_multi_interaction: bool = False
     supports_nested_activity: bool = False
+    supports_mcp_servers: bool = False
 
 
 class LatestVerified(BaseModel):

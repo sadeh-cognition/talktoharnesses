@@ -25,6 +25,7 @@ from tth_types.harness import (
     HarnessConfiguration,
     InteractionAnswer,
 )
+from tth_types.mcp import acp_mcp_servers
 
 from tth_grok.acp.connection import AcpConnection
 from tth_grok.acp.jsonrpc import JsonRpcRemoteError, ProtocolCloseError
@@ -121,7 +122,7 @@ class GrokAdapter:
         result = await request_with_authentication(
             self._connection,
             "session/new",
-            {"cwd": cwd, "mcpServers": []},
+            {"cwd": cwd, "mcpServers": acp_mcp_servers(request.configuration)},
             auth_methods=self._auth_methods,
         )
         session_id = _require_session_id(result)
@@ -151,7 +152,7 @@ class GrokAdapter:
             {
                 "sessionId": request.native_session_id,
                 "cwd": cwd,
-                "mcpServers": [],
+                "mcpServers": acp_mcp_servers(request.configuration),
             },
             auth_methods=self._auth_methods,
         )

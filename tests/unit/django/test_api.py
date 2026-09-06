@@ -280,6 +280,62 @@ def test_create_harness_yolo_round_trip(service: TalkToHarnessesService, auth_he
     assert fetched.json()["configuration"]["yolo"] is True
 
 
+def test_create_harness_mcp_servers_round_trip(
+    service: TalkToHarnessesService, auth_header: str
+) -> None:
+    del service
+    client = Client()
+    servers = [
+        {
+            "name": "memory",
+            "url": "http://127.0.0.1:8001/mcp/projects/7/memory",
+            "headers": [{"name": "Authorization", "value": "Bearer tok"}],
+        }
+    ]
+    create = _post_json(
+        client,
+        "/api/v1/harnesses",
+        {
+            "name": "mcp-claude",
+            "configuration": {
+                "kind": "claude",
+                "working_directory": "/tmp/ws",
+                "mcp_servers": servers,
+            },
+        },
+        HTTP_AUTHORIZATION=auth_header,
+    )
+    assert create.status_code == 201, create.content
+    body = create.json()
+    assert body["configuration"]["mcp_servers"] == servers
+    fetched = client.get(
+        f"/api/v1/harnesses/{body['id']}",
+        HTTP_AUTHORIZATION=auth_header,
+    )
+    assert fetched.status_code == 200
+    assert fetched.json()["configuration"]["mcp_servers"] == servers
+
+
+def test_create_harness_rejects_non_http_mcp_server(
+    service: TalkToHarnessesService, auth_header: str
+) -> None:
+    del service
+    response = _post_json(
+        Client(),
+        "/api/v1/harnesses",
+        {
+            "name": "bad-mcp",
+            "configuration": {
+                "kind": "claude",
+                "working_directory": "/tmp/ws",
+                "mcp_servers": [{"name": "memory", "url": "stdio://not-allowed"}],
+            },
+        },
+        HTTP_AUTHORIZATION=auth_header,
+    )
+    assert response.status_code == 422, response.content
+
+
 @pytest.mark.django_db(transaction=True)
 def test_harness_models_returns_persisted_probe_models(
     service: TalkToHarnessesService, auth_header: str

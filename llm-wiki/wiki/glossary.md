@@ -59,6 +59,10 @@ Abbreviation for TalkToHarnesses, the unified coding-agent harness interface. Th
 
 One user prompt execution with status, messages, tools, and optional queued follow-ups. See [Turn and command](domain/turn-and-command.md).
 
+## MCP server
+
+A streamable HTTP Model Context Protocol server named in `HarnessConfiguration.mcp_servers`. Supporting splits attach it to every session in the provider-native shape; loopback URLs are rewritten to the sandbox host gateway for managed sandboxes.
+
 ## Yolo
 
 Harness-creation flag that suppresses approval prompts through provider-native mechanisms. Structured questions remain interactive.

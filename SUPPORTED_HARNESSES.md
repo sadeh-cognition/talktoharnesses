@@ -19,9 +19,9 @@ accepted; `latest_verified` is advisory only.
 
 ### Adapter capabilities
 
-| Resume | Interrupt | Steer | Multi-interaction | Nested |
-| --- | --- | --- | --- | --- |
-| yes | yes | no | yes | no |
+| Resume | Interrupt | Steer | Multi-interaction | Nested | MCP servers |
+| --- | --- | --- | --- | --- | --- |
+| yes | yes | no | yes | no | yes |
 
 ### Notes
 
@@ -37,9 +37,9 @@ accepted; `latest_verified` is advisory only.
 
 ### Adapter capabilities
 
-| Resume | Interrupt | Steer | Multi-interaction | Nested |
-| --- | --- | --- | --- | --- |
-| yes | yes | no | yes | no |
+| Resume | Interrupt | Steer | Multi-interaction | Nested | MCP servers |
+| --- | --- | --- | --- | --- | --- |
+| yes | yes | no | yes | no | yes |
 
 ### Notes
 
@@ -54,9 +54,9 @@ accepted; `latest_verified` is advisory only.
 
 ### Adapter capabilities
 
-| Resume | Interrupt | Steer | Multi-interaction | Nested |
-| --- | --- | --- | --- | --- |
-| yes | yes | yes | no | no |
+| Resume | Interrupt | Steer | Multi-interaction | Nested | MCP servers |
+| --- | --- | --- | --- | --- | --- |
+| yes | yes | yes | no | no | yes |
 
 ### Notes
 
@@ -71,9 +71,9 @@ accepted; `latest_verified` is advisory only.
 
 ### Adapter capabilities
 
-| Resume | Interrupt | Steer | Multi-interaction | Nested |
-| --- | --- | --- | --- | --- |
-| yes | yes | no | yes | no |
+| Resume | Interrupt | Steer | Multi-interaction | Nested | MCP servers |
+| --- | --- | --- | --- | --- | --- |
+| yes | yes | no | yes | no | yes |
 
 ### Notes
 
@@ -88,9 +88,9 @@ accepted; `latest_verified` is advisory only.
 
 ### Adapter capabilities
 
-| Resume | Interrupt | Steer | Multi-interaction | Nested |
-| --- | --- | --- | --- | --- |
-| yes | yes | no | yes | no |
+| Resume | Interrupt | Steer | Multi-interaction | Nested | MCP servers |
+| --- | --- | --- | --- | --- | --- |
+| yes | yes | no | yes | no | no |
 
 ### Notes
 
@@ -106,9 +106,9 @@ accepted; `latest_verified` is advisory only.
 
 ### Adapter capabilities
 
-| Resume | Interrupt | Steer | Multi-interaction | Nested |
-| --- | --- | --- | --- | --- |
-| yes | yes | yes | no | no |
+| Resume | Interrupt | Steer | Multi-interaction | Nested | MCP servers |
+| --- | --- | --- | --- | --- | --- |
+| yes | yes | yes | no | no | no |
 
 ### Notes
 
@@ -123,9 +123,9 @@ accepted; `latest_verified` is advisory only.
 
 ### Adapter capabilities
 
-| Resume | Interrupt | Steer | Multi-interaction | Nested |
-| --- | --- | --- | --- | --- |
-| yes | yes | yes | yes | no |
+| Resume | Interrupt | Steer | Multi-interaction | Nested | MCP servers |
+| --- | --- | --- | --- | --- | --- |
+| yes | yes | yes | yes | no | yes |
 
 ### Notes
 

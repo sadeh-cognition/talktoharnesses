@@ -27,6 +27,7 @@ from tth_types.harness import (
     HarnessConfiguration,
     InteractionAnswer,
 )
+from tth_types.mcp import codex_mcp_overrides
 
 from tth_codex.harness.compatibility import (
     CodexReleaseRecord,
@@ -103,6 +104,7 @@ def _build_broker_async_codex(
     approval_handler: Callable[[str, dict[str, Any] | None], dict[str, Any]] | None,
     *,
     yolo: bool = False,
+    config_overrides: tuple[str, ...] = (),
 ) -> Any:
     """Build AsyncCodex with public CodexClient and brokered or yolo approvals."""
     from openai_codex import AsyncCodex, AsyncThread, CodexConfig
@@ -151,7 +153,12 @@ def _build_broker_async_codex(
             return AsyncThread(self, thread_id)
 
     return BrokerAsyncCodex(
-        CodexConfig(config_overrides=("features.default_mode_request_user_input=true",))
+        CodexConfig(
+            config_overrides=(
+                "features.default_mode_request_user_input=true",
+                *config_overrides,
+            )
+        )
     )
 
 
@@ -205,7 +212,7 @@ class CodexAdapter:
         if self._release is None:
             raise DomainError(ErrorCode.INVALID_STATE, "codex adapter must be probed before start")
         enforce_published_operation(self._release, mode="create")
-        await self._ensure_client(yolo=request.configuration.yolo)
+        await self._ensure_client(request.configuration)
         assert self._client is not None
         cwd = request.launch.working_directory or request.configuration.working_directory
         approval_mode, sandbox = _codex_settings(request.configuration.mode)
@@ -236,7 +243,7 @@ class CodexAdapter:
         if self._release is None:
             raise DomainError(ErrorCode.INVALID_STATE, "codex adapter must be probed before resume")
         enforce_published_operation(self._release, mode="resume")
-        await self._ensure_client(yolo=request.configuration.yolo)
+        await self._ensure_client(request.configuration)
         assert self._client is not None
         cwd = request.launch.working_directory or request.configuration.working_directory
         approval_mode, sandbox = _codex_settings(request.configuration.mode)
@@ -398,9 +405,14 @@ class CodexAdapter:
         with contextlib.suppress(asyncio.QueueFull):
             self._event_q.put_nowait(None)
 
-    async def _ensure_client(self, *, yolo: bool = False) -> None:
+    async def _ensure_client(self, configuration: HarnessConfiguration | None = None) -> None:
+        # The client is built once per adapter, so the first configuration's
+        # yolo flag and MCP overrides win. An adapter serves a single session
+        # whose configuration is fixed, so later calls never carry a different one.
         if self._client is not None:
             return
+        yolo = configuration.yolo if configuration is not None else False
+        config_overrides = codex_mcp_overrides(configuration) if configuration is not None else ()
         self._loop = asyncio.get_running_loop()
         if self._client_factory is not None:
             client = self._client_factory()
@@ -409,6 +421,7 @@ class CodexAdapter:
                 client = _build_broker_async_codex(
                     self._approval_handler,
                     yolo=yolo,
+                    config_overrides=config_overrides,
                 )
             except ImportError as exc:
                 raise DomainError(

@@ -27,6 +27,8 @@ from tth_types.events import (
 from tth_types.harness import (
     HarnessCapabilities,
     HarnessConfiguration,
+    HarnessMcpHeader,
+    HarnessMcpServer,
     InteractionAnswer,
     LaunchSnapshot,
 )
@@ -1042,3 +1044,49 @@ async def test_submit_allowed_after_prompt_resolves() -> None:
     await adapter.submit(session, TurnRequest(turn_id=uuid4(), prompt="two"))
     assert len(_prompt_calls(proc)) == 2
     await adapter.close(session)
+
+
+@pytest.mark.asyncio
+async def test_start_and_resume_pass_configured_mcp_servers_over_acp() -> None:
+    server = HarnessMcpServer(
+        name="memory",
+        url="http://host.docker.internal:8001/mcp/projects/7/memory",
+        headers=(HarnessMcpHeader(name="Authorization", value="Bearer tok"),),
+    )
+    config = _config().model_copy(update={"mcp_servers": (server,)})
+    expected = [
+        {
+            "type": "http",
+            "name": "memory",
+            "url": "http://host.docker.internal:8001/mcp/projects/7/memory",
+            "headers": [{"name": "Authorization", "value": "Bearer tok"}],
+        }
+    ]
+
+    adapter, proc = await _probed_adapter()
+    session = await adapter.start(
+        StartSessionRequest(
+            conversation_id=uuid4(),
+            binding_id=uuid4(),
+            configuration=config,
+            launch=_launch(),
+        )
+    )
+    new = next(msg for msg in proc.requests if msg.get("method") == "session/new")
+    assert _as_str_dict(new.get("params")).get("mcpServers") == expected
+    await adapter.close(session)
+    assert session.native_session_id is not None
+
+    resume_adapter, resume_proc = await _probed_adapter()
+    resumed = await resume_adapter.resume(
+        ResumeSessionRequest(
+            conversation_id=uuid4(),
+            binding_id=uuid4(),
+            configuration=config,
+            launch=_launch(),
+            native_session_id=session.native_session_id,
+        )
+    )
+    load = next(msg for msg in resume_proc.requests if msg.get("method") == "session/load")
+    assert _as_str_dict(load.get("params")).get("mcpServers") == expected
+    await resume_adapter.close(resumed)

@@ -13,7 +13,7 @@ from django.test import AsyncClient
 from tth_types.adapter import TurnRequest
 from tth_types.enums import ErrorCode, HarnessKind
 from tth_types.errors import DomainError
-from tth_types.harness import HarnessConfiguration
+from tth_types.harness import HarnessConfiguration, HarnessMcpServer
 from tth_types.split_api import (
     FRAME_END,
     FRAME_HARNESS_EVENT,
@@ -310,3 +310,38 @@ async def test_capacity_refusal_closes_started_session(
     error = SplitError.model_validate_json(response.content)
     assert error.code == ErrorCode.CONVERSATION_BUSY.value
     assert fake_adapter.closed
+
+
+async def test_probe_and_create_reject_mcp_servers_the_adapter_cannot_attach(
+    fake_adapter: FakeAdapter, tmp_path: Any
+) -> None:
+    """The gate is capability-driven: the fake adapter does not advertise MCP support."""
+    del fake_adapter
+    client = AsyncClient()
+    servers = (HarnessMcpServer(name="memory", url="http://127.0.0.1:8001/mcp"),)
+    config = _config(str(tmp_path)).model_copy(update={"mcp_servers": servers})
+
+    probe = await _post(
+        client,
+        "/v1/probe",
+        ProbeRequest(configuration=config, adapter_version="test", redaction_patterns=()),
+    )
+    assert probe.status_code == 409, probe.content
+    probe_error = SplitError.model_validate_json(probe.content)
+    assert probe_error.code == ErrorCode.PROVIDER_INCOMPATIBLE.value
+
+    create = await _post(
+        client,
+        "/v1/sessions",
+        CreateSessionRequest(
+            mode="start",
+            conversation_id=uuid4(),
+            binding_id=uuid4(),
+            configuration=config,
+            adapter_version="test",
+        ),
+    )
+    assert create.status_code == 409, create.content
+    create_error = SplitError.model_validate_json(create.content)
+    assert create_error.code == ErrorCode.PROVIDER_INCOMPATIBLE.value
+    assert create_error.details["mcp_servers"] == ["memory"]

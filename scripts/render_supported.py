@@ -24,6 +24,7 @@ CAPABILITIES = (
     "supports_steer",
     "supports_multi_interaction",
     "supports_nested_activity",
+    "supports_mcp_servers",
 )
 KNOWN_PLATFORMS = frozenset({"linux", "darwin", "win32"})
 
@@ -134,8 +135,8 @@ def render(documents: list[tuple[str, str, dict[str, Any]]]) -> str:
                 "",
                 "### Adapter capabilities",
                 "",
-                "| Resume | Interrupt | Steer | Multi-interaction | Nested |",
-                "| --- | --- | --- | --- | --- |",
+                "| Resume | Interrupt | Steer | Multi-interaction | Nested | MCP servers |",
+                "| --- | --- | --- | --- | --- | --- |",
                 f"| {cells} |",
                 "",
             )

@@ -25,7 +25,9 @@ REQUIRED_EXTRAS = (
 TTH_TYPES_ROOT = ROOT / "tth-types"
 
 
-@pytest.fixture(scope="module")
+# Session scope: the build is order-independent, so interleaving these tests
+# with other modules (see tests/conftest.py) must not rebuild the dist dir.
+@pytest.fixture(scope="session")
 def dist_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
     out = tmp_path_factory.mktemp("dist")
     for project_root in (ROOT, TTH_TYPES_ROOT):

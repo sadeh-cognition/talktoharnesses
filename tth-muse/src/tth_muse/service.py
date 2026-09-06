@@ -24,6 +24,7 @@ from tth_types.harness import (
     LaunchSnapshot,
     VersionAdvisory,
 )
+from tth_types.mcp import require_mcp_servers_supported
 from tth_types.split_api import CreateSessionRequest, ProbeRequest, ProbeResponse, SessionCreated
 
 from tth_muse.harness.adapter import MuseAdapter
@@ -106,6 +107,21 @@ def _build_argv(
     raise DomainError(ErrorCode.INVALID_STATE, "build_argv must return a sequence of strings")
 
 
+def _build_environment(
+    adapter: HarnessAdapter, configuration: HarnessConfiguration
+) -> dict[str, str]:
+    """Extra child environment for process-bound adapters; empty when unsupported."""
+    build = getattr(adapter, "build_environment", None)
+    if not callable(build):
+        return {}
+    built = cast(Callable[[HarnessConfiguration], object], build)(configuration)
+    if built is None:
+        return {}
+    if isinstance(built, dict):
+        return {str(key): str(value) for key, value in cast(dict[object, object], built).items()}
+    raise DomainError(ErrorCode.INVALID_STATE, "build_environment must return a mapping")
+
+
 def _bind_process(adapter: HarnessAdapter, handle: ProcessHandle) -> None:
     bind = getattr(adapter, "bind_process", None)
     if callable(bind):
@@ -169,6 +185,7 @@ async def probe(request: ProbeRequest) -> ProbeResponse:
         adapter.probe(request.configuration),
         timeout=_policy.start_resume_timeout,
     )
+    require_mcp_servers_supported(request.configuration, capabilities)
     process_bound = callable(getattr(adapter, "build_argv", None))
     launch = _build_launch(
         request.configuration,
@@ -190,6 +207,7 @@ async def _spawn(
     launch: LaunchSnapshot,
     argv: tuple[str, ...],
     redaction_patterns: tuple[str, ...],
+    environment: dict[str, str] | None = None,
 ) -> ProcessHandle:
     return await _supervisor.spawn(
         ProcessSpec(
@@ -198,6 +216,7 @@ async def _spawn(
             process_id=uuid4(),
             launch=launch,
             argv=argv,
+            environment=environment or {},
         ),
         redaction_patterns=redaction_patterns,
     )
@@ -245,7 +264,9 @@ async def create_session(request: CreateSessionRequest) -> SessionCreated:
         adapter.probe(request.configuration),
         timeout=_policy.start_resume_timeout,
     )
+    require_mcp_servers_supported(request.configuration, capabilities)
     argv = _build_argv(adapter, request.configuration)
+    environment = _build_environment(adapter, request.configuration) if argv is not None else {}
     launch = _build_launch(
         request.configuration,
         capabilities,
@@ -265,6 +286,7 @@ async def create_session(request: CreateSessionRequest) -> SessionCreated:
                 launch=launch,
                 argv=argv,
                 redaction_patterns=request.redaction_patterns,
+                environment=environment,
             )
             _bind_process(adapter, handle)
 
@@ -288,6 +310,7 @@ async def create_session(request: CreateSessionRequest) -> SessionCreated:
                     launch=launch,
                     argv=tuple(str(part) for part in retry_argv),
                     redaction_patterns=request.redaction_patterns,
+                    environment=environment,
                 )
                 _bind_process(adapter, handle)
         # Registered inside the cleanup scope: a capacity refusal from the

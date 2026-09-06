@@ -60,6 +60,19 @@ _HOST_GATEWAY_ALIAS = "host.docker.internal"
 _LOCAL_HOSTNAMES = frozenset({"localhost", "127.0.0.1", "::1"})
 
 
+def rewrite_loopback_url(url: str, alias: str) -> str:
+    """Point a loopback URL at ``alias`` so a container reaches the proxy host.
+
+    Scheme, port, path, and query are preserved; non-loopback hosts pass
+    through unchanged.
+    """
+    parts = urlsplit(url)
+    if parts.hostname and parts.hostname.lower() in _LOCAL_HOSTNAMES:
+        netloc = alias if parts.port is None else f"{alias}:{parts.port}"
+        return urlunsplit(parts._replace(netloc=netloc))
+    return url
+
+
 def _container_otlp_endpoint(raw: str | None) -> str:
     """Map the host-side OTLP endpoint to the value a sandbox should see.
 
@@ -73,13 +86,7 @@ def _container_otlp_endpoint(raw: str | None) -> str:
     value = raw.strip()
     if value.lower() in _OTEL_OPT_OUT_VALUES:
         return value
-    parts = urlsplit(value)
-    if parts.hostname and parts.hostname.lower() in _LOCAL_HOSTNAMES:
-        netloc = (
-            _HOST_GATEWAY_ALIAS if parts.port is None else f"{_HOST_GATEWAY_ALIAS}:{parts.port}"
-        )
-        return urlunsplit(parts._replace(netloc=netloc))
-    return value
+    return rewrite_loopback_url(value, _HOST_GATEWAY_ALIAS)
 
 
 @dataclass(frozen=True)
@@ -258,6 +265,10 @@ class SandboxConfig(BaseModel):
 class SplitEndpoint:
     base_url: str
     token: str | None = None
+    # Set for proxy-managed sandboxes: the hostname a container uses to reach
+    # loopback services on the proxy host, so harness-facing URLs in the
+    # configuration (MCP servers) can be rewritten before they cross over.
+    loopback_alias: str | None = None
 
 
 class SandboxRecordData(BaseModel):
@@ -410,7 +421,7 @@ class SandboxManager:
             raise
         ready_at = datetime.now(UTC)
         await self._save(record.model_copy(update={"status": "ready", "last_ready_at": ready_at}))
-        endpoint = SplitEndpoint(base_url=base_url, token=token)
+        endpoint = SplitEndpoint(base_url=base_url, token=token, loopback_alias=_HOST_GATEWAY_ALIAS)
         self._endpoints[kind] = endpoint
         self._auth_signatures[kind] = self._auth_signature(kind)
         return endpoint

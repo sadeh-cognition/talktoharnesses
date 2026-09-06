@@ -16,7 +16,12 @@ from tth_types.events import (
     TurnCompletedPayload,
     UsageUpdatedPayload,
 )
-from tth_types.harness import HarnessConfiguration, LaunchSnapshot
+from tth_types.harness import (
+    HarnessConfiguration,
+    HarnessMcpHeader,
+    HarnessMcpServer,
+    LaunchSnapshot,
+)
 
 from tests.fakes import _FakeAcpProcess  # pyright: ignore[reportPrivateUsage]
 from tth_grok.harness.adapter import GrokAdapter
@@ -269,4 +274,49 @@ async def test_submit_allowed_after_prompt_resolves() -> None:
     await asyncio.sleep(0.05)
     await adapter.submit(session, TurnRequest(turn_id=uuid4(), prompt="two"))
     assert len(proc.prompt_calls) == 2
+    await adapter.close(session)
+
+
+async def test_start_passes_configured_mcp_servers_over_acp() -> None:
+    proc = _FakeAcpProcess(agent_version="1.0.5")
+    release = match_release("grok 1.0.5 (5115b46bc9) [stable]", platform="linux")
+    adapter = GrokAdapter()
+    adapter._release = release  # pyright: ignore[reportPrivateUsage]
+    adapter._capabilities = release.to_harness_capabilities()  # pyright: ignore[reportPrivateUsage]
+    adapter.bind_process(proc)  # type: ignore[arg-type]
+    config = HarnessConfiguration(
+        kind=HarnessKind.GROK,
+        working_directory="/tmp",
+        mcp_servers=(
+            HarnessMcpServer(
+                name="memory",
+                url="http://host.docker.internal:8001/mcp/projects/7/memory",
+                headers=(HarnessMcpHeader(name="Authorization", value="Bearer tok"),),
+            ),
+        ),
+    )
+    assert adapter._capabilities.supports_mcp_servers is True  # pyright: ignore[reportPrivateUsage]
+
+    session = await adapter.start(
+        StartSessionRequest(
+            conversation_id=uuid4(),
+            binding_id=uuid4(),
+            configuration=config,
+            launch=LaunchSnapshot(
+                harness_version="1.0.5",
+                working_directory="/tmp",
+                adapter_version="test",
+                capabilities=release.to_harness_capabilities(),
+            ),
+        )
+    )
+    new = next(msg for msg in proc.requests if msg.get("method") == "session/new")
+    assert new["params"]["mcpServers"] == [
+        {
+            "type": "http",
+            "name": "memory",
+            "url": "http://host.docker.internal:8001/mcp/projects/7/memory",
+            "headers": [{"name": "Authorization", "value": "Bearer tok"}],
+        }
+    ]
     await adapter.close(session)

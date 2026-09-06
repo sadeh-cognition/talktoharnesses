@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any, cast
 from uuid import UUID, uuid4
 
@@ -26,6 +27,7 @@ from tth_types.harness import (
     StructuredQuestionPayload,
 )
 
+from tth_muse.harness.config_dir import remove_config_dir, render_config_dir
 from tth_muse.harness.connection import MuseConnection
 from tth_muse.harness.normalizer import MuseNormalizer
 from tth_muse.harness.probe import build_argv, probe_muse
@@ -69,12 +71,26 @@ class MuseAdapter:
         self._model: str | None = None
         self._queued = False
         self._closed = False
+        self._config_dir: Path | None = None
 
     def bind_process(self, process: ProcessHandle) -> None:
         self._process = process
 
     def build_argv(self, config: HarnessConfiguration) -> tuple[str, ...]:
         return build_argv(config)
+
+    def build_environment(self, config: HarnessConfiguration) -> dict[str, str]:
+        """Point the host at a per-process config dir carrying the MCP servers.
+
+        Muse reads MCP servers from its settings file, not from the wire, so a
+        harness with servers gets its own ``XDG_CONFIG_HOME`` whose settings
+        merge the servers over the host's saved settings. Without servers the
+        host uses its ordinary configuration.
+        """
+        if not config.mcp_servers:
+            return {}
+        self._config_dir = render_config_dir(config)
+        return {"XDG_CONFIG_HOME": str(self._config_dir)}
 
     def set_redaction_patterns(self, patterns: tuple[str, ...]) -> None:
         self._normalizer.patterns = tuple(sorted(filter(None, patterns), key=len, reverse=True))
@@ -390,3 +406,6 @@ class MuseAdapter:
             await self._connection.close()
         await asyncio.gather(*self._answer_tasks.values(), return_exceptions=True)
         await self._queue.put(None)
+        if self._config_dir is not None:
+            remove_config_dir(self._config_dir)
+            self._config_dir = None

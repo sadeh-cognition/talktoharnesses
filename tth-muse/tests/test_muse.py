@@ -12,6 +12,7 @@ from uuid import UUID, uuid4
 import pytest
 from tth_types.adapter import (
     HarnessInteractionRequest,
+    HarnessSession,
     ResumeSessionRequest,
     StartSessionRequest,
     SteerRequest,
@@ -23,14 +24,22 @@ from tth_types.events import AssistantMessageCompletedPayload, HarnessEvent, Usa
 from tth_types.harness import (
     HarnessCapabilities,
     HarnessConfiguration,
+    HarnessMcpHeader,
+    HarnessMcpServer,
     InteractionAnswer,
     LaunchSnapshot,
 )
 
 from tth_muse.harness import adapter as adapter_module
+from tth_muse.harness import config_dir as config_dir_module
 from tth_muse.harness import connection as connection_module
 from tth_muse.harness.adapter import MuseAdapter
 from tth_muse.harness.compatibility import compare_versions
+from tth_muse.harness.config_dir import (
+    remove_config_dir,
+    render_config_dir,
+    settings_with_mcp_servers,
+)
 from tth_muse.harness.connection import MuseConnection
 from tth_muse.harness.normalizer import MuseNormalizer
 from tth_muse.harness.probe import build_argv
@@ -591,3 +600,96 @@ def test_yolo_changes_host_sandbox_only_when_requested() -> None:
         "--disable-sandbox",
         "--trust-workspace",
     )
+
+
+def _mcp_config(**overrides: object) -> HarnessConfiguration:
+    fields: dict[str, object] = {
+        "kind": HarnessKind.MUSE,
+        "working_directory": "/tmp",
+        "mcp_servers": (
+            HarnessMcpServer(
+                name="agentbahn_memory",
+                url="http://host.docker.internal:8001/mcp/projects/7/memory",
+                headers=(HarnessMcpHeader(name="Authorization", value="Bearer tok"),),
+            ),
+        ),
+    }
+    fields.update(overrides)
+    return HarnessConfiguration.model_validate(fields)
+
+
+def test_settings_merge_mcp_servers_over_saved_settings() -> None:
+    base = {
+        "schema_version": 1,
+        "model": "muse-spark-1.2",
+        "mcp_servers": {"kept": {"transport": "stdio", "command": "keep-me"}},
+    }
+
+    merged = settings_with_mcp_servers(base, _mcp_config())
+
+    assert merged["model"] == "muse-spark-1.2"
+    assert merged["mcp_servers"] == {
+        "kept": {"transport": "stdio", "command": "keep-me"},
+        "agentbahn_memory": {
+            "transport": "streamable_http",
+            "url": "http://host.docker.internal:8001/mcp/projects/7/memory",
+            "headers": {"Authorization": "Bearer tok"},
+        },
+    }
+    assert settings_with_mcp_servers({}, _mcp_config())["schema_version"] == 1
+
+
+def test_render_config_dir_links_credentials_and_writes_private_settings(
+    tmp_path: Path,
+) -> None:
+    base = tmp_path / "base" / "muse"
+    base.mkdir(parents=True)
+    (base / "settings.json").write_text(
+        json.dumps({"schema_version": 1, "tui": {"theme": "dark"}}), encoding="utf-8"
+    )
+    (base / "auth.json").write_text('{"token": "secret"}', encoding="utf-8")
+
+    xdg_root = render_config_dir(_mcp_config(), base=base, root=tmp_path)
+
+    muse_dir = xdg_root / "muse"
+    settings = json.loads((muse_dir / "settings.json").read_text(encoding="utf-8"))
+    assert settings["tui"] == {"theme": "dark"}
+    assert "agentbahn_memory" in settings["mcp_servers"]
+    assert (muse_dir / "auth.json").is_symlink()
+    assert (muse_dir / "auth.json").resolve() == (base / "auth.json").resolve()
+    assert not (muse_dir / "trust.json").exists()
+    assert oct((muse_dir / "settings.json").stat().st_mode & 0o777) == "0o600"
+    # Base settings are never touched.
+    assert "mcp_servers" not in json.loads((base / "settings.json").read_text(encoding="utf-8"))
+
+    remove_config_dir(xdg_root)
+    assert not xdg_root.exists()
+    assert (base / "auth.json").is_file()
+
+
+async def test_adapter_environment_points_host_at_private_config_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "home-config"))
+    monkeypatch.setattr(config_dir_module.tempfile, "gettempdir", lambda: str(tmp_path))
+    adapter = MuseAdapter()
+    plain = HarnessConfiguration(kind=HarnessKind.MUSE, working_directory="/tmp")
+
+    assert adapter.build_environment(plain) == {}
+
+    environment = adapter.build_environment(_mcp_config())
+    xdg_root = Path(environment["XDG_CONFIG_HOME"])
+    assert xdg_root.parent == tmp_path
+    assert xdg_root.name.startswith("tth-muse-config-")
+    settings = json.loads((xdg_root / "muse" / "settings.json").read_text(encoding="utf-8"))
+    assert settings["mcp_servers"]["agentbahn_memory"]["transport"] == "streamable_http"
+
+    await adapter.close(
+        HarnessSession(
+            conversation_id=uuid4(),
+            binding_id=uuid4(),
+            kind=HarnessKind.MUSE,
+            native_session_id="s",
+        )
+    )
+    assert not xdg_root.exists()

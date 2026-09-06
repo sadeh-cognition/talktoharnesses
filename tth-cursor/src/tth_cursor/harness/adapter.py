@@ -26,6 +26,7 @@ from tth_types.harness import (
     HarnessConfiguration,
     InteractionAnswer,
 )
+from tth_types.mcp import acp_mcp_servers
 
 from tth_cursor.acp.connection import AcpConnection
 from tth_cursor.acp.jsonrpc import JsonRpcRemoteError, ProtocolCloseError
@@ -137,7 +138,7 @@ class CursorAdapter:
         cwd = request.launch.working_directory or request.configuration.working_directory
         future, _delivered = await self._connection.request(
             "session/new",
-            {"cwd": cwd, "mcpServers": []},
+            {"cwd": cwd, "mcpServers": acp_mcp_servers(request.configuration)},
         )
         result = await future
         session_id = _require_session_id(result)
@@ -179,7 +180,7 @@ class CursorAdapter:
             {
                 "sessionId": request.native_session_id,
                 "cwd": cwd,
-                "mcpServers": [],
+                "mcpServers": acp_mcp_servers(request.configuration),
             },
         )
         result = await future

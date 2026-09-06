@@ -11,7 +11,8 @@
       "supports_interrupt": true,
       "supports_steer": true,
       "supports_multi_interaction": false,
-      "supports_nested_activity": false
+      "supports_nested_activity": false,
+      "supports_mcp_servers": true
     },
     "notes": "Broker-compatible approvals use public CodexClient(approval_handler=...) with ApprovalsReviewer.user. Live create/resume/interaction proven on linux. Steer and interrupt are published for the same linux gate. SDK and runtime remain pinned split dependencies."
   },

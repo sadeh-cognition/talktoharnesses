@@ -101,6 +101,8 @@ APPROVED: dict[str, frozenset[str]] = {
             "HarnessInstance",
             "HarnessInstanceRuleScope",
             "HarnessKind",
+            "HarnessMcpHeader",
+            "HarnessMcpServer",
             "HarnessModeInfo",
             "HarnessModelInfo",
             "HarnessProbeProjection",

@@ -32,6 +32,8 @@ from tth_types.events import (
 from tth_types.harness import (
     HarnessCapabilities,
     HarnessConfiguration,
+    HarnessMcpHeader,
+    HarnessMcpServer,
     InteractionAnswer,
     LaunchSnapshot,
 )
@@ -894,6 +896,14 @@ async def test_build_broker_async_codex_thread_start_and_resume(
     assert broker._client._sync.config.config_overrides == (  # type: ignore[attr-defined]
         "features.default_mode_request_user_input=true",
     )
+    with_mcp = adapter_mod._build_broker_async_codex(  # pyright: ignore[reportPrivateUsage]
+        handler,
+        config_overrides=('mcp_servers.memory.url="http://host.docker.internal:8001/mcp"',),
+    )
+    assert with_mcp._client._sync.config.config_overrides == (  # type: ignore[attr-defined]
+        "features.default_mode_request_user_input=true",
+        'mcp_servers.memory.url="http://host.docker.internal:8001/mcp"',
+    )
 
     async def _ensure() -> None:
         return None
@@ -1039,3 +1049,62 @@ async def test_coerce_notification_fallbacks_and_require_session() -> None:
     other = session.model_copy(update={"conversation_id": uuid4()})
     with pytest.raises(DomainError):
         adapter._require_session(other)  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.asyncio
+async def test_start_forwards_mcp_overrides_to_client_factory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tth_codex.harness import adapter as adapter_mod
+
+    captured: list[tuple[str, ...]] = []
+
+    def fake_build(
+        handler: object, *, yolo: bool = False, config_overrides: tuple[str, ...] = ()
+    ) -> object:
+        del handler, yolo
+        captured.append(config_overrides)
+        raise ImportError("stop after capturing overrides")
+
+    monkeypatch.setattr(adapter_mod, "_build_broker_async_codex", fake_build)
+    adapter = adapter_mod.CodexAdapter()
+    release = SimpleNamespace(
+        capabilities=SimpleNamespace(supports_resume=True), platforms=["linux"]
+    )
+    monkeypatch.setattr(adapter, "_release", release)
+
+    def _allow(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+
+    monkeypatch.setattr(adapter_mod, "enforce_published_operation", _allow)
+    config = HarnessConfiguration(
+        kind=HarnessKind.CODEX,
+        working_directory="/tmp",
+        mcp_servers=(
+            HarnessMcpServer(
+                name="memory",
+                url="http://host.docker.internal:8001/mcp/projects/7/memory",
+                headers=(HarnessMcpHeader(name="Authorization", value="Bearer tok"),),
+            ),
+        ),
+    )
+    with pytest.raises(DomainError):
+        await adapter.start(
+            StartSessionRequest(
+                conversation_id=uuid4(),
+                binding_id=uuid4(),
+                configuration=config,
+                launch=LaunchSnapshot(
+                    harness_version="0.1",
+                    working_directory="/tmp",
+                    adapter_version="test",
+                    capabilities=HarnessCapabilities(kind=HarnessKind.CODEX, version="0.1"),
+                ),
+            )
+        )
+    assert captured == [
+        (
+            'mcp_servers.memory.url="http://host.docker.internal:8001/mcp/projects/7/memory"',
+            'mcp_servers.memory.http_headers={ "Authorization" = "Bearer tok" }',
+        )
+    ]

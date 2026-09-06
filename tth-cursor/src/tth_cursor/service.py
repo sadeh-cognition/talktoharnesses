@@ -30,6 +30,7 @@ from tth_types.harness import (
     LaunchSnapshot,
     VersionAdvisory,
 )
+from tth_types.mcp import require_mcp_servers_supported
 from tth_types.split_api import CreateSessionRequest, ProbeRequest, ProbeResponse, SessionCreated
 
 from tth_cursor.harness.adapter import CursorAdapter
@@ -176,6 +177,7 @@ async def probe(request: ProbeRequest) -> ProbeResponse:
         adapter.probe(request.configuration),
         timeout=_policy.start_resume_timeout,
     )
+    require_mcp_servers_supported(request.configuration, capabilities)
     process_bound = callable(getattr(adapter, "build_argv", None))
     launch = _build_launch(
         request.configuration,
@@ -252,6 +254,7 @@ async def create_session(request: CreateSessionRequest) -> SessionCreated:
         adapter.probe(request.configuration),
         timeout=_policy.start_resume_timeout,
     )
+    require_mcp_servers_supported(request.configuration, capabilities)
     argv = _build_argv(adapter, request.configuration)
     launch = _build_launch(
         request.configuration,

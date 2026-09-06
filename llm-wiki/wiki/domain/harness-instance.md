@@ -8,13 +8,13 @@ audiences:
 tags:
   - type/domain
   - capability/adapters
-last_verified: 2026-08-29
-verified_against_commit: 47644027875773ba520cbfdd9f978d196a548802
+last_verified: 2026-09-06
+verified_against_commit: d55a5a38d39b80e5f755d419b52b680bb1c08347
 ---
 
 # Harness Instance
 
-A harness instance is an owner-owned named configuration: kind, working directory, workspace roots, and optional model, mode, effort, and yolo. Create and stored configuration reject executable paths. The proxy resolves the kind to a remote split; that split owns CLI or SDK discovery, probe, and launch. A `LaunchSnapshot` records the executable selected by the split.
+A harness instance is an owner-owned named configuration: kind, working directory, workspace roots, optional model, mode, effort, and yolo, and optional streamable HTTP MCP servers (`mcp_servers`) that supporting splits attach to every session. Create and stored configuration reject executable paths. The proxy resolves the kind to a remote split; that split owns CLI or SDK discovery, probe, and launch. A `LaunchSnapshot` records the executable selected by the split.
 
 Probe produces `HarnessCapabilities` and a `VersionAdvisory`. Switching harnesses creates a new binding rather than mutating the old one.
 

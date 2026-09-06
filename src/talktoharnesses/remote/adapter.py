@@ -50,6 +50,7 @@ from tth_types.split_api import (
 from talktoharnesses._sse import SseDecoder
 from talktoharnesses.domain.events import HarnessEvent
 from talktoharnesses.remote.handle import RemoteProcessHandle
+from talktoharnesses.remote.sandbox import rewrite_loopback_url
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +75,23 @@ class ResolvedEndpoint(Protocol):
 
     @property
     def token(self) -> str | None: ...
+
+    @property
+    def loopback_alias(self) -> str | None: ...
+
+
+def configuration_for_split(
+    configuration: HarnessConfiguration, endpoint: ResolvedEndpoint
+) -> HarnessConfiguration:
+    """Rewrite loopback MCP server URLs for a split that runs in a container."""
+    alias = endpoint.loopback_alias
+    if alias is None or not configuration.mcp_servers:
+        return configuration
+    servers = tuple(
+        server.model_copy(update={"url": rewrite_loopback_url(server.url, alias)})
+        for server in configuration.mcp_servers
+    )
+    return configuration.model_copy(update={"mcp_servers": servers})
 
 
 def _raise_split_error(response: httpx.Response) -> None:
@@ -131,6 +149,7 @@ class RemoteHarnessAdapter:
         self._probe_launch: LaunchSnapshot | None = None
         self._probe_advisory: VersionAdvisory | None = None
         self._handle: RemoteProcessHandle | None = None
+        self._endpoint: ResolvedEndpoint | None = None
         self._closed = False
 
     # ------------------------------------------------------------------
@@ -165,9 +184,14 @@ class RemoteHarnessAdapter:
     # HTTP plumbing
     # ------------------------------------------------------------------
 
+    async def _resolved_endpoint(self) -> ResolvedEndpoint:
+        if self._endpoint is None:
+            self._endpoint = await self._endpoints.endpoint(self.kind, self._required_paths)
+        return self._endpoint
+
     async def _client_for_split(self) -> httpx.AsyncClient:
         if self._client is None:
-            resolved = await self._endpoints.endpoint(self.kind, self._required_paths)
+            resolved = await self._resolved_endpoint()
             headers: dict[str, str] = {}
             if resolved.token:
                 headers["X-TTH-Split-Token"] = resolved.token
@@ -212,10 +236,15 @@ class RemoteHarnessAdapter:
     # HarnessAdapter protocol
     # ------------------------------------------------------------------
 
+    async def _split_configuration(
+        self, configuration: HarnessConfiguration
+    ) -> HarnessConfiguration:
+        return configuration_for_split(configuration, await self._resolved_endpoint())
+
     async def probe(self, config: HarnessConfiguration) -> HarnessCapabilities:
         self._required_paths = (config.working_directory, *config.workspace_roots)
         request = ProbeRequest(
-            configuration=config,
+            configuration=await self._split_configuration(config),
             adapter_version=self._adapter_version,
             redaction_patterns=self._redaction_patterns,
         )
@@ -261,7 +290,7 @@ class RemoteHarnessAdapter:
                 "mode": mode,
                 "conversation_id": conversation_id,
                 "binding_id": binding_id,
-                "configuration": configuration,
+                "configuration": await self._split_configuration(configuration),
                 "native_session_id": native_session_id,
                 "adapter_version": self._adapter_version,
                 "redaction_patterns": self._redaction_patterns,

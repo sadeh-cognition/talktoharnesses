@@ -19,6 +19,8 @@ from tth_types.harness import FileApprovalAction as FileApprovalAction
 from tth_types.harness import HarnessCapabilities as HarnessCapabilities
 from tth_types.harness import HarnessConfiguration as HarnessConfiguration
 from tth_types.harness import HarnessEffortInfo as HarnessEffortInfo
+from tth_types.harness import HarnessMcpHeader as HarnessMcpHeader
+from tth_types.harness import HarnessMcpServer as HarnessMcpServer
 from tth_types.harness import HarnessModeInfo as HarnessModeInfo
 from tth_types.harness import HarnessModelInfo as HarnessModelInfo
 from tth_types.harness import InteractionAnswer as InteractionAnswer

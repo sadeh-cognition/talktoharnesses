@@ -18,6 +18,10 @@ DATABASES = {
 }
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 AUTH_USER_MODEL = "auth.User"
+# PBKDF2 costs ~100ms per ``create_user``/``check_password`` call, which
+# dominated fixture setup across the Django/API/e2e suites. Nothing under test
+# depends on the production hasher.
+PASSWORD_HASHERS = ["django.contrib.auth.hashers.MD5PasswordHasher"]
 # Distinct from SECRET_KEY; >= 32 bytes.
 TALKTOHARNESSES_JWT_SIGNING_KEY = "test-jwt-signing-key-32-bytes-min!!"
 ALLOWED_HOSTS = ["testserver", "localhost", "127.0.0.1"]

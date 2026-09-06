@@ -10,8 +10,8 @@ from uuid import uuid4
 import pytest
 from django.test import AsyncClient
 from tth_types.adapter import TurnRequest
-from tth_types.enums import HarnessKind
-from tth_types.harness import HarnessConfiguration
+from tth_types.enums import ErrorCode, HarnessKind
+from tth_types.harness import HarnessConfiguration, HarnessMcpServer
 from tth_types.split_api import (
     FRAME_END,
     FRAME_HARNESS_EVENT,
@@ -37,9 +37,7 @@ async def _post(client: AsyncClient, path: str, body: Any) -> Any:
     return await client.post(path, data=body.model_dump_json(), content_type="application/json")
 
 
-async def _create_session(
-    client: AsyncClient, tmp_path_str: str
-) -> SessionCreated:
+async def _create_session(client: AsyncClient, tmp_path_str: str) -> SessionCreated:
     request = CreateSessionRequest(
         mode="start",
         conversation_id=uuid4(),
@@ -105,9 +103,7 @@ async def test_probe(fake_adapter: FakeAdapter, tmp_path: Any) -> None:
     assert fake_adapter.redaction_patterns == ("secret",)
 
 
-async def test_session_lifecycle_and_event_stream(
-    fake_adapter: FakeAdapter, tmp_path: Any
-) -> None:
+async def test_session_lifecycle_and_event_stream(fake_adapter: FakeAdapter, tmp_path: Any) -> None:
     client = AsyncClient()
     created = await _create_session(client, str(tmp_path))
     assert created.pid is None
@@ -175,9 +171,7 @@ async def test_unknown_session_is_404(fake_adapter: FakeAdapter) -> None:
 
 async def test_invalid_body_is_422(fake_adapter: FakeAdapter) -> None:
     client = AsyncClient()
-    response = await client.post(
-        "/v1/probe", data='{"nope": 1}', content_type="application/json"
-    )
+    response = await client.post("/v1/probe", data='{"nope": 1}', content_type="application/json")
     assert response.status_code == 422
     assert SplitError.model_validate_json(response.content).code == "validation_error"
 
@@ -194,9 +188,7 @@ async def test_terminate_closes_session(fake_adapter: FakeAdapter, tmp_path: Any
     assert fake_adapter.closed
 
 
-async def test_split_token_auth(
-    fake_adapter: FakeAdapter, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_split_token_auth(fake_adapter: FakeAdapter, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("TTH_SPLIT_TOKEN", "s3cret-token")
     client = AsyncClient()
     # Health stays open for container healthchecks.
@@ -210,9 +202,7 @@ async def test_split_token_auth(
     assert allowed.status_code == 404
 
 
-async def test_busy_submit_maps_to_conflict(
-    fake_adapter: FakeAdapter, tmp_path: Any
-) -> None:
+async def test_busy_submit_maps_to_conflict(fake_adapter: FakeAdapter, tmp_path: Any) -> None:
     """A CONVERSATION_BUSY duplicate-turn rejection surfaces as HTTP 409, not
     a turn-killing failure."""
     from tth_types.enums import ErrorCode
@@ -263,3 +253,38 @@ async def test_capacity_refusal_closes_started_session(
     error = SplitError.model_validate_json(response.content)
     assert error.code == ErrorCode.CONVERSATION_BUSY.value
     assert fake_adapter.closed
+
+
+async def test_probe_and_create_reject_mcp_servers_the_adapter_cannot_attach(
+    fake_adapter: FakeAdapter, tmp_path: Any
+) -> None:
+    """The gate is capability-driven: the fake adapter does not advertise MCP support."""
+    del fake_adapter
+    client = AsyncClient()
+    servers = (HarnessMcpServer(name="memory", url="http://127.0.0.1:8001/mcp"),)
+    config = _config(str(tmp_path)).model_copy(update={"mcp_servers": servers})
+
+    probe = await _post(
+        client,
+        "/v1/probe",
+        ProbeRequest(configuration=config, adapter_version="test", redaction_patterns=()),
+    )
+    assert probe.status_code == 409, probe.content
+    probe_error = SplitError.model_validate_json(probe.content)
+    assert probe_error.code == ErrorCode.PROVIDER_INCOMPATIBLE.value
+
+    create = await _post(
+        client,
+        "/v1/sessions",
+        CreateSessionRequest(
+            mode="start",
+            conversation_id=uuid4(),
+            binding_id=uuid4(),
+            configuration=config,
+            adapter_version="test",
+        ),
+    )
+    assert create.status_code == 409, create.content
+    create_error = SplitError.model_validate_json(create.content)
+    assert create_error.code == ErrorCode.PROVIDER_INCOMPATIBLE.value
+    assert create_error.details["mcp_servers"] == ["memory"]

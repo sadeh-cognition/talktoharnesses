@@ -198,6 +198,31 @@ Entries are appended using `## [YYYY-MM-DD] operation | Title`.
   on the host and in Docker. The native failure after resume remains unresolved.
 - Muse tests and lint pass; the stricter live gate fails on approval delivery.
 
+## [2026-09-06] implementation | Attach streamable HTTP MCP servers to harness configuration
+
+- Preserved the approved MCP servers requirement under `raw/product/`.
+- Added `HarnessMcpServer` and `HarnessConfiguration.mcp_servers` to
+  `tth-types`, the `supports_mcp_servers` capability flag, shared
+  provider mappings in `tth_types.mcp`, and the API request body.
+- Claude Code, Cursor, Grok, and Codex adapters pass configured servers to
+  the SDK, ACP, and config overrides; OpenCode, Muse Code, and Prime Agent
+  reject them with `provider_incompatible`.
+- The proxy rewrites loopback server URLs to the sandbox host gateway for
+  managed sandboxes. Regenerated `SUPPORTED_HARNESSES.md` with the new column.
+- Updated the probe-and-configure requirement, harness instance, unified
+  adapters, glossary, and README.
+
+## [2026-09-06] implementation | Attach MCP servers to Muse Code hosts through a private settings directory
+
+- Preserved the Muse Code amendment to the MCP servers requirement under
+  `raw/product/`.
+- tth-muse renders a per-host `XDG_CONFIG_HOME` with the harness's servers
+  merged into `settings.json` and links to `auth.json` and `trust.json`,
+  passes it through a new `ProcessSpec.environment`, and removes it on close.
+- Muse advertises `supports_mcp_servers`; the rejection was removed and
+  `SUPPORTED_HARNESSES.md` regenerated. Updated the requirement, capability
+  page, and README.
+
 ## Related
 
 - [Wiki index](index.md)
