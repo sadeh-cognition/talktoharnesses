@@ -569,13 +569,21 @@ class SandboxManager:
 
         if container is not None:
             container.reload()
-            if container.status == "dead" or not self._container_matches(
-                container,
-                kind,
-                image=image,
-                name=name,
-                environment=environment,
-            ):
+            try:
+                matches = container.status != "dead" and self._container_matches(
+                    container,
+                    kind,
+                    image=image,
+                    name=name,
+                    environment=environment,
+                )
+            except not_found:
+                # The container's image was rebuilt and the old layer pruned:
+                # docker-py resolves ``container.image`` through the image API,
+                # which now 404s. That is configuration drift, not an outage.
+                logger.info("sandbox %s references an image that no longer exists", name)
+                matches = False
+            if not matches:
                 logger.info("recreating sandbox %s for managed configuration drift", name)
                 if container.status not in {"dead", "exited"}:
                     container.stop(timeout=10)

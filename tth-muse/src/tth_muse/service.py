@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import os
 from collections.abc import Awaitable, Callable
 from importlib import import_module
@@ -29,6 +30,7 @@ from tth_types.split_api import CreateSessionRequest, ProbeRequest, ProbeRespons
 
 from tth_muse.harness.adapter import MuseAdapter
 from tth_muse.harness.compatibility import compare_versions, load_muse_compatibility
+from tth_muse.harness.wire_log import WireLog
 from tth_muse.runtime.handle import ProcessHandle
 from tth_muse.runtime.spec import ProcessSpec
 from tth_muse.runtime.supervisor import ProcessSupervisor
@@ -40,6 +42,8 @@ from tth_muse.shared.compatibility import (
 from tth_muse.shared.paths import resolve_directory, resolve_kind_executable
 from tth_muse.shared.policy import RuntimePolicy
 
+logger = logging.getLogger(__name__)
+
 KIND = HarnessKind.MUSE
 
 _policy = RuntimePolicy()
@@ -50,7 +54,12 @@ RetryStartup = Callable[[DomainError], Awaitable[tuple[str, ...] | None]]
 
 
 def _default_adapter_factory() -> HarnessAdapter:
-    return MuseAdapter()
+    return MuseAdapter(
+        push_stall_probe=_policy.push_stall_probe,
+        push_poll_interval=_policy.push_poll_interval,
+        push_recovery_page_limit=_policy.push_recovery_page_limit,
+        push_recovery_max_pages=_policy.push_recovery_max_pages,
+    )
 
 
 def _resolve_adapter_factory() -> AdapterFactory:
@@ -120,6 +129,12 @@ def _build_environment(
     if isinstance(built, dict):
         return {str(key): str(value) for key, value in cast(dict[object, object], built).items()}
     raise DomainError(ErrorCode.INVALID_STATE, "build_environment must return a mapping")
+
+
+def _attach_wire_log(adapter: HarnessAdapter, session_id: UUID) -> None:
+    attach = getattr(adapter, "attach_wire_log", None)
+    if callable(attach):
+        cast(Callable[[WireLog | None], None], attach)(WireLog.open(session_id))
 
 
 def _bind_process(adapter: HarnessAdapter, handle: ProcessHandle) -> None:
@@ -257,7 +272,16 @@ async def _start_or_resume(
 
 async def create_session(request: CreateSessionRequest) -> SessionCreated:
     adapter = adapter_factory()
+    _attach_wire_log(adapter, request.session_id)
     _apply_redaction(adapter, request.redaction_patterns)
+    logger.info(
+        "create_session %s mode=%s conversation=%s binding=%s native_session_id=%s",
+        request.session_id,
+        request.mode,
+        request.conversation_id,
+        request.binding_id,
+        request.native_session_id,
+    )
     _import_seen(adapter, request.seen_native_ids, request.seen_stream_offsets)
 
     capabilities = await asyncio.wait_for(

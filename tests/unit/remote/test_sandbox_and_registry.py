@@ -948,3 +948,61 @@ def test_ensure_container_maps_run_failures_to_reasons(
 
     assert excinfo.value.code is ErrorCode.SANDBOX_UNAVAILABLE
     assert excinfo.value.details["reason"] == reason
+
+
+def test_reconcile_recreates_container_whose_image_was_pruned(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A running container whose image tag moved and whose old image is gone.
+
+    Rebuilding ``tth-<kind>:latest`` untags the previous image and a prune (or
+    buildx's own cleanup) can delete it; docker-py then raises NotFound while
+    resolving ``container.image``. Seen after a sidecar rebuild: the proxy kept
+    failing readiness with "No such image" instead of recreating the sandbox.
+    """
+    events: list[str] = []
+
+    class Missing(Exception):
+        pass
+
+    class FakeContainer:
+        status = "running"
+
+        def reload(self) -> None:
+            events.append("reload")
+
+        def stop(self, timeout: int = 10) -> None:
+            events.append("stop")
+
+        def remove(self, force: bool = False) -> None:
+            events.append(f"remove(force={force})")
+
+    class Containers:
+        def get(self, name: str) -> FakeContainer:
+            return fake
+
+        def run(self, image: str, **kwargs: Any) -> None:
+            events.append(f"run:{image}")
+
+    def image_lookup_fails(*args: Any, **kwargs: Any) -> bool:
+        raise Missing("No such image")
+
+    def mount_type(**kwargs: Any) -> dict[str, Any]:
+        return kwargs
+
+    fake = FakeContainer()
+    manager = SandboxManager(SandboxConfig.from_env({}))
+    monkeypatch.setattr(manager, "_container_matches", image_lookup_fails)
+    client: Any = SimpleNamespace(containers=Containers())
+    manager._reconcile_container(  # pyright: ignore[reportPrivateUsage]
+        client,
+        mount_type,
+        Missing,
+        kind=HarnessKind.MUSE,
+        name="tth-muse",
+        image="tth-muse:latest",
+        environment={"TTH_SPLIT_TOKEN": "tok"},
+        token="tok",
+    )
+
+    assert events == ["reload", "stop", "remove(force=True)", "run:tth-muse:latest"]

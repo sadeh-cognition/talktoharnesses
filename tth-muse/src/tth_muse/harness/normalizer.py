@@ -26,6 +26,36 @@ def _tool_name(item: dict[str, Any]) -> str:
     return "tool"
 
 
+_ITEM_METHODS = frozenset({"item/started", "item/updated", "item/completed"})
+_ITEM_KINDS = frozenset({"agentMessage", "reasoning", "toolCall"})
+_TERMINAL_ITEM_STATUSES = frozenset({"completed", "failed", "cancelled"})
+
+
+def _source_sequence(params: dict[str, Any]) -> int | None:
+    """The durable record sequence a view event folded from, when present."""
+    last = _dict(_dict(params.get("sourceRange")).get("last"))
+    sequence = last.get("sequence")
+    return sequence if type(sequence) is int else None
+
+
+def is_provisional(method: str, params: dict[str, Any]) -> bool:
+    """A paged view event that only reflects an unfinished run.
+
+    ``view/page`` folds the session at read time and renders an in-flight
+    turn as failed/incomplete: the running tool item comes back as
+    ``item/completed`` with ``status: failed, reason: incomplete`` and the
+    turn as ``turn/completed`` with ``terminal: failed, reason: incomplete``
+    and no ``durationMs``. Neither is a durable fact; push delivery never
+    carries them and a replay must not either.
+    """
+    if method == "turn/completed":
+        return "durationMs" not in params or params.get("reason") == "incomplete"
+    if method in _ITEM_METHODS:
+        item = _dict(params.get("item"))
+        return item.get("reason") == "incomplete" and str(item.get("status")) == "failed"
+    return False
+
+
 class MuseNormalizer:
     def __init__(self) -> None:
         self.turn_id: UUID | None = None
@@ -33,11 +63,15 @@ class MuseNormalizer:
         self.turn_started = False
         self.session_id: str | None = None
         self.patterns: tuple[str, ...] = ()
+        # Last push cursor observed for this session: the anchor for
+        # re-subscribing after the host's push delivery dies.
+        self.last_view_cursor: str | None = None
         self._items: dict[str, dict[str, Any]] = {}
         self._sequences: dict[str, int] = {}
         self._redactors: dict[str, StreamingTextRedactor] = {}
         self._seen: set[str] = set()
         self._usage: dict[str, Any] = {}
+        self._usage_sequence = -1
         self._has_message = False
 
     def redact(self, text: str) -> str:
@@ -59,7 +93,53 @@ class MuseNormalizer:
         self._sequences.clear()
         self._redactors.clear()
         self._usage.clear()
+        self._usage_sequence = -1
         self._has_message = False
+
+    def classify(self, method: str, params: dict[str, Any]) -> str:
+        """How a paged view event relates to what push delivery forwarded.
+
+        ``"new"``: carries something not yet forwarded; ``"known"``: already
+        forwarded, so anything older in the page is too; ``"irrelevant"``:
+        never forwarded by design (other sessions or turns, item kinds with
+        no TTH mapping, provisional folds of the unfinished run) and says
+        nothing about delivery either way. Identity, not view cursor: paged
+        reads number their cursors differently from push delivery.
+        """
+        if self.turn_id is None or params.get("sessionId") != self.session_id:
+            return "irrelevant"
+        if is_provisional(method, params):
+            return "irrelevant"
+        if method in _ITEM_METHODS:
+            item = _dict(params.get("item"))
+            if self.native_turn_id and item.get("turnId") != self.native_turn_id:
+                return "irrelevant"
+            item_id = item.get("itemId")
+            if item.get("kind") not in _ITEM_KINDS or not isinstance(item_id, str):
+                return "irrelevant"
+            stored = self._items.get(item_id)
+            if stored is None:
+                return "new"
+            if method == "item/completed" and not self._completed(stored):
+                return "new"
+            return "known"
+        if method == "session/tokenUsage":
+            sequence = _source_sequence(params)
+            if sequence is None:
+                return "irrelevant"
+            return "new" if sequence > self._usage_sequence else "known"
+        if method == "turn/completed":
+            if not self.native_turn_id or params.get("turnId") != self.native_turn_id:
+                return "irrelevant"
+            return "new"
+        return "irrelevant"
+
+    def is_new(self, method: str, params: dict[str, Any]) -> bool:
+        return self.classify(method, params) == "new"
+
+    @staticmethod
+    def _completed(item: dict[str, Any]) -> bool:
+        return str(item.get("status")) in _TERMINAL_ITEM_STATUSES
 
     def disconnected(self, message: str) -> list[ev.HarnessEvent]:
         if self.turn_id is None:
@@ -68,10 +148,24 @@ class MuseNormalizer:
         self.turn_id = None
         return [event]
 
+    def drop_reason(self, params: dict[str, Any]) -> str:
+        """Why ``on_notification`` would ignore a frame with these params."""
+        if self.turn_id is None:
+            return "no_active_turn"
+        if params.get("sessionId") != self.session_id:
+            return "other_session"
+        if params.get("turnId") and self.native_turn_id and params["turnId"] != self.native_turn_id:
+            return "other_turn"
+        # Either a method with no TTH mapping or a viewCursor replay that was
+        # already forwarded; the wire log carries the frame itself.
+        return "unmapped_or_duplicate"
+
     def on_notification(self, method: str, params: dict[str, Any]) -> list[ev.HarnessEvent]:
+        cursor = params.get("viewCursor")
+        if isinstance(cursor, str) and cursor and params.get("sessionId") == self.session_id:
+            self.last_view_cursor = cursor
         if self.turn_id is None or params.get("sessionId") != self.session_id:
             return []
-        cursor = params.get("viewCursor")
         key = f"{self.session_id}:{cursor}:{method}" if cursor else None
         if key is not None:
             if key in self._seen:
@@ -86,6 +180,13 @@ class MuseNormalizer:
             self.turn_id = None
             return [event]
         if method == "session/tokenUsage":
+            # Replayed after a push recovery, the same durable fact must not
+            # be added to the turn's cumulative usage twice.
+            sequence = _source_sequence(params)
+            if sequence is not None:
+                if sequence <= self._usage_sequence:
+                    return []
+                self._usage_sequence = sequence
             usage = _dict(params.get("usage"))
             values = {
                 "input_tokens": params.get("promptTokens"),
@@ -196,6 +297,10 @@ class MuseNormalizer:
             return []
         identity = self._id(item)
         result: list[ev.HarnessEvent] = []
+        stored = self._items.get(item_id)
+        if stored is not None and self._completed(stored):
+            # Already forwarded as complete (a paged replay of a pushed item).
+            return []
         if item_id not in self._items:
             self._redactors[item_id] = StreamingTextRedactor(self.patterns)
             if kind == "agentMessage":

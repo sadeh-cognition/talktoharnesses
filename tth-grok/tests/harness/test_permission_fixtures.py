@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from types import SimpleNamespace
+from typing import cast
 from uuid import uuid4
 
 import pytest
@@ -373,14 +375,51 @@ GROK_1_0_13_BASH_PERMISSION: dict[str, object] = {
 }
 
 
+# Captured 2026-09-06 with an HTTP MCP server named ``mnemosyne`` attached via
+# ``session/new``. The same request, with the same options, is emitted under
+# both ``--permission-mode default`` and ``--always-approve``. Grok names the
+# MCP tool ``<server>__<tool>`` in ``tool_name`` and ``title``.
+_GROK_USE_TOOL_OPTIONS = [
+    {"optionId": "always-allow", "name": "always allow", "kind": "allow_always"},
+    {"optionId": "allow-once", "name": "allow once", "kind": "allow_once"},
+    {"optionId": "reject-once", "name": "reject once", "kind": "reject_once"},
+]
+
+GROK_1_0_13_USE_TOOL_PERMISSION: dict[str, object] = {
+    "sessionId": "01a0786b-229a-7d92-a8cd-962173a1e7ac",
+    "toolCall": {
+        "toolCallId": "call-608e0762-fcd9-4a62-af41-033ad53f483e-1",
+        "kind": "other",
+        "title": "mnemosyne__mnemosyne_recall",
+        "rawInput": {
+            "variant": "UseTool",
+            "tool_name": "mnemosyne__mnemosyne_recall",
+            "tool_input": {"query": "workflow description", "limit": 3},
+        },
+        "_meta": {
+            "x.ai/tool": {
+                "version": 1,
+                "name": "use_tool",
+                "kind": "use_tool",
+                "namespace": "grok_build",
+                "label": "Use Tool",
+                "read_only": False,
+            }
+        },
+    },
+    "options": _GROK_USE_TOOL_OPTIONS,
+}
+
+
 @pytest.mark.parametrize(
     "fixture",
     [
         GROK_1_0_13_WRITE_PERMISSION,
         GROK_1_0_13_SEARCH_REPLACE_PERMISSION,
         GROK_1_0_13_BASH_PERMISSION,
+        GROK_1_0_13_USE_TOOL_PERMISSION,
     ],
-    ids=["write", "search_replace", "bash"],
+    ids=["write", "search_replace", "bash", "use_tool"],
 )
 def test_grok_1_0_13_permission_shapes_are_allowlisted(fixture: dict[str, object]) -> None:
     from tth_grok.acp.schemas.base import is_allowlisted_permission_request
@@ -438,6 +477,59 @@ def test_grok_bash_permission_is_command_action() -> None:
     assert isinstance(payload.request.action, CommandApprovalAction)
     assert payload.request.action.argv == ("echo extra >> once_test.md && cat once_test.md",)
     assert ApprovalDecision.ALLOW_SESSION in payload.request.available_decisions
+
+
+def test_grok_use_tool_permission_is_named_as_mcp_tool() -> None:
+    n = GrokNormalizer()
+    n.set_session("s")
+    n.begin_turn(uuid4())
+    payload = n.on_permission_request(GROK_1_0_13_USE_TOOL_PERMISSION, interaction_id=uuid4())[0]
+    assert isinstance(payload, InteractionRequestedPayload)
+    assert isinstance(payload.request, ApprovalRequestPayload)
+    request = payload.request
+    # Fully qualified like the other adapters report MCP calls, so a caller's
+    # attached-server rule matches without knowing Grok's title format.
+    assert request.tool_name == "mcp__mnemosyne__mnemosyne_recall"
+    # No command/file/network semantics: stays manual-only for policy rules.
+    assert request.action is None
+    assert request.command_args is None
+    assert request.path is None
+    assert ApprovalDecision.ALLOW_SESSION in request.available_decisions
+    assert ApprovalDecision.ALLOW_ONCE in request.available_decisions
+    assert ApprovalDecision.DENY in request.available_decisions
+
+
+def test_grok_use_tool_permission_requires_object_tool_input() -> None:
+    from tth_grok.acp.schemas.grok_ext import is_allowlisted_grok_permission_request
+
+    def with_raw_input(raw_input: Mapping[str, object]) -> dict[str, object]:
+        tool_call = cast(dict[str, object], GROK_1_0_13_USE_TOOL_PERMISSION["toolCall"])
+        return {
+            **GROK_1_0_13_USE_TOOL_PERMISSION,
+            "toolCall": {**tool_call, "rawInput": dict(raw_input)},
+        }
+
+    base: dict[str, object] = {"variant": "UseTool", "tool_name": "mnemosyne__mnemosyne_recall"}
+    assert is_allowlisted_grok_permission_request(with_raw_input({**base, "tool_input": {}}))
+    assert not is_allowlisted_grok_permission_request(
+        with_raw_input({**base, "tool_input": "query"})
+    )
+    assert not is_allowlisted_grok_permission_request(with_raw_input(base))
+    assert not is_allowlisted_grok_permission_request(
+        with_raw_input({**base, "tool_input": {}, "extra": 1})
+    )
+
+
+def test_grok_mcp_tool_name_only_for_use_tool_variant() -> None:
+    from tth_grok.acp.schemas.grok_ext import grok_mcp_permission_tool_name
+
+    assert (
+        grok_mcp_permission_tool_name({"variant": "UseTool", "tool_name": "wiki__read_page"})
+        == "mcp__wiki__read_page"
+    )
+    assert grok_mcp_permission_tool_name({"variant": "UseTool", "tool_name": ""}) is None
+    assert grok_mcp_permission_tool_name({"variant": "UseTool"}) is None
+    assert grok_mcp_permission_tool_name({"variant": "Bash", "tool_name": "x__y"}) is None
 
 
 def test_grok_edit_variant_without_path_stays_manual_only() -> None:

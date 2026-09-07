@@ -220,3 +220,19 @@ async def test_spawn_layers_spec_environment_over_the_parent_environment(
         await handle.close()
 
     assert marker.read_text() == f"{tmp_path / 'private-xdg'}|True"
+
+
+def test_child_environment_hides_split_internals(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The proxy's shared secret and the split's Django settings must not
+    leak into the harness process, whose shell the agent controls."""
+    from tth_muse.runtime.supervisor import child_environment
+
+    monkeypatch.setenv("TTH_SPLIT_TOKEN", "secret")
+    monkeypatch.setenv("DJANGO_SETTINGS_MODULE", "tth_muse.settings")
+    monkeypatch.setenv("TTH_MUSE_WIRE_LOG_DIR", "/data/wire")
+    monkeypatch.setenv("UV_CACHE_DIR", "/cache")
+    env = child_environment()
+    assert "TTH_SPLIT_TOKEN" not in env
+    assert "DJANGO_SETTINGS_MODULE" not in env
+    assert "TTH_MUSE_WIRE_LOG_DIR" not in env
+    assert env["UV_CACHE_DIR"] == "/cache"

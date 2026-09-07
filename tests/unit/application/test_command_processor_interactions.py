@@ -22,11 +22,13 @@ from talktoharnesses.domain import (
     CommandApprovalAction,
     CommandKind,
     CommandStatus,
+    ConversationState,
     ExactArgvMatcher,
     HarnessConfiguration,
     HarnessKind,
     InteractionKind,
     PrincipalGlobalRuleScope,
+    append_events,
     new_conversation_state,
     request_interaction,
     start_turn,
@@ -37,6 +39,7 @@ from talktoharnesses.domain.events import (
     AssistantMessageDeltaPayload,
     ConversationEvent,
     InteractionRequestedPayload,
+    ProviderWarningPayload,
     TurnCompletedPayload,
     TurnInterruptedPayload,
     TurnOutcomeUnknownPayload,
@@ -55,6 +58,49 @@ from talktoharnesses.runtime.manager import RuntimeManager
 
 def _now() -> datetime:
     return datetime(2026, 8, 8, 14, 0, 0, tzinfo=UTC)
+
+
+class _RacingRequestPersistence(MemoryPersistence):
+    raced = False
+
+    async def commit_interaction_request(
+        self,
+        conversation_id: UUID,
+        expected_version: int,
+        state: ConversationState,
+        events: Sequence[ConversationEvent],
+        *,
+        interaction_id: UUID,
+        provider_correlation: dict[str, str] | None = None,
+        request_event_sequence: int,
+        worker_id: str | None = None,
+        fence: int | None = None,
+    ) -> Sequence[ConversationEvent]:
+        if not self.raced:
+            self.raced = True
+            current = await self.get_worker_snapshot(conversation_id)
+            changed, concurrent_events = append_events(
+                current, _now(), [ProviderWarningPayload(message="concurrent commit")]
+            )
+            await self.commit_turn_batch(
+                conversation_id,
+                current.conversation.version,
+                changed,
+                concurrent_events,
+                worker_id=worker_id,
+                fence=fence,
+            )
+        return await super().commit_interaction_request(
+            conversation_id,
+            expected_version,
+            state,
+            events,
+            interaction_id=interaction_id,
+            provider_correlation=provider_correlation,
+            request_event_sequence=request_event_sequence,
+            worker_id=worker_id,
+            fence=fence,
+        )
 
 
 class _Publisher:
@@ -198,8 +244,11 @@ async def _seed_running(p: MemoryPersistence) -> tuple[UUID, UUID]:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("envelope", [True, False])
-async def test_event_pump_routes_interaction_request_through_broker(envelope: bool) -> None:
-    p = MemoryPersistence()
+@pytest.mark.parametrize("race", [False, True])
+async def test_event_pump_routes_interaction_request_through_broker(
+    envelope: bool, race: bool
+) -> None:
+    p = _RacingRequestPersistence() if race else MemoryPersistence()
     publisher = _Publisher()
     broker = InteractionBroker(p, publisher, clock=_now)
     adapter = _InteractionAdapter()
@@ -235,8 +284,10 @@ async def test_event_pump_routes_interaction_request_through_broker(envelope: bo
         await asyncio.sleep(0.02)
 
     types = [e.type for e in publisher.events]
-    assert "interaction_requested" in types
-    assert "interaction_resolved" in types
+    assert types.count("interaction_requested") == 1
+    assert types.count("interaction_resolved") == 1
+    if race:
+        assert any(event.type == "provider_warning" for event in p.events[cid])
     assert types.index("interaction_requested") < types.index("interaction_resolved")
     assert iid in p.interaction_answers
     assert p.interaction_answers[iid].decision is ApprovalDecision.ALLOW_ONCE

@@ -38,6 +38,10 @@ TALKTOHARNESSES_JWT_SIGNING_KEY = os.environ.get(
 
 DEBUG = os.environ.get("TTH_DEBUG", "1") == "1"
 USE_TZ = True
+# Django's default TIME_ZONE (America/Chicago) is applied to the process clock
+# at setup, which stamped log lines five hours behind the UTC timestamps in
+# agentbahn's records and the harness journals. Keep every log in UTC.
+TIME_ZONE = "UTC"
 ALLOWED_HOSTS = [
     host.strip()
     for host in os.environ.get("TTH_ALLOWED_HOSTS", "127.0.0.1,localhost").split(",")

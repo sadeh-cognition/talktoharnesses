@@ -334,7 +334,14 @@ class RemoteHarnessAdapter:
 
     async def interrupt(self, session: HarnessSession) -> None:
         sid = self._require_session_id()
+        logger.info(
+            "split interrupt kind=%s session=%s conversation=%s",
+            self.kind.value,
+            sid,
+            session.conversation_id,
+        )
         await self._post(f"/v1/sessions/{sid}/interrupt")
+        logger.info("split interrupt accepted kind=%s session=%s", self.kind.value, sid)
 
     async def answer_interaction(
         self,
@@ -353,6 +360,14 @@ class RemoteHarnessAdapter:
         async def _gen() -> AsyncIterator[HarnessEvent | HarnessInteractionRequest]:
             client = await self._client_for_split()
             decoder = SseDecoder()
+            frames: dict[str, int] = {}
+            outcome = "generator closed"
+            logger.info(
+                "split event stream opening kind=%s session=%s conversation=%s",
+                self.kind.value,
+                sid,
+                session.conversation_id,
+            )
             try:
                 async with client.stream(
                     "GET",
@@ -364,12 +379,24 @@ class RemoteHarnessAdapter:
                         _raise_split_error(response)
                     async for chunk in response.aiter_bytes():
                         for sse in decoder.feed(chunk):
+                            name = sse.event or "?"
+                            frames[name] = frames.get(name, 0) + 1
                             item = self._decode_frame(sse.event, sse.data)
                             if item is _STREAM_END:
+                                outcome = "end frame"
                                 return
+                            if isinstance(item, HarnessInteractionRequest):
+                                logger.info(
+                                    "split interaction received kind=%s session=%s id=%s",
+                                    self.kind.value,
+                                    sid,
+                                    item.payload.interaction_id,
+                                )
                             if item is not None:
                                 yield item  # type: ignore[misc]
+                    outcome = "response ended"
             except httpx.HTTPError as exc:
+                outcome = f"http error: {exc!r}"
                 logger.warning(
                     "split event stream dropped kind=%s session=%s: %s",
                     self.kind.value,
@@ -377,6 +404,13 @@ class RemoteHarnessAdapter:
                     exc,
                 )
             finally:
+                logger.info(
+                    "split event stream closed kind=%s session=%s outcome=%s frames=%s",
+                    self.kind.value,
+                    sid,
+                    outcome,
+                    frames,
+                )
                 if self._handle is not None:
                     self._handle.mark_stream_closed()
 

@@ -77,6 +77,29 @@ Tuning environment (all optional):
   | prime_agent | `$HOME/.prime/config.json` | `/home/agent/.prime/config.json` |
   | muse | `$HOME/.config/muse/auth.json` | `/home/agent/.config/muse/auth.json` |
 
+Diagnostics (all optional):
+
+- `TTH_LOG_LEVEL` — level for the proxy's stderr and `talktoharnesses.log`
+  sinks; default `DEBUG`. It covers both the HTTP request/response lines
+  and the proxy's own modules (runtime manager, command processor, remote
+  adapter, sandbox), which log stream open/close, interrupt delivery and
+  stdout-silence warnings per conversation at INFO. Third-party loggers
+  (httpx, httpcore, urllib3, docker, uvicorn.access) are always held at
+  WARNING.
+- `TTH_SPLIT_LOG_LEVEL` — inside a split container, the `tth_<kind>` logger
+  level written to the container's stdout (`docker logs tth-<kind>`); default
+  `INFO`, `DEBUG` adds one line per protocol frame (muse).
+- `TTH_MUSE_WIRE_LOG_DIR` — inside the muse container, directory for the raw
+  MSP wire capture, one JSONL file per split session. Off unless set; use
+  `/data/wire` to land it on the `tth-muse-data` volume. The capture is
+  deliberately unredacted (it exists to answer "did the host send it?", so
+  it must show what actually crossed the pipe) and holds prompts, tool
+  output and any secrets the host echoes; it never leaves the container
+  unless copied out.
+- `TTH_MUSE_WIRE_LOG_KEEP` — how many session capture files to keep; the
+  oldest are deleted when a new session opens (default `20`).
+  Forward any container variable with `TTH_SANDBOX_ENV_<KIND>`.
+
 Runtime tuning (all optional):
 
 - `TTH_RUNTIME_IDLE_REAP_SECONDS` — how long an idle conversation keeps its

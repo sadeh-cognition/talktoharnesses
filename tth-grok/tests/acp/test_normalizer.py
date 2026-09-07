@@ -393,3 +393,109 @@ def test_permission_action_normalization_and_optional_int_edges() -> None:
     assert _optional_int("9") == 9  # pyright: ignore[reportPrivateUsage]
     assert _optional_int("x") is None  # pyright: ignore[reportPrivateUsage]
     assert _optional_int(object()) is None  # pyright: ignore[reportPrivateUsage]
+
+
+# Captured from Grok 1.0.13 (5e9a58528b76) on 2026-09-06 with an HTTP MCP
+# server named ``mnemosyne``: the first ``tool_call`` frame is titled
+# ``use_tool`` with the target only in ``rawInput.tool_name``; the update
+# retitles the call to the target and tags the input ``variant: UseTool``.
+_GROK_USE_TOOL_META = {
+    "x.ai/tool": {
+        "version": 1,
+        "name": "use_tool",
+        "kind": "use_tool",
+        "namespace": "grok_build",
+        "label": "Use Tool",
+        "read_only": False,
+    }
+}
+
+
+def test_grok_use_tool_call_is_named_after_mcp_target() -> None:
+    n = _n()
+    requested = n.on_session_update(
+        {
+            "sessionId": "sess-1",
+            "update": {
+                "sessionUpdate": "tool_call",
+                "toolCallId": "call-f3a95fff-cbcb-46a1-8bb3-2a24d12e8f27-2",
+                "title": "use_tool",
+                "rawInput": {
+                    "tool_name": "mnemosyne__mnemosyne_recall",
+                    "tool_input": {"query": "workflow description", "limit": 3},
+                },
+                "_meta": _GROK_USE_TOOL_META,
+            },
+        }
+    )
+    req = next(e for e in requested if isinstance(e, ToolRequestedPayload))
+    assert req.tool_name == "mcp__mnemosyne__mnemosyne_recall"
+    # The wrapper's arguments are kept verbatim for the detail view.
+    assert req.arguments["tool_name"] == "mnemosyne__mnemosyne_recall"
+    assert req.arguments["tool_input"] == {"query": "workflow description", "limit": 3}
+
+    n.on_session_update(
+        {
+            "sessionId": "sess-1",
+            "update": {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "call-f3a95fff-cbcb-46a1-8bb3-2a24d12e8f27-2",
+                "kind": "other",
+                "title": "mnemosyne__mnemosyne_recall",
+                "locations": [],
+                "rawInput": {
+                    "variant": "UseTool",
+                    "tool_name": "mnemosyne__mnemosyne_recall",
+                    "tool_input": {"query": "workflow description", "limit": 3},
+                },
+                "_meta": _GROK_USE_TOOL_META,
+            },
+        }
+    )
+    done = n.on_session_update(
+        {
+            "sessionId": "sess-1",
+            "update": {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "call-f3a95fff-cbcb-46a1-8bb3-2a24d12e8f27-2",
+                "status": "completed",
+                "rawOutput": {
+                    "type": "MCP",
+                    "tool_name": "mnemosyne_recall",
+                    "server_name": "mnemosyne",
+                    "output": {"OkayOutput": "{}"},
+                },
+            },
+        }
+    )
+    completed = next(e for e in done if isinstance(e, ToolCompletedPayload))
+    assert completed.tool_name == "mcp__mnemosyne__mnemosyne_recall"
+
+
+def test_grok_native_tools_keep_their_own_names() -> None:
+    from tth_grok.acp.schemas.grok_ext import grok_mcp_tool_call_name
+
+    # ``search_tool`` is Grok's own MCP discovery tool, not a wrapped call.
+    assert (
+        grok_mcp_tool_call_name(
+            {
+                "title": "search_tool",
+                "rawInput": {"query": "mnemosyne recall", "limit": 5},
+                "_meta": {"x.ai/tool": {"name": "search_tool"}},
+            }
+        )
+        is None
+    )
+    # A wrapper without a usable target keeps the wrapper name.
+    assert grok_mcp_tool_call_name({"title": "use_tool", "rawInput": {"tool_input": {}}}) is None
+    assert grok_mcp_tool_call_name({"title": "use_tool", "rawInput": "x"}) is None
+    # The variant tag alone is enough once the update frame retitles the call.
+    assert (
+        grok_mcp_tool_call_name(
+            {
+                "title": "wiki__read_page",
+                "rawInput": {"variant": "UseTool", "tool_name": "wiki__read_page"},
+            }
+        )
+        == "mcp__wiki__read_page"
+    )

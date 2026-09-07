@@ -16,9 +16,23 @@ from tth_types.enums import ErrorCode
 from tth_types.errors import DomainError
 
 from tth_muse.harness.framing import iter_json_frames
+from tth_muse.harness.wire_log import WireLog
 from tth_muse.runtime.handle import ProcessHandle
 
 logger = logging.getLogger(__name__)
+
+
+def _frame_params(frame: dict[str, Any]) -> dict[str, Any]:
+    params = frame.get("params")
+    return cast(dict[str, Any], params) if isinstance(params, dict) else {}
+
+
+def _trace(frame: dict[str, Any]) -> dict[str, Any]:
+    params = _frame_params(frame)
+    return {
+        "msp_turn_id": params.get("turnId"),
+        "msp_session_id": params.get("sessionId"),
+    }
 
 
 class MuseConnection:
@@ -28,11 +42,15 @@ class MuseConnection:
         notification: Callable[[str, dict[str, Any]], Awaitable[None]],
         disconnected: Callable[[str], Awaitable[None]],
         redact: Callable[[str], str] = str,
+        wire: WireLog | None = None,
     ) -> None:
         self.process = process
         self._notification = notification
         self._disconnected = disconnected
         self._redact = redact
+        self._wire = wire
+        self.frames_in = 0
+        self.frames_out = 0
         self._pending: dict[str, asyncio.Future[dict[str, Any]]] = {}
         self._lock = asyncio.Lock()
         self._closed = False
@@ -115,12 +133,32 @@ class MuseConnection:
 
     async def _write(self, frame: dict[str, Any]) -> None:
         async with self._lock:
+            self.frames_out += 1
+            if self._wire is not None:
+                self._wire.outbound(frame)
+            logger.debug(
+                "msp -> method=%s id=%s", frame.get("method"), frame.get("id"), extra=_trace(frame)
+            )
             await self.process.write_stdin((json.dumps(frame) + "\n").encode())
 
     async def _read(self) -> None:
         message = "Muse host stdout closed"
+        logger.info("msp reader started")
+        if self._wire is not None:
+            self._wire.note("reader started")
         try:
             async for frame in iter_json_frames(self.process.stdout()):
+                self.frames_in += 1
+                if self._wire is not None:
+                    self._wire.inbound(frame)
+                params = _frame_params(frame)
+                logger.debug(
+                    "msp <- method=%s id=%s turnId=%s sessionId=%s",
+                    frame.get("method"),
+                    frame.get("id"),
+                    params.get("turnId"),
+                    params.get("sessionId"),
+                )
                 if frame.get("jsonrpc") != "2.0":
                     raise DomainError(ErrorCode.PROTOCOL_ERROR, "Invalid MSP envelope")
                 if "method" in frame:
@@ -176,10 +214,28 @@ class MuseConnection:
                     else:
                         raise DomainError(ErrorCode.PROTOCOL_ERROR, "Invalid MSP result")
         except asyncio.CancelledError:
+            message = "Muse host reader cancelled"
             raise
         except Exception:
             message = "Muse host protocol stream failed"
+            # The traceback lives here; the frame counts are on the
+            # lifecycle summary in ``finally``.
+            logger.exception("msp reader failed")
         finally:
+            logger.info(
+                "msp reader exiting: %s (frames in=%d out=%d pending=%d)",
+                message,
+                self.frames_in,
+                self.frames_out,
+                sum(1 for f in self._pending.values() if not f.done()),
+            )
+            if self._wire is not None:
+                self._wire.note(
+                    "reader exiting",
+                    reason=message,
+                    frames_in=self.frames_in,
+                    frames_out=self.frames_out,
+                )
             self._closed = True
             for future in self._pending.values():
                 if not future.done():
@@ -195,6 +251,8 @@ class MuseConnection:
             )
         except Exception:
             logger.exception("Muse notification handler failed method=%s", method)
+            if self._wire is not None:
+                self._wire.note("notification handler failed", method=method)
 
     async def close(self) -> None:
         self._closed = True

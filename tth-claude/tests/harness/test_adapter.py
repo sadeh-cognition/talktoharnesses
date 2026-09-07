@@ -10,14 +10,22 @@ from typing import cast
 from uuid import uuid4
 
 import pytest
+from claude_agent_sdk import (
+    AssistantMessage,
+    SystemMessage,
+    ToolResultBlock,
+    ToolUseBlock,
+    UserMessage,
+)
+from claude_agent_sdk._internal.message_parser import parse_message
 from tth_types.adapter import (
     ResumeSessionRequest,
     StartSessionRequest,
     SteerRequest,
     TurnRequest,
 )
-from tth_types.enums import HarnessKind
-from tth_types.events import ToolCompletedPayload, TurnFailedPayload
+from tth_types.enums import HarnessKind, ToolOutcome
+from tth_types.events import ToolCompletedPayload, ToolStartedPayload, TurnFailedPayload
 from tth_types.harness import (
     HarnessCapabilities,
     HarnessConfiguration,
@@ -217,35 +225,40 @@ async def test_response_protocol_error_fails_turn_and_ends_stream(
     await adapter.close(session)
 
 
-def test_tool_result_uses_canonical_utf8_tail() -> None:
+@pytest.mark.parametrize("is_error", [False, True])
+def test_sdk_user_tool_result_completes_started_tool_with_utf8_tail(is_error: bool) -> None:
+    adapter = ClaudeAdapter()
     normalizer = ClaudeNormalizer()
     normalizer.set_session("session-1")
     turn_id = uuid4()
     normalizer.begin_turn(turn_id)
-    normalizer.on_message(
-        {
-            "type": "assistant",
-            "content": [{"type": "tool_use", "id": "tool-1", "name": "shell", "input": {}}],
-            "model": "claude",
-            "session_id": "session-1",
-        }
+    start = adapter._coerce_message(  # pyright: ignore[reportPrivateUsage]
+        AssistantMessage(
+            content=[ToolUseBlock(id="tool-1", name="shell", input={})], model="claude"
+        )
     )
-    events = normalizer.on_message(
-        {
-            "type": "assistant",
-            "content": [
-                {
-                    "type": "tool_result",
-                    "tool_use_id": "tool-1",
-                    "content": "old-output" * 300 + "é" * 1024,
-                    "is_error": False,
-                }
+    assert start is not None
+    started = next(
+        event for event in normalizer.on_message(start) if isinstance(event, ToolStartedPayload)
+    )
+    result = adapter._coerce_message(  # pyright: ignore[reportPrivateUsage]
+        UserMessage(
+            content=[
+                ToolResultBlock(
+                    tool_use_id="tool-1",
+                    content="old-output" * 300 + "é" * 1024,
+                    is_error=is_error,
+                )
             ],
-            "model": "claude",
-            "session_id": "session-1",
-        }
+        )
     )
+    assert result is not None
+    events = normalizer.on_message(result)
     completed = next(event for event in events if isinstance(event, ToolCompletedPayload))
+    assert completed.tool_id == started.tool_id
+    assert completed.turn_id == turn_id
+    assert completed.tool_name == "shell"
+    assert completed.outcome is (ToolOutcome.FAILURE if is_error else ToolOutcome.SUCCESS)
     assert len(completed.output_tail.encode("utf-8")) <= 2048
     assert completed.output_tail == "é" * 1024
 
@@ -404,13 +417,12 @@ def test_coerce_message_branches() -> None:
     result_msg = adapter._coerce_message(ResultMessage())  # pyright: ignore[reportPrivateUsage]
     assert result_msg is not None
     assert result_msg["type"] == "result"
+    assert result_msg["total_cost_usd"] == 0.1
     assert result_msg["model_usage"] == {"claude": {"inputTokens": 3, "outputTokens": 1}}
 
-    class SystemMessage:
-        subtype = "init"
-        data = {"a": 1}
-
-    system_msg = adapter._coerce_message(SystemMessage())  # pyright: ignore[reportPrivateUsage]
+    system_msg = adapter._coerce_message(  # pyright: ignore[reportPrivateUsage]
+        SystemMessage(subtype="init", data={"a": 1})
+    )
     assert system_msg is not None
     assert system_msg["subtype"] == "init"
 
@@ -425,6 +437,38 @@ def test_coerce_message_branches() -> None:
     with pytest.raises(DomainError) as exc:
         adapter._coerce_message(Unknown())  # pyright: ignore[reportPrivateUsage]
     assert exc.value.code is ErrorCode.UNSUPPORTED_NATIVE_EVENT
+
+
+@pytest.mark.parametrize("subtype", ["task_started", "task_progress", "task_notification"])
+def test_sdk_task_messages_preserve_active_turn(subtype: str) -> None:
+    raw = {
+        "type": "system",
+        "subtype": subtype,
+        "task_id": "task-1",
+        "description": "Inspect the project",
+        "uuid": str(uuid4()),
+        "session_id": "session-1",
+        "tool_use_id": "tool-1",
+        "usage": {"total_tokens": 20, "tool_uses": 1, "duration_ms": 100},
+        "status": "completed",
+        "output_file": "/tmp/task-1.output",
+        "summary": "Inspection complete",
+    }
+    message = parse_message(raw)
+    adapter = ClaudeAdapter()
+    normalizer = ClaudeNormalizer()
+    normalizer.set_session("session-1")
+    turn_id = uuid4()
+    normalizer.begin_turn(turn_id)
+
+    coerced = adapter._coerce_message(message)  # pyright: ignore[reportPrivateUsage]
+    assert coerced is not None
+    assert coerced == {"type": "system", "subtype": subtype, "data": raw}
+    assert normalizer.on_message(coerced) == []
+    events = normalizer.on_message(
+        {"type": "result", "subtype": "success", "session_id": "session-1"}
+    )
+    assert any(event.type == "turn_completed" and event.turn_id == turn_id for event in events)
 
 
 async def _claude_release_probe(config: HarnessConfiguration):
