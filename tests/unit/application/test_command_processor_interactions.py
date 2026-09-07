@@ -7,6 +7,7 @@ from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import AsyncMock
 from uuid import UUID, uuid4
 
 import pytest
@@ -23,6 +24,8 @@ from talktoharnesses.domain import (
     CommandKind,
     CommandStatus,
     ConversationState,
+    DomainError,
+    ErrorCode,
     ExactArgvMatcher,
     HarnessConfiguration,
     HarnessKind,
@@ -37,6 +40,7 @@ from talktoharnesses.domain import (
 )
 from talktoharnesses.domain.events import (
     AssistantMessageDeltaPayload,
+    AssistantMessageStartedPayload,
     ConversationEvent,
     InteractionRequestedPayload,
     ProviderWarningPayload,
@@ -61,7 +65,8 @@ def _now() -> datetime:
 
 
 class _RacingRequestPersistence(MemoryPersistence):
-    raced = False
+    conflicts = 1
+    attempts = 0
 
     async def commit_interaction_request(
         self,
@@ -76,8 +81,8 @@ class _RacingRequestPersistence(MemoryPersistence):
         worker_id: str | None = None,
         fence: int | None = None,
     ) -> Sequence[ConversationEvent]:
-        if not self.raced:
-            self.raced = True
+        self.attempts += 1
+        if self.attempts <= self.conflicts:
             current = await self.get_worker_snapshot(conversation_id)
             changed, concurrent_events = append_events(
                 current, _now(), [ProviderWarningPayload(message="concurrent commit")]
@@ -164,6 +169,8 @@ class _InteractionAdapter:
                 item = await self._queue.get()
                 if item is None:
                     return
+                if isinstance(item, Exception):
+                    raise item
                 yield item
 
         return gen()
@@ -244,11 +251,13 @@ async def _seed_running(p: MemoryPersistence) -> tuple[UUID, UUID]:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("envelope", [True, False])
-@pytest.mark.parametrize("race", [False, True])
+@pytest.mark.parametrize("race", [0, 1, 2])
 async def test_event_pump_routes_interaction_request_through_broker(
-    envelope: bool, race: bool
+    envelope: bool, race: int
 ) -> None:
     p = _RacingRequestPersistence() if race else MemoryPersistence()
+    if isinstance(p, _RacingRequestPersistence):
+        p.conflicts = race
     publisher = _Publisher()
     broker = InteractionBroker(p, publisher, clock=_now)
     adapter = _InteractionAdapter()
@@ -288,6 +297,8 @@ async def test_event_pump_routes_interaction_request_through_broker(
     assert types.count("interaction_resolved") == 1
     if race:
         assert any(event.type == "provider_warning" for event in p.events[cid])
+        assert isinstance(p, _RacingRequestPersistence)
+        assert p.attempts == race + 1
     assert types.index("interaction_requested") < types.index("interaction_resolved")
     assert iid in p.interaction_answers
     assert p.interaction_answers[iid].decision is ApprovalDecision.ALLOW_ONCE
@@ -298,7 +309,51 @@ async def test_event_pump_routes_interaction_request_through_broker(
 
 
 @pytest.mark.asyncio
-async def test_ended_event_stream_marks_active_turn_outcome_unknown() -> None:
+@pytest.mark.parametrize(
+    ("code", "attempts"), [(ErrorCode.OPTIMISTIC_CONFLICT, 3), (ErrorCode.INVALID_STATE, 1)]
+)
+async def test_failed_interaction_persistence_bounds_retries_and_terminalizes_turn(
+    code: ErrorCode, attempts: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    p = MemoryPersistence()
+    publisher = _Publisher()
+    adapter = _InteractionAdapter()
+    runtime = _Runtime(adapter, p)
+    processor = CommandProcessor(
+        p,
+        publisher,
+        cast(RuntimeManager, runtime),
+        clock=_now,
+        interaction_broker=InteractionBroker(p, publisher, clock=_now),
+    )
+    cid, turn_id = await _seed_running(p)
+    commit = AsyncMock(side_effect=DomainError(code, "interaction commit rejected"))
+    monkeypatch.setattr(p, "commit_interaction_request", commit)
+    await runtime.start(conversation_id=cid, owner_id="owner")
+    processor._running = True  # pyright: ignore[reportPrivateUsage]
+    iid = adapter.push_interaction(turn_id)
+
+    await asyncio.wait_for(processor._event_pump(cid), timeout=1)  # pyright: ignore[reportPrivateUsage]
+
+    assert commit.await_count == attempts
+    assert {call.kwargs["interaction_id"] for call in commit.await_args_list} == {iid}
+    state = await p.get_worker_snapshot(cid)
+    assert state.active_turn is None
+    assert all(
+        command.status is CommandStatus.OUTCOME_UNKNOWN for command in state.commands.values()
+    )
+    assert not any(event.type == "interaction_requested" for event in p.events[cid])
+    assert iid not in p.interaction_answers
+    assert adapter.answers == []
+    assert [event.type for event in publisher.events] == ["turn_outcome_unknown"]
+    assert runtime.managed is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream_error", [None, RuntimeError("provider disconnected")])
+async def test_ended_event_stream_marks_active_turn_outcome_unknown(
+    stream_error: Exception | None,
+) -> None:
     p = MemoryPersistence()
     publisher = _Publisher()
     adapter = _InteractionAdapter()
@@ -309,7 +364,7 @@ async def test_ended_event_stream_marks_active_turn_outcome_unknown() -> None:
         cast(RuntimeManager, runtime),
         clock=_now,
     )
-    cid, _ = await _seed_running(p)
+    cid, turn_id = await _seed_running(p)
     state = await p.get_worker_snapshot(cid)
     queued = submit_turn(state, prompt="next", idempotency_key="t2", now=_now())
     assert queued.command is not None
@@ -339,7 +394,15 @@ async def test_ended_event_stream_marks_active_turn_outcome_unknown() -> None:
     )
     await runtime.start(conversation_id=cid, owner_id="owner")
     processor._running = True  # pyright: ignore[reportPrivateUsage]
-    adapter._queue.put_nowait(None)  # pyright: ignore[reportPrivateUsage]
+    message_id = uuid4()
+    adapter._queue.put_nowait(  # pyright: ignore[reportPrivateUsage]
+        AssistantMessageStartedPayload(turn_id=turn_id, message_id=message_id)
+    )
+    delta = AssistantMessageDeltaPayload(
+        turn_id=turn_id, message_id=message_id, text="received before disconnect", sequence=0
+    )
+    adapter._queue.put_nowait(delta)  # pyright: ignore[reportPrivateUsage]
+    adapter._queue.put_nowait(stream_error)  # pyright: ignore[reportPrivateUsage]
 
     await processor._event_pump(cid)  # pyright: ignore[reportPrivateUsage]
 
@@ -355,6 +418,10 @@ async def test_ended_event_stream_marks_active_turn_outcome_unknown() -> None:
     assert runtime.queued_status_at_close is CommandStatus.CLAIMED
     assert state.commands[claimed_command.id].status is CommandStatus.ACCEPTED
     assert runtime.managed is None
+    assert any(event.payload == delta for event in p.events[cid])
+    types = [event.type for event in publisher.events]
+    assert types.index("assistant_message_delta") < types.index("turn_outcome_unknown")
+    assert "turn_completed" not in types
 
 
 @pytest.mark.asyncio

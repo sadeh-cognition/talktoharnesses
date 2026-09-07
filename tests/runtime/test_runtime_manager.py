@@ -17,9 +17,17 @@ from tests.runtime.conftest import (
     conversation_id_of,
     make_state,
 )
+from tth_types.process import (
+    ProcessExitedEvent,
+    ProcessForcedTerminationEvent,
+    ProcessSilenceWarningEvent,
+    ProcessStderrTruncatedEvent,
+)
+from tth_types.split_api import ProcessFrame, ProcessSnapshot
 
-from talktoharnesses.domain import DomainError, ErrorCode, HarnessKind, submit_turn
+from talktoharnesses.domain import DomainError, ErrorCode, HarnessKind, append_events, submit_turn
 from talktoharnesses.domain.enums import ActivityStatus, CommandKind, CommandStatus
+from talktoharnesses.domain.events import ProviderWarningPayload
 from talktoharnesses.domain.models import (
     BackgroundActivity,
     Command,
@@ -34,6 +42,7 @@ from talktoharnesses.providers.adapter import (
     ResumeSessionRequest,
     StartSessionRequest,
 )
+from talktoharnesses.remote.handle import RemoteProcessHandle
 from talktoharnesses.runtime import RuntimeManager, RuntimePolicy
 from talktoharnesses.runtime.manager import (
     _await_start_resume,  # pyright: ignore[reportPrivateUsage]
@@ -626,6 +635,154 @@ async def test_shutdown_force_phase_is_concurrent_and_within_budget(
     elapsed = time.monotonic() - started
     assert elapsed < 0.8
     assert all(manager.get_runtime(state.conversation.id) is None for state in states)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("remote", [False, True], ids=["sdk", "remote-process"])
+async def test_shutdown_force_phase_settles_sessions_and_releases_resources(
+    remote: bool, workdir: Path, now: datetime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = MemoryPersistence()
+    states = [make_state(now=now, workdir=workdir) for _ in range(2)]
+    arrived = 0
+    both_arrived = asyncio.Event()
+
+    async def arrive() -> None:
+        nonlocal arrived
+        arrived += 1
+        if arrived == len(states):
+            both_arrived.set()
+        await both_arrived.wait()
+
+    async def terminate(reason: str | None) -> None:
+        if reason == "shutdown":
+            await arrive()
+
+    async def close(session: HarnessSession) -> None:
+        await arrive()
+
+    def factory() -> FakeAdapter:
+        if remote:
+            adapter = _RemoteFakeAdapter()
+            adapter.process_handle = RemoteProcessHandle(pid=4242, terminate=terminate)
+            return adapter
+        adapter = FakeAdapter()
+        monkeypatch.setattr(adapter, "close", close)
+        return adapter
+
+    registry = AdapterRegistry()
+    registry.register(HarnessKind.OPENCODE, factory)
+    manager = RuntimeManager(
+        store,
+        registry,
+        policy=RuntimePolicy(idle_reap=60, shutdown_budget=2, graceful_close_timeout=0.5),
+    )
+    for state in states:
+        store.seed(state)
+        assert state.binding is not None
+        await manager.start(
+            conversation_id=state.conversation.id,
+            owner_id="owner-1",
+            configuration=state.binding.configuration,
+        )
+    managed = [manager.get_runtime(state.conversation.id) for state in states]
+    background_tasks = [
+        task for runtime in managed if runtime is not None for task in runtime.tasks
+    ]
+    if remote:
+        for runtime in managed:
+            assert runtime is not None and isinstance(runtime.process, RemoteProcessHandle)
+            # The latest snapshot reports truncated stderr, but the corresponding
+            # notification was lost when the transport closed.
+            runtime.process.mark_stream_closed()
+            runtime.process.on_frame(
+                ProcessFrame(
+                    event=ProcessStderrTruncatedEvent(
+                        process_id=runtime.process_record.id, retained_bytes=4
+                    ),
+                    snapshot=ProcessSnapshot(
+                        pid=4242,
+                        stderr_truncated=True,
+                        retained_stderr_bytes=4,
+                        redacted_stderr_tail="tail",
+                    ),
+                )
+            )
+
+    # An external shutdown deadline leaves only the force reserve, no grace period.
+    await asyncio.wait_for(
+        manager.shutdown(deadline=asyncio.get_running_loop().time() + 0.75), timeout=1.5
+    )
+
+    assert both_arrived.is_set(), "all runtimes must be forced concurrently"
+    for state, runtime in zip(states, managed, strict=True):
+        assert runtime is not None and runtime.closed
+        assert manager.get_runtime(state.conversation.id) is None
+        assert runtime.adapter.interrupt_calls == 0  # type: ignore[attr-defined]
+        types = [event.type for event in store.events[state.conversation.id]]
+        assert types.count("session_closed") == 1
+        terminal = "process_forced_termination" if remote else "process_exited"
+        assert types.count(terminal) == 1
+        process = store.processes[runtime.process_record.id]
+        assert process.status.value == ("terminated" if remote else "exited")
+        if remote:
+            assert runtime.process is not None and runtime.process.forced_reason == "shutdown"
+            assert types.count("process_stderr_truncated") == 1
+            assert types.index("process_stderr_truncated") < types.index(terminal)
+            assert process.redacted_stderr_tail == "tail"
+    assert all(task.done() for task in background_tasks)
+    assert not manager._idle_tasks  # pyright: ignore[reportPrivateUsage]
+    event_counts = {cid: len(events) for cid, events in store.events.items()}
+    await manager.shutdown()
+    assert {cid: len(events) for cid, events in store.events.items()} == event_counts
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("close_fails", [False, True])
+async def test_shutdown_closes_unpromoted_remote_candidate_without_changing_binding(
+    close_fails: bool,
+    short_policy: RuntimePolicy,
+    workdir: Path,
+    now: datetime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = MemoryPersistence()
+    state = make_state(now=now, workdir=workdir)
+    store.seed(state)
+    assert state.binding is not None
+    registry = AdapterRegistry()
+    registry.register(HarnessKind.OPENCODE, _RemoteFakeAdapter)
+    manager = RuntimeManager(store, registry, policy=short_policy)
+    binding_id = uuid4()
+    candidate = await manager.start_candidate(
+        conversation_id=state.conversation.id,
+        owner_id="owner-1",
+        binding_id=binding_id,
+        configuration=state.binding.configuration,
+    )
+    close = AsyncMock(side_effect=RuntimeError("split close failed") if close_fails else None)
+    monkeypatch.setattr(candidate.adapter, "close", close)
+
+    await asyncio.wait_for(manager.shutdown(), timeout=1.5)
+
+    close.assert_awaited_once_with(candidate.session)
+    assert manager.get_candidate(binding_id) is None
+    assert candidate.closed
+    assert candidate.process is not None
+    assert candidate.process.forced is close_fails
+    if close_fails:
+        assert candidate.process.forced_reason == "candidate_rejected"
+    assert await store.get_worker_snapshot(state.conversation.id) == state
+    assert not store.events.get(state.conversation.id)
+    assert not store.processes
+    with pytest.raises(DomainError) as exc:
+        await manager.start_candidate(
+            conversation_id=state.conversation.id,
+            owner_id="owner-1",
+            binding_id=uuid4(),
+            configuration=state.binding.configuration,
+        )
+    assert exc.value.code is ErrorCode.INVALID_STATE
 
 
 class _ResumingSdkAdapter(FakeAdapter):
@@ -1297,6 +1454,101 @@ async def _started_manager(
         configuration=state.binding.configuration,  # type: ignore[union-attr]
     )
     return mgr, cid
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("forced", [False, True], ids=["process-crash", "split-forced-kill"])
+async def test_remote_process_failure_stream_rebases_events_and_releases_runtime(
+    forced: bool,
+    short_policy: RuntimePolicy,
+    workdir: Path,
+    now: datetime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = MemoryPersistence()
+    registry = AdapterRegistry()
+    registry.register(HarnessKind.OPENCODE, _RemoteFakeAdapter)
+    manager, cid = await _started_manager(store, registry, short_policy, workdir, now)
+    managed = manager.get_runtime(cid)
+    assert managed is not None and managed.process is not None
+    handle = managed.process
+    assert isinstance(handle, RemoteProcessHandle)
+    process_id = managed.process_record.id
+    tasks = list(managed.tasks)
+    original_commit = store.commit_runtime_lifecycle
+    raced = False
+
+    async def commit_with_concurrent_update(*args: Any, **kwargs: Any) -> Any:
+        nonlocal raced
+        if not raced:
+            raced = True
+            current = await store.get_worker_snapshot(cid)
+            changed, events = append_events(
+                current, now, [ProviderWarningPayload(message="concurrent update")]
+            )
+            await store.commit_turn_batch(cid, current.conversation.version, changed, events)
+        return await original_commit(*args, **kwargs)
+
+    monkeypatch.setattr(store, "commit_runtime_lifecycle", commit_with_concurrent_update)
+    snapshot = ProcessSnapshot(
+        pid=4242,
+        returncode=-9 if forced else 17,
+        forced=forced,
+        forced_reason="split_shutdown" if forced else None,
+        redacted_stderr_tail="provider failed: [REDACTED]",
+        stderr_truncated=True,
+        retained_stderr_bytes=27,
+    )
+    terminal = (
+        ProcessForcedTerminationEvent(process_id=process_id, reason="split_shutdown")
+        if forced
+        else ProcessExitedEvent(process_id=process_id, exit_code=17)
+    )
+    for event in (
+        ProcessSilenceWarningEvent(process_id=process_id),
+        ProcessStderrTruncatedEvent(process_id=process_id, retained_bytes=27),
+        terminal,
+    ):
+        handle.on_frame(ProcessFrame(event=event, snapshot=snapshot))
+    handle.mark_stream_closed()
+    await asyncio.wait_for(asyncio.gather(*tasks), timeout=1)
+
+    assert raced
+    events = store.events[cid]
+    assert (
+        sum(
+            isinstance(event.payload, ProviderWarningPayload)
+            and event.payload.message == "concurrent update"
+            for event in events
+        )
+        == 1
+    )
+    assert (
+        sum(
+            isinstance(event.payload, ProviderWarningPayload)
+            and event.payload.code == "provider_silence"
+            for event in events
+        )
+        == 1
+    )
+    types = [event.type for event in events]
+    assert types.count("process_stderr_truncated") == 1
+    terminal_type = "process_forced_termination" if forced else "process_exited"
+    assert types.count(terminal_type) == 1
+    assert types.index("process_stderr_truncated") < types.index(terminal_type)
+    assert types.count("session_failed") == (0 if forced else 1)
+    sequences = [event.sequence for event in events]
+    assert sequences == list(range(sequences[0], sequences[0] + len(sequences)))
+    process = store.processes[process_id]
+    assert process.status.value == ("terminated" if forced else "failed")
+    assert process.exit_code == snapshot.returncode
+    assert process.redacted_stderr_tail == snapshot.redacted_stderr_tail
+    assert manager.get_runtime(cid) is None
+    assert managed.closed and not managed.tasks
+    assert not manager._idle_tasks  # pyright: ignore[reportPrivateUsage]
+    event_count = len(events)
+    await manager.shutdown()
+    assert len(store.events[cid]) == event_count
 
 
 @pytest.mark.asyncio

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import AsyncIterator
 from typing import Any
 from uuid import uuid4
 
@@ -22,7 +23,7 @@ from tth_types.harness import (
     LaunchSnapshot,
     VersionAdvisory,
 )
-from tth_types.process import ProcessExitedEvent
+from tth_types.process import ProcessEvent, ProcessExitedEvent
 from tth_types.split_api import (
     CreateSessionRequest,
     HarnessEventFrame,
@@ -55,6 +56,7 @@ class FakeSplit:
         self.requests: list[tuple[str, str, Any]] = []
         self.session_id = uuid4()
         self.sse_frames: list[tuple[str, str]] = []
+        self.event_stream: httpx.AsyncByteStream | None = None
         self.headers_seen: list[dict[str, str]] = []
 
     def capabilities(self) -> HarnessCapabilities:
@@ -104,6 +106,10 @@ class FakeSplit:
             )
             return httpx.Response(201, content=created.model_dump_json())
         if path.endswith("/events"):
+            if self.event_stream is not None:
+                return httpx.Response(
+                    200, stream=self.event_stream, headers={"Content-Type": "text/event-stream"}
+                )
             payload = b"".join(
                 f"event: {name}\nid: {i}\ndata: {data}\n\n".encode()
                 for i, (name, data) in enumerate(self.sse_frames, start=1)
@@ -318,6 +324,49 @@ async def test_events_stream_updates_seen_mirror_and_routes_process_frames() -> 
     assert handle.returncode == 0
     process_events = [event async for event in handle.events()]
     assert isinstance(process_events[0], ProcessExitedEvent)
+
+
+@pytest.mark.parametrize("read_error", [False, True])
+async def test_broken_event_stream_preserves_delivered_frames_and_closes_process_stream(
+    read_error: bool,
+) -> None:
+    event = TurnStartedPayload(turn_id=uuid4())
+    frame = HarnessEventFrame(item=event, new_native_ids=("delivered",)).model_dump_json()
+
+    class BrokenStream(httpx.AsyncByteStream):
+        closed = False
+
+        async def __aiter__(self) -> AsyncIterator[bytes]:
+            yield f"event: harness_event\ndata: {frame}\n\n".encode()
+            yield b'event: harness_event\ndata: {"new_native_ids": ["incomplete"]'
+            if read_error:
+                raise httpx.ReadError("connection reset mid-frame")
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    split = FakeSplit(pid=99)
+    stream = BrokenStream()
+    split.event_stream = stream
+    adapter = _adapter(split)
+    session = await adapter.start(_start_request())
+    try:
+        assert [item async for item in adapter.events(session)] == [event]
+        assert adapter.export_seen() == (frozenset({"delivered"}), frozenset())
+        assert stream.closed
+        handle = adapter.process_handle
+        assert handle is not None
+
+        async def process_events() -> list[ProcessEvent]:
+            return [event async for event in handle.events()]
+
+        assert await asyncio.wait_for(process_events(), timeout=1) == []
+        # Losing the transport is not evidence that the process exited successfully.
+        assert handle.returncode is None
+        assert not handle.forced
+        assert sum(path.endswith("/events") for _, path, _ in split.requests) == 1
+    finally:
+        await adapter.close(session)
 
 
 async def test_unary_operations_round_trip() -> None:
