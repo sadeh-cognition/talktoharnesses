@@ -32,7 +32,6 @@ from tth_muse.harness.config_dir import remove_config_dir, render_config_dir
 from tth_muse.harness.connection import MuseConnection
 from tth_muse.harness.normalizer import MuseNormalizer
 from tth_muse.harness.probe import build_argv, probe_muse
-from tth_muse.harness.wire_log import WireLog
 from tth_muse.runtime.handle import ProcessHandle
 from tth_muse.shared.questions import canonical_answer_values, canonical_questions
 
@@ -102,14 +101,9 @@ class MuseAdapter:
         self._queued = False
         self._closed = False
         self._config_dir: Path | None = None
-        self._wire: WireLog | None = None
 
     def bind_process(self, process: ProcessHandle) -> None:
         self._process = process
-
-    def attach_wire_log(self, wire: WireLog | None) -> None:
-        """Capture raw MSP frames for this adapter's connection (see wire_log)."""
-        self._wire = wire
 
     def build_argv(self, config: HarnessConfiguration) -> tuple[str, ...]:
         return build_argv(config)
@@ -149,7 +143,6 @@ class MuseAdapter:
                 self._notification,
                 self._disconnected,
                 self._normalizer.redact,
-                wire=self._wire,
             )
             await self._connection.initialize()
         return self._connection
@@ -233,13 +226,6 @@ class MuseAdapter:
             request.binding_id,
             self._model,
         )
-        if self._wire is not None:
-            self._wire.note(
-                "session bound",
-                native_session_id=native["sessionId"],
-                conversation_id=str(request.conversation_id),
-                binding_id=str(request.binding_id),
-            )
         return self._session
 
     def _require(self, session: HarnessSession) -> MuseConnection:
@@ -358,14 +344,6 @@ class MuseAdapter:
             params.get("turnId"),
             params.get("sessionId"),
         )
-        if self._wire is not None:
-            self._wire.note(
-                f"{what} not forwarded",
-                method=method,
-                reason=reason,
-                turn_id=params.get("turnId"),
-                session_id=params.get("sessionId"),
-            )
 
     async def _interaction(self, method: str, params: dict[str, Any]) -> None:
         turn_id = self._normalizer.turn_id
@@ -577,14 +555,6 @@ class MuseAdapter:
                 ", ".join(sorted(set(methods))),
                 self._push_poll_interval,
             )
-            if self._wire is not None:
-                self._wire.note(
-                    "push subscription stalled",
-                    native_turn_id=self._normalizer.native_turn_id,
-                    undelivered=len(unseen),
-                    methods=sorted(set(methods)),
-                    last_view_cursor=self._normalizer.last_view_cursor,
-                )
             self.polling = True
             if not self._resubscribe_failed:
                 # Worth one try per turn: cheap, and it does restore push on a
@@ -730,6 +700,3 @@ class MuseAdapter:
         if self._config_dir is not None:
             remove_config_dir(self._config_dir)
             self._config_dir = None
-        if self._wire is not None:
-            self._wire.close("adapter closed")
-            self._wire = None

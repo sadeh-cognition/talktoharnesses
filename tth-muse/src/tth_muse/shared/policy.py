@@ -23,11 +23,3 @@ class RuntimePolicy(BaseModel):
     lease_renewal_interval: float = Field(default=10.0, gt=0)
     # Live runtimes plus transient switch/rotation candidates.
     max_runtimes: int = Field(default=20, gt=0)
-    # Muse push-subscription watchdog: after this many seconds without a
-    # frame during an active turn, page the session view to check whether
-    # the host stopped pushing (it does, silently, after a few hundred
-    # events); a dead subscription is re-established and the gap replayed.
-    push_stall_probe: float = Field(default=20.0, gt=0)
-    push_poll_interval: float = Field(default=2.0, gt=0)
-    push_recovery_page_limit: int = Field(default=100, gt=0)
-    push_recovery_max_pages: int = Field(default=20, gt=0)

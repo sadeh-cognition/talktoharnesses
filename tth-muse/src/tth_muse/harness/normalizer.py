@@ -157,7 +157,7 @@ class MuseNormalizer:
         if params.get("turnId") and self.native_turn_id and params["turnId"] != self.native_turn_id:
             return "other_turn"
         # Either a method with no TTH mapping or a viewCursor replay that was
-        # already forwarded; the wire log carries the frame itself.
+        # already forwarded.
         return "unmapped_or_duplicate"
 
     def on_notification(self, method: str, params: dict[str, Any]) -> list[ev.HarnessEvent]:
