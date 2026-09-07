@@ -43,7 +43,11 @@ from tth_types.harness import (
     StructuredQuestionPayload,
 )
 
-from tth_grok.acp.schemas.grok_ext import grok_file_permission_target
+from tth_grok.acp.schemas.grok_ext import (
+    grok_file_permission_target,
+    grok_mcp_permission_tool_name,
+    grok_mcp_tool_call_name,
+)
 
 # Namespace for deriving stable UUIDs from native IDs within a session.
 _NS = UUID("a7c3e9f1-2b4d-4e6f-8a0c-1d2e3f4a5b6c")
@@ -354,7 +358,11 @@ class AcpSessionNormalizer:
             return []
         tool_id = _stable_uuid(f"tool:{self._native_session_id}:{tool_call_id}")
         self._tools[tool_call_id] = tool_id
-        name = str(update.get("title") or update.get("kind") or "tool")
+        # An MCP call is named after its target, not Grok's ``use_tool``
+        # wrapper, so callers can tell the servers' tools apart.
+        name = grok_mcp_tool_call_name(update) or str(
+            update.get("title") or update.get("kind") or "tool"
+        )
         self._tool_names[tool_call_id] = name
         raw_input = update.get("rawInput") or update.get("arguments")
         arguments = _as_dict(raw_input) if raw_input is not None else {}
@@ -504,6 +512,13 @@ class AcpSessionNormalizer:
         tool_call = _as_dict(params.get("toolCall"))
         if tool_call is not None:
             tool_name = _as_str(tool_call.get("title") or tool_call.get("kind"), "tool")
+            # An MCP call is reported under its fully qualified name rather
+            # than Grok's title so approval policy can key on the server.
+            raw_input = _as_dict(tool_call.get("rawInput"))
+            if raw_input is not None:
+                mcp_tool_name = grok_mcp_permission_tool_name(raw_input)
+                if mcp_tool_name is not None:
+                    tool_name = mcp_tool_name
         summary_raw = params.get("description") or params.get("summary") or ""
         options_obj = params.get("options")
         options: list[dict[str, Any]] = []

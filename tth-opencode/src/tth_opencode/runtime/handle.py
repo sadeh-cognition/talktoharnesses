@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import os
 import signal
 import sys
@@ -25,6 +26,8 @@ from tth_opencode.shared.policy import RuntimePolicy
 from tth_opencode.shared.redaction import StreamingTextRedactor
 
 STDERR_RETENTION_BYTES = 10 * 1024 * 1024
+
+logger = logging.getLogger(__name__)
 
 
 class ProcessHandle:
@@ -62,6 +65,8 @@ class ProcessHandle:
         self._exit_event = asyncio.Event()
         self._last_stdout_at = time.monotonic()
         self._silence_episode_active = False
+        self.stdout_bytes = 0
+        self.stdout_reads = 0
 
         self._event_q: asyncio.Queue[ProcessEvent | None] = asyncio.Queue()
         self._tasks: list[asyncio.Task[None]] = []
@@ -130,8 +135,24 @@ class ProcessHandle:
         assert self._process.stdout is not None
         while chunk := await self._process.stdout.read(65536):
             self._last_stdout_at = time.monotonic()
+            self.stdout_bytes += len(chunk)
+            self.stdout_reads += 1
+            if self._silence_episode_active:
+                logger.info(
+                    "process %s stdout resumed after silence (pid=%s bytes_total=%d)",
+                    self.process_id,
+                    self._process.pid,
+                    self.stdout_bytes,
+                )
             self._silence_episode_active = False
             yield chunk
+        logger.info(
+            "process %s stdout reached EOF (pid=%s reads=%d bytes_total=%d)",
+            self.process_id,
+            self._process.pid,
+            self.stdout_reads,
+            self.stdout_bytes,
+        )
 
     def events(self) -> AsyncIterator[ProcessEvent]:
         if self._events_consumer_taken:
@@ -284,6 +305,16 @@ class ProcessHandle:
                 idle = time.monotonic() - self._last_stdout_at
                 if idle >= self._policy.silence_warning and not self._silence_episode_active:
                     self._silence_episode_active = True
+                    logger.warning(
+                        "process %s silent on stdout for %.0fs (pid=%s reads=%d bytes_total=%d "
+                        "returncode=%s)",
+                        self.process_id,
+                        idle,
+                        self._process.pid,
+                        self.stdout_reads,
+                        self.stdout_bytes,
+                        self._process.returncode,
+                    )
                     self._emit(ProcessSilenceWarningEvent(process_id=self.process_id))
         except asyncio.CancelledError:
             return

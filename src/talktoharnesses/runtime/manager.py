@@ -1401,6 +1401,12 @@ class RuntimeManager:
                 )
             ]
         elif isinstance(event, ProcessSilenceWarningEvent):
+            logger.warning(
+                "conversation %s: harness process %s silent on stdout (active turn %s)",
+                managed.conversation_id,
+                event.process_id,
+                state.active_turn.id if state.active_turn is not None else None,
+            )
             payloads = [
                 ProviderWarningPayload(
                     message="no stdout activity within silence window",
@@ -1468,12 +1474,18 @@ class RuntimeManager:
                     "no active runtime for conversation",
                     details={"conversation_id": str(conversation_id)},
                 )
+            logger.info("conversation %s: runtime interrupt requested", conversation_id)
             try:
                 await asyncio.wait_for(
                     managed.adapter.interrupt(managed.session),
                     timeout=self._policy.interrupt_timeout,
                 )
             except TimeoutError:
+                logger.warning(
+                    "conversation %s: adapter interrupt timed out after %.0fs; forcing",
+                    conversation_id,
+                    self._policy.interrupt_timeout,
+                )
                 if managed.process is not None:
                     await managed.process.force_terminate(reason="interrupt_timeout")
                 try:

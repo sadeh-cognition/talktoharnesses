@@ -546,7 +546,18 @@ class CommandProcessor:
                     command.conversation_id,
                     **self._fence_kwargs(command.conversation_id),
                 )
+            logger.info(
+                "conversation %s: delivering interrupt command %s to adapter (active turn %s)",
+                command.conversation_id,
+                command.id,
+                state.active_turn.id if state.active_turn is not None else None,
+            )
             await adapter.interrupt(session)
+            logger.info(
+                "conversation %s: interrupt command %s acknowledged by adapter",
+                command.conversation_id,
+                command.id,
+            )
         else:
             logger.warning("command kind %s not executable by worker", command.kind)
             settled = started_cmd.model_copy(
@@ -1234,16 +1245,24 @@ class CommandProcessor:
                     request=payload.request,
                     created_at=self._clock(),
                 )
-                await self._broker.accept_request(  # type: ignore[attr-defined]
-                    conversation_id,
-                    pending,
-                    provider_correlation=(
-                        event.provider_correlation
-                        if isinstance(event, HarnessInteractionRequest)
-                        else None
-                    ),
-                    **self._fence_kwargs(conversation_id),
-                )
+                for attempt in range(3):
+                    try:
+                        await self._broker.accept_request(  # type: ignore[attr-defined]
+                            conversation_id,
+                            pending,
+                            provider_correlation=(
+                                event.provider_correlation
+                                if isinstance(event, HarnessInteractionRequest)
+                                else None
+                            ),
+                            **self._fence_kwargs(conversation_id),
+                        )
+                        break
+                    except DomainError as exc:
+                        if exc.code is not ErrorCode.OPTIMISTIC_CONFLICT or attempt == 2:
+                            raise
+                        # accept_request reloads and rebases the same request.
+                        await asyncio.sleep(0.05 * (attempt + 1))
                 return True
 
             now = self._clock()

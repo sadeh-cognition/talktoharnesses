@@ -9,6 +9,7 @@ from collections.abc import AsyncIterator, Callable
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
 from uuid import UUID, uuid4
 
+from claude_agent_sdk import SystemMessage
 from tth_types.adapter import (
     HarnessInteractionRequest,
     HarnessSession,
@@ -591,11 +592,11 @@ class ClaudeAdapter:
                 "session_id": getattr(message, "session_id", None),
                 "message_id": getattr(message, "message_id", None),
             }
-        if name == "SystemMessage":
+        if isinstance(message, SystemMessage):
             return {
                 "type": "system",
-                "subtype": getattr(message, "subtype", ""),
-                "data": getattr(message, "data", {}) or {},
+                "subtype": message.subtype,
+                "data": message.data,
             }
         if name == "UserMessage":
             content_out: list[dict[str, Any]] = []

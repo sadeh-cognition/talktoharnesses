@@ -21,6 +21,22 @@ from tth_muse.shared.paths import resolve_launch_paths
 from tth_muse.shared.policy import RuntimePolicy
 from tth_muse.shared.redaction import StreamingTextRedactor
 
+# Split-service internals that must not reach the harness process: the proxy's
+# shared secret (readable by any shell the agent runs), and Django settings
+# that would hijack pytest-django or ``manage.py`` in the agent's workspace.
+_PRIVATE_ENV = frozenset(
+    {"TTH_SPLIT_TOKEN", "TTH_SPLIT_SECRET_KEY", "TTH_SPLIT_DEBUG", "DJANGO_SETTINGS_MODULE"}
+)
+
+
+def child_environment() -> dict[str, str]:
+    """The service environment minus what the harness process must not see."""
+    return {
+        key: value
+        for key, value in os.environ.items()
+        if key not in _PRIVATE_ENV and not key.startswith("TTH_MUSE_")
+    }
+
 
 class ProcessSupervisor:
     """Spawn and supervise harness child processes under a runtime policy."""
@@ -169,7 +185,7 @@ class ProcessSupervisor:
         program = spec.launch.resolved_executable
         args = list(spec.argv)
         cwd = spec.launch.working_directory
-        env = {**os.environ, **spec.environment} if spec.environment else None
+        env = {**child_environment(), **spec.environment}
 
         if sys.platform == "win32":
             return await self._create_process_windows(program, args, cwd, env)

@@ -33,6 +33,10 @@ def _exclude_opentelemetry_records(record: Record) -> bool:
     # OTel's own loggers must not feed back into the OTLP log exporter:
     # an export failure would otherwise log an error that is itself exported,
     # creating a loop while the collector is unreachable.
+    # Stdlib records routed through the loguru intercept already reach the
+    # exporter via the root-logger LoggingHandler below; skip the duplicate.
+    if record["extra"].get("stdlib_intercept"):
+        return False
     name = record["name"]
     return name is None or not name.startswith("opentelemetry")
 
@@ -109,11 +113,18 @@ def configure_opentelemetry(service_name: str | None = None, *, log_level: str =
     root_logger.addHandler(otel_handler)
     # With no root handlers, stdlib WARNING+ reached stderr via
     # logging.lastResort; adding a handler silences that fallback, so
-    # restore the stderr visibility explicitly.
-    stderr_handler = logging.StreamHandler(sys.stderr)
-    stderr_handler.setLevel(logging.WARNING)
-    root_logger.addHandler(stderr_handler)
-    root_logger.setLevel(log_level)
+    # restore the stderr visibility explicitly unless configure_logging()
+    # already routes stdlib records into loguru (which writes to stderr and
+    # the log file itself).
+    from talktoharnesses.django.http_logging import stdlib_logging_intercepted
+
+    if not stdlib_logging_intercepted():
+        stderr_handler = logging.StreamHandler(sys.stderr)
+        stderr_handler.setLevel(logging.WARNING)
+        root_logger.addHandler(stderr_handler)
+        root_logger.setLevel(log_level)
+    elif root_logger.getEffectiveLevel() > logging.getLevelNamesMapping()[log_level.upper()]:
+        root_logger.setLevel(log_level.upper())
 
     HTTPXClientInstrumentor().instrument()
 

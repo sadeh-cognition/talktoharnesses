@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any, cast
 from uuid import UUID, uuid4
@@ -287,7 +287,11 @@ class Host:
 
 
 async def start(
-    monkeypatch: pytest.MonkeyPatch, *, resume: bool = False
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    resume: bool = False,
+    adapter_factory: Callable[[], MuseAdapter] = MuseAdapter,
+    host: Host | None = None,
 ) -> tuple[MuseAdapter, Any, Host]:
     caps = HarnessCapabilities(
         kind=HarnessKind.MUSE,
@@ -301,7 +305,7 @@ async def start(
         return caps
 
     monkeypatch.setattr(adapter_module, "probe_muse", probe)
-    adapter, host = MuseAdapter(), Host()
+    adapter, host = adapter_factory(), host or Host()
     config = HarnessConfiguration(kind=HarnessKind.MUSE, working_directory="/tmp", model="default")
     await adapter.probe(config)
     adapter.bind_process(cast(ProcessHandle, cast(object, host)))

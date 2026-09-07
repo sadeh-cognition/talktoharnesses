@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+from typing import Any
 from uuid import uuid4
 
 import pytest
-from tth_types.enums import ApprovalDecision, ErrorCode, ToolOutcome
+from tth_types.enums import ApprovalDecision, ErrorCode, FileOperation, ToolOutcome
 from tth_types.errors import DomainError
 from tth_types.events import (
     AssistantMessageDeltaPayload,
+    CostUpdatedPayload,
+    InteractionRequestedPayload,
     ReasoningCompletedPayload,
     ReasoningDeltaPayload,
     ReasoningStartedPayload,
@@ -19,6 +22,7 @@ from tth_types.events import (
     TurnInterruptedPayload,
     UsageUpdatedPayload,
 )
+from tth_types.harness import ApprovalRequestPayload
 
 from tth_claude.harness.normalizer import (
     ClaudeNormalizer,
@@ -32,6 +36,7 @@ from tth_claude.harness.schemas import (
     ClaudeThinkingBlock,
     ClaudeToolResultBlock,
     ClaudeToolUseBlock,
+    ClaudeUserMessage,
 )
 from tth_claude.shared.questions import canonical_questions
 
@@ -65,12 +70,11 @@ def test_thinking_tool_result_and_terminal_variants() -> None:
     assert any(isinstance(e, ToolRequestedPayload) for e in events)
 
     completed = n.on_message(
-        ClaudeAssistantMessage(
+        ClaudeUserMessage(
             content=[
                 ClaudeToolResultBlock(tool_use_id="t1", content="ok", is_error=False),
                 ClaudeToolResultBlock(tool_use_id="unknown", content="x", is_error=True),
             ],
-            model="claude",
             session_id="sess-1",
         )
     )
@@ -172,6 +176,37 @@ def test_permission_request_mapping() -> None:
     assert n.fail_active_turn(error_code="x", message="y") == []
 
 
+@pytest.mark.parametrize(
+    "tool_name,tool_input,path,operation",
+    [
+        ("Read", {"file_path": "/repo/AGENTS.md"}, "/repo/AGENTS.md", FileOperation.READ),
+        ("Read", {}, None, FileOperation.READ),
+        ("Read", {"file_path": 3}, None, FileOperation.READ),
+        ("Glob", {"pattern": "**/*.py"}, ".", FileOperation.READ),
+        ("Glob", {"pattern": "*.py", "path": "/repo"}, "/repo", FileOperation.READ),
+        ("Glob", {"pattern": "../*"}, ".", None),
+        ("Glob", {"pattern": "/outside/*"}, ".", None),
+        ("Grep", {"pattern": "foo"}, ".", FileOperation.READ),
+        ("Grep", {"pattern": "foo", "path": "/repo"}, "/repo", FileOperation.READ),
+        ("Edit", {"file_path": "/repo/a.py"}, "/repo/a.py", FileOperation.MODIFY),
+        ("Write", {"file_path": "/repo/a.py"}, "/repo/a.py", FileOperation.MODIFY),
+        ("Bash", {"command": "cat AGENTS.md"}, None, None),
+    ],
+)
+def test_file_permission_scope(
+    tool_name: str, tool_input: dict[str, Any], path: str | None, operation: FileOperation | None
+) -> None:
+    normalizer = ClaudeNormalizer()
+    normalizer.begin_turn(uuid4())
+    event = normalizer.on_permission_request(
+        tool_name=tool_name, tool_input=tool_input, interaction_id=uuid4()
+    )[0]
+    assert isinstance(event, InteractionRequestedPayload)
+    assert isinstance(event.request, ApprovalRequestPayload)
+    assert event.request.path == path
+    assert event.request.operation == operation
+
+
 def test_model_usage_is_aggregated_without_inventing_total() -> None:
     normalizer = ClaudeNormalizer()
     normalizer.set_session("sess-1")
@@ -263,3 +298,47 @@ def test_structured_question_mapping() -> None:
     event = n.on_question_request(questions=questions, interaction_id=uuid4())[0]
     assert event.kind is InteractionKind.STRUCTURED_QUESTION  # type: ignore[attr-defined]
     assert event.request.questions == questions  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("outcome", ["success", "error", "interrupted"])
+@pytest.mark.parametrize("amount", [0.0, 0.123456789])
+def test_reported_cost_precedes_terminal_event(outcome: str, amount: float) -> None:
+    normalizer = ClaudeNormalizer()
+    turn_id = uuid4()
+    normalizer.begin_turn(turn_id)
+    if outcome == "interrupted":
+        normalizer.request_interrupt()
+
+    events = normalizer.on_message(
+        ClaudeResultMessage(
+            subtype=outcome,
+            session_id="session",
+            is_error=outcome != "success",
+            total_cost_usd=amount,
+        )
+    )
+
+    assert events[:-1] == [CostUpdatedPayload(turn_id=turn_id, cost=str(amount), currency="USD")]
+    terminal_type = {
+        "success": TurnCompletedPayload,
+        "error": TurnFailedPayload,
+        "interrupted": TurnInterruptedPayload,
+    }[outcome]
+    assert isinstance(events[-1], terminal_type)
+
+
+@pytest.mark.parametrize("amount", [None, -1.0, float("nan"), float("inf")])
+def test_missing_or_invalid_cost_is_not_reported(amount: float | None) -> None:
+    normalizer = ClaudeNormalizer()
+    normalizer.begin_turn(uuid4())
+    events = normalizer.on_message(
+        ClaudeResultMessage(
+            subtype="success",
+            session_id="session",
+            total_cost_usd=amount,
+            usage={"input_tokens": 3, "output_tokens": 1},
+        )
+    )
+    assert len(events) == 2
+    assert isinstance(events[0], UsageUpdatedPayload)
+    assert isinstance(events[1], TurnCompletedPayload)

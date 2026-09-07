@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from math import isfinite
+from pathlib import PurePosixPath
 from typing import Any, cast
 from uuid import UUID, uuid4, uuid5
 
 from tth_types.enums import (
     ApprovalDecision,
     ErrorCode,
+    FileOperation,
     InteractionKind,
     ToolOutcome,
 )
@@ -17,6 +20,7 @@ from tth_types.events import (
     AssistantMessageCompletedPayload,
     AssistantMessageDeltaPayload,
     AssistantMessageStartedPayload,
+    CostUpdatedPayload,
     HarnessEvent,
     InteractionRequestedPayload,
     ReasoningCompletedPayload,
@@ -46,6 +50,7 @@ from tth_claude.harness.schemas import (
     ClaudeThinkingBlock,
     ClaudeToolResultBlock,
     ClaudeToolUseBlock,
+    ClaudeUserMessage,
     parse_claude_message,
 )
 
@@ -115,9 +120,16 @@ class ClaudeNormalizer:
             return []
         if isinstance(msg, ClaudeAssistantMessage):
             return self._assistant(msg)
-        if isinstance(msg, ClaudeResultMessage):
-            return self._result(msg)
-        return []
+        if isinstance(msg, ClaudeUserMessage):
+            if self._active_turn_id is None or self._resync_mode or isinstance(msg.content, str):
+                return []
+            return [
+                event
+                for block in msg.content
+                if isinstance(block, ClaudeToolResultBlock)
+                for event in self._tool_result(block)
+            ]
+        return self._result(msg)
 
     def on_permission_request(
         self,
@@ -129,7 +141,25 @@ class ClaudeNormalizer:
     ) -> list[HarnessEvent]:
         if self._active_turn_id is None:
             raise DomainError(ErrorCode.INVALID_STATE, "permission without active turn")
-        del tool_input, tool_use_id
+        del tool_use_id
+        path = tool_input.get("file_path")
+        operation = None
+        if tool_name == "Read":
+            operation = FileOperation.READ
+        elif tool_name in {"Glob", "Grep"}:
+            path = tool_input.get("path", ".")
+            operation = FileOperation.READ
+            # A glob that escapes its search root cannot be scoped by path alone.
+            if tool_name == "Glob":
+                pattern = tool_input.get("pattern")
+                if (
+                    not isinstance(pattern, str)
+                    or PurePosixPath(pattern).is_absolute()
+                    or ".." in PurePosixPath(pattern).parts
+                ):
+                    operation = None
+        elif tool_name in {"Edit", "Write"}:
+            operation = FileOperation.MODIFY
         return [
             InteractionRequestedPayload(
                 turn_id=self._active_turn_id,
@@ -137,6 +167,8 @@ class ClaudeNormalizer:
                 kind=InteractionKind.APPROVAL,
                 request=ApprovalRequestPayload(
                     tool_name=tool_name,
+                    path=path if isinstance(path, str) and path.strip() else None,
+                    operation=operation,
                     summary=f"Claude tool permission: {tool_name}",
                     available_decisions=(
                         ApprovalDecision.ALLOW_ONCE,
@@ -313,6 +345,18 @@ class ClaudeNormalizer:
                     output_tokens=usage["output_tokens"],
                     total_tokens=usage["total_tokens"],
                     cached_input_tokens=usage["cached_input_tokens"],
+                )
+            )
+        if (
+            msg.total_cost_usd is not None
+            and isfinite(msg.total_cost_usd)
+            and msg.total_cost_usd >= 0
+        ):
+            events.append(
+                CostUpdatedPayload(
+                    turn_id=self._active_turn_id,
+                    cost=str(msg.total_cost_usd),
+                    currency="USD",
                 )
             )
         if self._interrupt_requested:

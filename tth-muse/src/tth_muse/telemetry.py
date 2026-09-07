@@ -85,14 +85,23 @@ def configure_opentelemetry(*, log_level: str = "INFO") -> None:
     otel_handler = LoggingHandler(logger_provider=logger_provider)
     otel_handler.addFilter(_ExcludeOpenTelemetryRecords())
     root_logger = logging.getLogger()
-    root_logger.addHandler(otel_handler)
     # With no root handlers, stdlib WARNING+ reached stderr via
     # logging.lastResort; adding a handler silences that fallback, so
-    # restore the stderr visibility explicitly.
-    stderr_handler = logging.StreamHandler(sys.stderr)
-    stderr_handler.setLevel(logging.WARNING)
-    root_logger.addHandler(stderr_handler)
-    root_logger.setLevel(log_level)
+    # restore the stderr visibility explicitly unless Django's LOGGING
+    # setting already put a stream handler on the root logger (it writes
+    # WARNING+ for third-party loggers and the split's own level for
+    # ``tth_muse``; a second stream handler would print every line twice
+    # in ``docker logs``).
+    has_stream_handler = any(isinstance(h, logging.StreamHandler) for h in root_logger.handlers)
+    root_logger.addHandler(otel_handler)
+    if not has_stream_handler:
+        stderr_handler = logging.StreamHandler(sys.stderr)
+        stderr_handler.setLevel(logging.WARNING)
+        root_logger.addHandler(stderr_handler)
+    # Django's LOGGING owns the root level when it set one; lowering it here
+    # would push third-party INFO chatter through the stdout handler.
+    if root_logger.level == logging.NOTSET:
+        root_logger.setLevel(logging.getLevelNamesMapping()[log_level.upper()])
 
     try:
         # Only the splits that ship httpx carry its instrumentation package;

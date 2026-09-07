@@ -167,8 +167,25 @@ class SessionStore:
     async def _pump(self, entry: SessionEntry) -> None:
         """Forward normalized harness output as SSE frames with dedupe deltas."""
         before_ids, before_offsets = _export_seen(entry.adapter)
+        forwarded = 0
+        logger.info("session pump started for %s", entry.session_id)
         try:
             async for item in entry.adapter.events(entry.session):
+                forwarded += 1
+                if isinstance(item, HarnessInteractionRequest):
+                    logger.info(
+                        "session %s forwarding interaction %s kind=%s",
+                        entry.session_id,
+                        item.payload.interaction_id,
+                        item.payload.kind.value,
+                    )
+                elif entry.queue.qsize() >= entry.queue.maxsize // 2 and forwarded % 100 == 0:
+                    logger.warning(
+                        "session %s frame queue backing up: %d/%d frames waiting for the proxy",
+                        entry.session_id,
+                        entry.queue.qsize(),
+                        entry.queue.maxsize,
+                    )
                 after_ids, after_offsets = _export_seen(entry.adapter)
                 new_ids = tuple(sorted(after_ids - before_ids))
                 new_offsets = tuple(sorted(after_offsets - before_offsets))
@@ -192,6 +209,12 @@ class SessionStore:
             raise
         except Exception:  # noqa: BLE001
             logger.exception("session pump failed for %s", entry.session_id)
+        logger.info(
+            "session pump ended for %s after %d items (closed=%s)",
+            entry.session_id,
+            forwarded,
+            entry.closed,
+        )
         if not entry.closed:
             await entry.enqueue(FRAME_END, EndFrame(reason="stream_ended").model_dump_json())
             await entry.queue.put(None)
