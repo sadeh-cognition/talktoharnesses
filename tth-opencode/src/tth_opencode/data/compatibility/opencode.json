@@ -9,7 +9,7 @@
       "supports_steer": false,
       "supports_multi_interaction": true,
       "supports_nested_activity": false,
-      "supports_mcp_servers": false
+      "supports_mcp_servers": true
     },
     "notes": "Live create/resume/interaction proven on linux for opencode serve loopback HTTP/SSE. Interrupt and multi-interaction are published for the same linux gate. Child sessions fold into the parent turn; nested activity is not published."
   },

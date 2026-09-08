@@ -3,17 +3,23 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from decimal import Decimal
 from typing import Any, cast
 from uuid import UUID, uuid5
 
-from tth_types.enums import ApprovalDecision, ErrorCode, InteractionKind
+from tth_types.enums import ApprovalDecision, ErrorCode, InteractionKind, ToolOutcome
 from tth_types.errors import DomainError
 from tth_types.events import (
     AssistantMessageCompletedPayload,
     AssistantMessageDeltaPayload,
     AssistantMessageStartedPayload,
+    CostUpdatedPayload,
     HarnessEvent,
     InteractionRequestedPayload,
+    ToolCompletedPayload,
+    ToolFailedPayload,
+    ToolRequestedPayload,
+    ToolStartedPayload,
     TurnCompletedPayload,
     TurnFailedPayload,
     TurnInterruptedPayload,
@@ -24,6 +30,7 @@ from tth_types.harness import (
     ApprovalRequestPayload,
     CanonicalQuestion,
     StructuredQuestionPayload,
+    limit_tool_output_tail,
 )
 
 from tth_opencode.harness.schemas import OpenCodeStepFinishPart, parse_server_event
@@ -53,6 +60,7 @@ class OpenCodeNormalizer:
         self._usage_steps = 0
         self._usage_all_have_total = True
         self._usage: dict[str, int] = {}
+        self._cost = Decimal(0)
 
     def set_redaction_patterns(self, patterns: Sequence[str]) -> None:
         self._redaction_patterns = tuple(sorted((p for p in patterns if p), key=len, reverse=True))
@@ -72,6 +80,7 @@ class OpenCodeNormalizer:
         self._usage_steps = 0
         self._usage_all_have_total = True
         self._usage.clear()
+        self._cost = Decimal(0)
 
     def import_seen(
         self,
@@ -125,7 +134,12 @@ class OpenCodeNormalizer:
             return self._session_status({**props, "status": props.get("status") or "idle"})
         # Unknown event types fail the runtime.
         if event.type not in {
+            "catalog.updated",
+            "integration.updated",
             "message.updated",
+            "plugin.added",
+            "reference.updated",
+            "session.created",
             "session.updated",
             "session.diff",
             "todo.updated",
@@ -268,11 +282,69 @@ class OpenCodeNormalizer:
 
     def _part_updated(self, props: dict[str, Any]) -> list[HarnessEvent]:
         part = _mapping(props.get("part"))
+        if part.get("type") == "tool":
+            return self._tool_updated(part)
         if part.get("type") != "step-finish":
             return []
         parsed = OpenCodeStepFinishPart.model_validate(part)
         self._record_usage(parsed, parsed.sessionID)
         return []
+
+    def _tool_updated(self, part: dict[str, Any]) -> list[HarnessEvent]:
+        session_id = part.get("sessionID")
+        if (
+            self._active_turn_id is None
+            or self._resync_mode
+            or not isinstance(session_id, str)
+            or not self.accepts_session(session_id)
+        ):
+            return []
+        state = _mapping(part.get("state"))
+        status = state.get("status")
+        if status not in {"running", "completed", "error"}:
+            return []
+        native_key = f"opencode-tool:{session_id}:{part['callID']}"
+        if f"{native_key}:finished" in self._seen_native_ids:
+            return []
+        tool_id = _stable_uuid(native_key)
+        tool_name = self._redact(str(part["tool"]))
+        turn_id = self._active_turn_id
+        events: list[HarnessEvent] = []
+        if f"{native_key}:started" not in self._seen_native_ids:
+            events.extend(
+                [
+                    ToolRequestedPayload(
+                        turn_id=turn_id,
+                        tool_id=tool_id,
+                        tool_name=tool_name,
+                        arguments=self._redact(_mapping(state.get("input"))),
+                    ),
+                    ToolStartedPayload(turn_id=turn_id, tool_id=tool_id, tool_name=tool_name),
+                ]
+            )
+            self._seen_native_ids.add(f"{native_key}:started")
+        if status == "completed":
+            events.append(
+                ToolCompletedPayload(
+                    turn_id=turn_id,
+                    tool_id=tool_id,
+                    tool_name=tool_name,
+                    outcome=ToolOutcome.SUCCESS,
+                    output_tail=limit_tool_output_tail(self._redact(str(state.get("output", "")))),
+                )
+            )
+        elif status == "error":
+            events.append(
+                ToolFailedPayload(
+                    turn_id=turn_id,
+                    tool_id=tool_id,
+                    tool_name=tool_name,
+                    message=self._redact(str(state.get("error", "tool failed"))),
+                )
+            )
+        if status in {"completed", "error"}:
+            self._seen_native_ids.add(f"{native_key}:finished")
+        return events
 
     def _record_usage(self, part: OpenCodeStepFinishPart, session_id: str) -> None:
         if (
@@ -286,6 +358,7 @@ class OpenCodeNormalizer:
             return
         self._seen_native_ids.add(native_key)
         self._usage_steps += 1
+        self._cost += Decimal(str(part.cost))
         self._usage["input_tokens"] = self._usage.get("input_tokens", 0) + part.tokens.input
         self._usage["output_tokens"] = self._usage.get("output_tokens", 0) + part.tokens.output
         self._usage["cached_input_tokens"] = (
@@ -330,6 +403,12 @@ class OpenCodeNormalizer:
                         cached_input_tokens=usage.get("cached_input_tokens"),
                     )
                 )
+                # OpenCode qualifies its native message/step costs as USD in ACP usage.
+                events.append(
+                    CostUpdatedPayload(
+                        turn_id=self._active_turn_id, cost=str(self._cost), currency="USD"
+                    )
+                )
             events.append(
                 TurnCompletedPayload(
                     turn_id=self._active_turn_id,
@@ -357,12 +436,19 @@ class OpenCodeNormalizer:
             self._active_turn_id = None
         return events
 
-    def _redact(self, text: str) -> str:
-        out = text
-        for pattern in self._redaction_patterns:
-            if pattern:
-                out = out.replace(pattern, "***")
-        return out
+    def _redact(self, value: Any) -> Any:
+        if isinstance(value, str):
+            for pattern in self._redaction_patterns:
+                if pattern:
+                    value = value.replace(pattern, "***")
+        elif isinstance(value, dict):
+            return {
+                self._redact(key): self._redact(item)
+                for key, item in cast(dict[str, Any], value).items()
+            }
+        elif isinstance(value, list):
+            return [self._redact(item) for item in cast(list[Any], value)]
+        return value
 
 
 def _mapping(value: object) -> dict[str, Any]:

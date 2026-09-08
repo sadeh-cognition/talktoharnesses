@@ -5,20 +5,25 @@ from __future__ import annotations
 from uuid import uuid4
 
 import pytest
-from tth_types.enums import ApprovalDecision, ErrorCode, InteractionKind
+from tth_types.enums import ApprovalDecision, ErrorCode, InteractionKind, ToolOutcome
 from tth_types.errors import DomainError
 from tth_types.events import (
     AssistantMessageCompletedPayload,
     AssistantMessageDeltaPayload,
     AssistantMessageStartedPayload,
+    CostUpdatedPayload,
     InteractionRequestedPayload,
+    ToolCompletedPayload,
+    ToolFailedPayload,
+    ToolRequestedPayload,
+    ToolStartedPayload,
     TurnCompletedPayload,
     TurnFailedPayload,
     TurnInterruptedPayload,
     TurnOutcomeUnknownPayload,
     UsageUpdatedPayload,
 )
-from tth_types.harness import ApprovalRequestPayload
+from tth_types.harness import CANONICAL_TOOL_TAIL_BYTES, ApprovalRequestPayload
 
 from tth_opencode.harness.normalizer import OpenCodeNormalizer
 
@@ -100,6 +105,99 @@ def test_part_delta_emits_start_then_sequenced_deltas_with_redaction() -> None:
     assert isinstance(second[0], AssistantMessageDeltaPayload)
     assert second[0].sequence == 2
     assert second[0].message_id == first[0].message_id
+
+
+def _tool_event(status: str, *, session_id: str = "sess-1", **state: object) -> dict[str, object]:
+    return {
+        "id": f"evt_{status}",
+        "type": "message.part.updated",
+        "properties": {
+            "part": {
+                "id": "part-read",
+                "sessionID": session_id,
+                "messageID": "message-read",
+                "type": "tool",
+                "callID": "call-read",
+                "tool": "read",
+                "state": {"status": status, "input": {"filePath": "/tmp/file"}, **state},
+            }
+        },
+    }
+
+
+def test_tool_lifecycle_redacts_and_deduplicates_updates() -> None:
+    n = OpenCodeNormalizer()
+    n.set_session("sess-1")
+    n.set_redaction_patterns(("SECRET",))
+    turn = uuid4()
+    n.begin_turn(turn)
+    assert n.on_server_event(_tool_event("pending")) == []
+    running = _tool_event("running", input={"paths": ["/SECRET", {"token": "SECRET"}], "limit": 5})
+    requested, started = n.on_server_event(running)
+    assert isinstance(requested, ToolRequestedPayload)
+    assert requested.arguments == {"paths": ["/***", {"token": "***"}], "limit": 5}
+    assert isinstance(started, ToolStartedPayload)
+    assert started.turn_id == turn
+    assert started.tool_name == "read"
+    assert requested.tool_id == started.tool_id
+    assert n.on_server_event(running) == []
+
+    completed = _tool_event("completed", output="文" * CANONICAL_TOOL_TAIL_BYTES + "SECRET")
+    result = n.on_server_event(completed)
+    assert len(result) == 1
+    assert isinstance(result[0], ToolCompletedPayload)
+    assert result[0].tool_id == started.tool_id
+    assert result[0].outcome is ToolOutcome.SUCCESS
+    assert result[0].output_tail.endswith("***")
+    assert len(result[0].output_tail.encode()) <= CANONICAL_TOOL_TAIL_BYTES
+    assert n.on_server_event(completed) == []
+    assert n.on_server_event(running) == []
+
+    restored = OpenCodeNormalizer()
+    restored.set_session("sess-1")
+    restored.begin_turn(turn)
+    restored.import_seen(*n.export_seen())
+    assert restored.on_server_event(completed) == []
+
+
+@pytest.mark.parametrize("status", ["completed", "error"])
+def test_tool_terminal_snapshot_includes_start_when_running_update_was_missed(status: str) -> None:
+    n = OpenCodeNormalizer()
+    n.set_session("sess-1")
+    n.set_redaction_patterns(("SECRET",))
+    n.begin_turn(uuid4())
+    event = _tool_event(status, output="file contents", error="Cannot read SECRET")
+    requested, started, terminal = n.on_server_event(event)
+    assert isinstance(requested, ToolRequestedPayload)
+    assert isinstance(started, ToolStartedPayload)
+    assert isinstance(terminal, (ToolCompletedPayload, ToolFailedPayload))
+    assert requested.tool_id == started.tool_id == terminal.tool_id
+    if status == "error":
+        assert isinstance(terminal, ToolFailedPayload)
+        assert terminal.message == "Cannot read ***"
+    else:
+        assert isinstance(terminal, ToolCompletedPayload)
+        assert terminal.output_tail == "file contents"
+    assert n.on_server_event(event) == []
+
+
+def test_tool_updates_filter_nested_session_ids_and_resync() -> None:
+    n = OpenCodeNormalizer()
+    n.set_session("sess-1")
+    assert n.on_server_event(_tool_event("running")) == []
+    n.begin_turn(uuid4())
+    n.set_session("sess-1", resync=True)
+    assert n.on_server_event(_tool_event("running")) == []
+    n.set_session("sess-1")
+    assert n.on_server_event(_tool_event("running", session_id="foreign")) == []
+    n.on_server_event(
+        {"type": "session.created", "properties": {"info": {"id": "child", "parentID": "sess-1"}}}
+    )
+    child = n.on_server_event(_tool_event("running", session_id="child"))
+    parent = n.on_server_event(_tool_event("running"))
+    assert isinstance(child[1], ToolStartedPayload)
+    assert isinstance(parent[1], ToolStartedPayload)
+    assert child[1].tool_id != parent[1].tool_id
 
 
 def test_part_delta_dedupes_seen_offsets() -> None:
@@ -213,8 +311,13 @@ def test_known_noise_event_types_are_ignored() -> None:
     n.set_session("sess-1")
     for event_type in (
         "server.connected",
+        "catalog.updated",
+        "integration.updated",
+        "plugin.added",
+        "reference.updated",
         "message.updated",
         "message.part.updated",
+        "session.created",
         "session.updated",
         "session.diff",
         "todo.updated",
@@ -264,6 +367,11 @@ def test_step_usage_aggregates_unique_parent_and_child_parts_before_terminal() -
     assert usage.cached_input_tokens == 10
     assert usage.total_tokens is None
     assert terminal.index(usage) < len(terminal) - 1
+    cost = next(event for event in terminal if isinstance(event, CostUpdatedPayload))
+    assert cost.cost == "0.2"
+    assert cost.currency == "USD"
+    assert cost.turn_id == turn_id
+    assert terminal.index(cost) < len(terminal) - 1
 
 
 def test_history_usage_starts_at_current_root_message() -> None:
@@ -283,6 +391,24 @@ def test_history_usage_starts_at_current_root_message() -> None:
     terminal = normalizer.on_server_event(_status(status="idle"))
     usage = next(event for event in terminal if isinstance(event, UsageUpdatedPayload))
     assert usage.input_tokens == 10
+    cost = next(event for event in terminal if isinstance(event, CostUpdatedPayload))
+    assert cost.cost == "0.1"
+
+    # Resuming a session starts a new turn's total, without billing old history again.
+    normalizer.begin_turn(uuid4(), root_message_id="next-root")
+    free_step = {**_step("free-step"), "cost": 0}
+    normalizer.on_message_history(
+        "sess-1",
+        [
+            {"info": {"id": "answer"}, "parts": [_step("current-step")]},
+            {"info": {"id": "next-root"}, "parts": []},
+            {"info": {"id": "next-answer"}, "parts": [free_step]},
+        ],
+        after_message_id="next-root",
+    )
+    terminal = normalizer.on_server_event(_status(status="idle"))
+    cost = next(event for event in terminal if isinstance(event, CostUpdatedPayload))
+    assert cost.cost == "0.0"
 
 
 def test_on_permission_and_outcome_unknown() -> None:

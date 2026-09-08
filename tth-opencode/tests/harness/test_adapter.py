@@ -16,7 +16,17 @@ from tth_types.adapter import (
     StartSessionRequest,
     TurnRequest,
 )
-from tth_types.enums import HarnessKind
+from tth_types.enums import ErrorCode, HarnessKind
+from tth_types.errors import DomainError
+from tth_types.events import (
+    AssistantMessageCompletedPayload,
+    AssistantMessageDeltaPayload,
+    AssistantMessageStartedPayload,
+    ToolCompletedPayload,
+    ToolRequestedPayload,
+    ToolStartedPayload,
+    TurnCompletedPayload,
+)
 from tth_types.harness import HarnessCapabilities, HarnessConfiguration, LaunchSnapshot
 
 from tth_opencode.harness.adapter import OpenCodeAdapter
@@ -53,9 +63,10 @@ class FakeHttpClient:
         self.closed = False
         self._session_id = "sess-1"
         self.message_history: list[dict[str, Any]] = []
+        self.session_metadata: dict[str, Any] = {}
 
     def _session_body(self) -> dict[str, Any]:
-        return {"id": self._session_id, "directory": "/tmp"}
+        return {"id": self._session_id, "directory": "/tmp", **self.session_metadata}
 
     async def get(self, path: str) -> FakeResponse:
         if path == "/global/health":
@@ -110,7 +121,20 @@ def _launch() -> LaunchSnapshot:
 
 
 @pytest.mark.asyncio
-async def test_start_and_submit(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    "session_metadata",
+    [
+        {},
+        {
+            "path": "",
+            "cost": 0,
+            "tokens": {"input": 0, "output": 0, "reasoning": 0, "cache": {"read": 0, "write": 0}},
+        },
+    ],
+)
+async def test_start_and_complete_turn(
+    monkeypatch: pytest.MonkeyPatch, session_metadata: dict[str, Any]
+) -> None:
     async def fake_probe(config: HarnessConfiguration):
         from tth_opencode.harness.compatibility import match_release
 
@@ -122,6 +146,7 @@ async def test_start_and_submit(monkeypatch: pytest.MonkeyPatch) -> None:
 
     def factory(base_url: str) -> FakeHttpClient:
         client = FakeHttpClient(base_url)
+        client.session_metadata = session_metadata
         clients.append(client)
         return client
 
@@ -142,8 +167,111 @@ async def test_start_and_submit(monkeypatch: pytest.MonkeyPatch) -> None:
     prompt = next(body for path, body in clients[0].posts if path.endswith("/prompt_async"))
     assert prompt is not None
     assert prompt["variant"] == "high"
+    for event_type, properties in (
+        (
+            "message.part.updated",
+            {
+                "part": {
+                    "id": "part-read",
+                    "sessionID": "sess-1",
+                    "messageID": "m1",
+                    "type": "tool",
+                    "callID": "call-read",
+                    "tool": "read",
+                    "state": {
+                        "status": "completed",
+                        "input": {"filePath": "/tmp/file"},
+                        "output": "file contents",
+                    },
+                }
+            },
+        ),
+        (
+            "message.part.delta",
+            {
+                "sessionID": "sess-1",
+                "messageID": "m1",
+                "partID": "p1",
+                "field": "text",
+                "delta": "Hello",
+            },
+        ),
+        ("session.idle", {"sessionID": "sess-1"}),
+    ):
+        event = {"type": event_type, "properties": properties}
+        if session_metadata:
+            event["id"] = f"evt_{event_type}"
+        await adapter._dispatch_sse(None, json.dumps(event))  # pyright: ignore[reportPrivateUsage]
+    stream = adapter.events(session)
+    emitted = [await asyncio.wait_for(anext(stream), timeout=1.0) for _ in range(7)]
+    assert [type(event) for event in emitted] == [
+        ToolRequestedPayload,
+        ToolStartedPayload,
+        ToolCompletedPayload,
+        AssistantMessageStartedPayload,
+        AssistantMessageDeltaPayload,
+        AssistantMessageCompletedPayload,
+        TurnCompletedPayload,
+    ]
+    assert isinstance(emitted[2], ToolCompletedPayload)
+    assert emitted[2].tool_name == "read"
+    assert isinstance(emitted[5], AssistantMessageCompletedPayload)
+    assert emitted[5].text == "Hello"
     await adapter.close(session)
     assert clients[0].closed is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("recovers", [True, False])
+async def test_stalled_health_request_is_retried(
+    monkeypatch: pytest.MonkeyPatch, recovers: bool
+) -> None:
+    async def fake_probe(config: HarnessConfiguration):
+        from tth_opencode.harness.compatibility import match_release
+
+        release = match_release("1.2.27", platform="linux")
+        return release.to_harness_capabilities(), release
+
+    class StalledHealthClient(FakeHttpClient):
+        health_calls = 0
+        cancelled = False
+
+        async def get(self, path: str) -> FakeResponse:
+            if path == "/global/health":
+                self.health_calls += 1
+                if self.health_calls == 1:
+                    try:
+                        await asyncio.Event().wait()
+                    finally:
+                        self.cancelled = True
+                if not recovers:
+                    raise TimeoutError
+            return await super().get(path)
+
+    monkeypatch.setattr("tth_opencode.harness.adapter.probe_opencode", fake_probe)
+    client = StalledHealthClient("http://127.0.0.1:19501")
+    adapter = OpenCodeAdapter(http_client_factory=lambda _: client)
+    adapter.prepare_port(19501)
+    await adapter.probe(_config())
+    request = StartSessionRequest(
+        conversation_id=uuid4(),
+        binding_id=uuid4(),
+        configuration=_config(),
+        launch=_launch(),
+    )
+    if recovers:
+        session = await asyncio.wait_for(adapter.start(request), timeout=3.0)
+        assert session.native_session_id == "sess-1"
+        assert client.health_calls == 2
+        await adapter.close(session)
+    else:
+        with pytest.raises(DomainError, match="health check timed out.*global/health") as exc:
+            await asyncio.wait_for(adapter.start(request), timeout=10.0)
+        assert exc.value.code is ErrorCode.RUNTIME_TIMEOUT
+        assert exc.value.details["error"] == "TimeoutError"
+        assert client.posts == []
+        await client.aclose()
+    assert client.cancelled
 
 
 @pytest.mark.asyncio
@@ -394,7 +522,7 @@ def test_only_root_session_is_success_terminal() -> None:
 
 @pytest.mark.asyncio
 async def test_terminal_reconciles_usage_history_before_emitting_completion() -> None:
-    from tth_types.events import UsageUpdatedPayload
+    from tth_types.events import CostUpdatedPayload, UsageUpdatedPayload
 
     client = FakeHttpClient("http://127.0.0.1")
     client.message_history = [
@@ -461,8 +589,12 @@ async def test_terminal_reconciles_usage_history_before_emitting_completion() ->
         events.append(adapter._event_q.get_nowait())  # pyright: ignore[reportPrivateUsage]
     usage = next(event for event in events if isinstance(event, UsageUpdatedPayload))
     assert usage.input_tokens == 10
-    assert [getattr(event, "type", None) for event in events][-2:] == [
+    cost = next(event for event in events if isinstance(event, CostUpdatedPayload))
+    assert cost.cost == "0.1"
+    assert cost.currency == "USD"
+    assert [getattr(event, "type", None) for event in events][-3:] == [
         "usage_updated",
+        "cost_updated",
         "turn_completed",
     ]
 
@@ -842,3 +974,79 @@ async def test_yolo_keeps_questions_interactive_and_answers_child_session_approv
     )
     assert any(path.endswith("/question/q-yolo/reply") for path, _ in client.posts)
     await adapter.close(session)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("resume", [False, True])
+@pytest.mark.parametrize("mcp_status", ["connected", "failed", "needs_auth"])
+async def test_mcp_attachment_on_create_and_resume(resume: bool, mcp_status: str) -> None:
+    from tth_types.harness import HarnessMcpHeader, HarnessMcpServer
+
+    from tth_opencode.harness.compatibility import match_release
+
+    class McpClient(FakeHttpClient):
+        async def post(self, path: str, json: dict[str, Any] | None = None) -> FakeResponse:
+            if path == "/mcp":
+                self.posts.append((path, json))
+                assert json is not None
+                return FakeResponse(200, {json["name"]: {"status": mcp_status}})
+            return await super().post(path, json)
+
+    client = McpClient("http://localhost")
+    adapter = OpenCodeAdapter(http_client_factory=lambda _: client)
+    adapter.prepare_port(19501)
+    release = match_release("1.2.27", platform="linux")
+    assert release.to_harness_capabilities().supports_mcp_servers
+    adapter._release = release  # pyright: ignore[reportPrivateUsage]
+    config = _config().model_copy(
+        update={
+            "mcp_servers": (
+                HarnessMcpServer(
+                    name="agentbahn_wiki",
+                    url="http://host/mcp/wiki",
+                    headers=(HarnessMcpHeader(name="Authorization", value="Bearer secret"),),
+                ),
+                HarnessMcpServer(name="mnemosyne", url="http://host/mcp/memory"),
+            )
+        }
+    )
+    fields = {
+        "conversation_id": uuid4(),
+        "binding_id": uuid4(),
+        "configuration": config,
+        "launch": _launch(),
+    }
+    try:
+        if resume:
+            operation = adapter.resume(
+                ResumeSessionRequest.model_validate({**fields, "native_session_id": "sess-1"})
+            )
+        else:
+            operation = adapter.start(StartSessionRequest.model_validate(fields))
+        if mcp_status == "connected":
+            session = await operation
+            assert session.native_session_id == "sess-1"
+            assert [body["name"] for path, body in client.posts if path == "/mcp" and body] == [
+                "agentbahn_wiki",
+                "mnemosyne",
+            ]
+        else:
+            with pytest.raises(DomainError, match="could not connect to MCP server") as error:
+                await operation
+            assert error.value.code is ErrorCode.PROVIDER_INCOMPATIBLE
+            assert "secret" not in str(error.value)
+            assert not any(path == "/session" for path, _ in client.posts)
+        assert client.posts[0] == (
+            "/mcp",
+            {
+                "name": "agentbahn_wiki",
+                "config": {
+                    "type": "remote",
+                    "url": "http://host/mcp/wiki",
+                    "headers": {"Authorization": "Bearer secret"},
+                    "oauth": False,
+                },
+            },
+        )
+    finally:
+        await adapter._close_http()  # pyright: ignore[reportPrivateUsage]

@@ -159,6 +159,7 @@ class OpenCodeAdapter:
         self.preflight_operation("create")
         await self._ensure_http()
         await self._wait_healthy()
+        await self._attach_mcp_servers(request.configuration)
         await self._open_events()
         assert self._client is not None
         self._yolo = request.configuration.yolo
@@ -185,6 +186,7 @@ class OpenCodeAdapter:
         self.preflight_operation("resume")
         await self._ensure_http()
         await self._wait_healthy()
+        await self._attach_mcp_servers(request.configuration)
         await self._open_events()
         assert self._client is not None
         self._yolo = request.configuration.yolo
@@ -387,6 +389,30 @@ class OpenCodeAdapter:
             timeout=httpx.Timeout(connect=5.0, write=5.0, read=None, pool=5.0),
         )
 
+    async def _attach_mcp_servers(self, config: HarnessConfiguration) -> None:
+        assert self._client is not None
+        for server in config.mcp_servers:
+            response = await self._client.post(
+                "/mcp",
+                json={
+                    "name": server.name,
+                    "config": {
+                        "type": "remote",
+                        "url": server.url,
+                        "headers": {header.name: header.value for header in server.headers},
+                        "oauth": False,
+                    },
+                },
+            )
+            self._raise_http(response, "POST /mcp")
+            status = _mapping(_mapping(response.json()).get(server.name)).get("status")
+            if status != "connected":
+                raise DomainError(
+                    ErrorCode.PROVIDER_INCOMPATIBLE,
+                    f"OpenCode could not connect to MCP server {server.name!r}",
+                    details={"server": server.name, "status": status},
+                )
+
     async def _wait_healthy(self) -> None:
         assert self._client is not None
         assert self._release is not None
@@ -399,7 +425,8 @@ class OpenCodeAdapter:
                     details={"returncode": self._process.returncode},
                 )
             try:
-                response = await self._client.get("/global/health")
+                # A stalled response must not consume the whole startup budget.
+                response = await asyncio.wait_for(self._client.get("/global/health"), timeout=1.0)
                 if response.status_code == 200:
                     health = OpenCodeHealth.model_validate(response.json())
                     if not health.healthy:
@@ -424,8 +451,10 @@ class OpenCodeAdapter:
             await asyncio.sleep(0.1)
         raise DomainError(
             ErrorCode.RUNTIME_TIMEOUT,
-            "opencode health check timed out",
-            details={"error": str(last_error) if last_error else None},
+            "opencode health check timed out waiting for /global/health",
+            details={
+                "error": (str(last_error) or type(last_error).__name__) if last_error else None
+            },
         )
 
     async def _open_events(self) -> None:

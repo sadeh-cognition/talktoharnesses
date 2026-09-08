@@ -37,6 +37,9 @@ class OpenCodeSession(BaseModel):
     id: str
     title: str | None = None
     directory: str | None = None
+    path: str | None = None
+    cost: float | None = None
+    tokens: OpenCodeStepTokens | None = None
     slug: str | None = None
     version: str | None = None
     projectID: str | None = None
@@ -65,6 +68,7 @@ class OpenCodePermissionRequest(BaseModel):
 class OpenCodeServerEvent(BaseModel):
     model_config = _STRICT
 
+    id: str | None = None
     type: str
     properties: dict[str, Any] = Field(default_factory=dict)
 
