@@ -113,11 +113,20 @@ class GrokUseToolPermissionInput(_StrictAliased):
     meta: Any | None = Field(default=None, alias="_meta")
 
 
+class GrokWebFetchPermissionInput(_StrictAliased):
+    """Grok's web fetch permission input, observed on 2026-09-09."""
+
+    variant: Literal["WebFetch"]
+    url: str
+    meta: Any | None = Field(default=None, alias="_meta")
+
+
 GrokPermissionToolInput = (
     PermissionToolInput
     | GrokWritePermissionInput
     | GrokSearchReplacePermissionInput
     | GrokUseToolPermissionInput
+    | GrokWebFetchPermissionInput
 )
 
 
@@ -156,6 +165,16 @@ def grok_file_permission_target(raw_input: dict[str, Any]) -> tuple[str, str] | 
     if variant == "SearchReplace":
         return path, "modify"
     return None
+
+
+def grok_is_network_permission(raw_input: dict[str, Any]) -> bool:
+    """Whether a captured Grok ``rawInput`` asks to reach the network.
+
+    Only the ``variant`` tag is consulted, never titles or summaries.
+    ``WebFetch`` retrieves a URL, which is the network approval the canonical
+    action models.
+    """
+    return raw_input.get("variant") == "WebFetch"
 
 
 MCP_TOOL_NAME_PREFIX = "mcp__"

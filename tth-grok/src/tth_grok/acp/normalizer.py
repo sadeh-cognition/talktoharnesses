@@ -45,6 +45,7 @@ from tth_types.harness import (
 
 from tth_grok.acp.schemas.grok_ext import (
     grok_file_permission_target,
+    grok_is_network_permission,
     grok_mcp_permission_tool_name,
     grok_mcp_tool_call_name,
 )
@@ -594,7 +595,7 @@ class AcpSessionNormalizer:
             raw_input = tool_call.get("rawInput")
             input_map = _as_dict(raw_input) if raw_input is not None else None
             if input_map is not None:
-                if input_map.get("network") is True:
+                if input_map.get("network") is True or grok_is_network_permission(input_map):
                     return NetworkApprovalAction()
                 cmd = input_map.get("command")
                 if isinstance(cmd, str) and cmd:

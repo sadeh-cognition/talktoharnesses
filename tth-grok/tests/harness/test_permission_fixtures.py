@@ -166,6 +166,53 @@ def test_permission_network_via_raw_input() -> None:
     assert isinstance(payload.request.action, NetworkApprovalAction)
 
 
+def test_grok_web_fetch_permission_can_be_denied_without_protocol_failure() -> None:
+    from tth_grok.acp.schemas.grok_ext import is_allowlisted_grok_permission_request
+
+    # Shape reported by the split's protocol-fault log for evaluation run 37.
+    options = _options("allow_always", "allow_once", "reject_once", "reject_always")
+    params = {
+        "sessionId": "s",
+        "toolCall": {
+            "toolCallId": "web-fetch",
+            "kind": "fetch",
+            "title": "Fetch https://example.com",
+            "rawInput": {"variant": "WebFetch", "url": "https://example.com"},
+        },
+        "options": options,
+    }
+    assert is_allowlisted_grok_permission_request(params)
+    n = GrokNormalizer()
+    n.set_session("s")
+    n.begin_turn(uuid4())
+    payload = n.on_permission_request(params, interaction_id=uuid4())[0]
+    assert isinstance(payload, InteractionRequestedPayload)
+    assert isinstance(payload.request, ApprovalRequestPayload)
+    assert isinstance(payload.request.action, NetworkApprovalAction)
+    assert ApprovalDecision.DENY in payload.request.available_decisions
+    assert n.map_approval_decision(ApprovalDecision.DENY, options) == {
+        "outcome": {"outcome": "selected", "optionId": "opt-reject_once"}
+    }
+
+
+@pytest.mark.parametrize(
+    "raw_input",
+    [
+        {"variant": "WebFetch"},
+        {"variant": "WebFetch", "url": 123},
+        {"variant": "WebFetch", "url": "https://example.com", "extra": True},
+    ],
+)
+def test_grok_web_fetch_permission_rejects_unrecognized_input(
+    raw_input: dict[str, object],
+) -> None:
+    from tth_grok.acp.schemas.grok_ext import is_allowlisted_grok_permission_request
+
+    assert not is_allowlisted_grok_permission_request(
+        {"sessionId": "s", "toolCall": {"rawInput": raw_input}, "options": []}
+    )
+
+
 def test_manual_only_when_no_typed_action() -> None:
     n = GrokNormalizer()
     n.set_session("s")
