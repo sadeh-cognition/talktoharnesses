@@ -29,8 +29,16 @@ from tth_grok.harness.compatibility import match_release
 
 
 class _UsageAcpProcess(_FakeAcpProcess):
+    def __init__(self, *, stray_response: bool = False, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.stray_response = stray_response
+
     async def _respond(self, msg: dict[str, Any]) -> None:
         if msg.get("method") == "session/prompt":
+            if self.stray_response:
+                await self._stdout_q.put(  # pyright: ignore[reportPrivateUsage]
+                    b'{"jsonrpc":"2.0","id":"unmatched","result":{"stopReason":"cancelled"}}\n'
+                )
             params_obj = msg.get("params")
             params = cast(dict[str, object], params_obj) if isinstance(params_obj, dict) else {}
             notification = {
@@ -57,12 +65,13 @@ class _UsageAcpProcess(_FakeAcpProcess):
 
 
 @pytest.mark.asyncio
-async def test_live_xai_usage_is_emitted_before_prompt_terminal() -> None:
+@pytest.mark.parametrize("stray_response", [False, True])
+async def test_live_xai_usage_is_emitted_before_prompt_terminal(stray_response: bool) -> None:
     release = match_release("grok 1.0.5 (5115b46bc9) [stable]", platform="linux")
     adapter = GrokAdapter()
     adapter._release = release  # pyright: ignore[reportPrivateUsage]
     adapter._capabilities = release.to_harness_capabilities()  # pyright: ignore[reportPrivateUsage]
-    process = _UsageAcpProcess(agent_version="1.0.5")
+    process = _UsageAcpProcess(agent_version="1.0.5", stray_response=stray_response)
     adapter.bind_process(process)  # type: ignore[arg-type]
     configuration = HarnessConfiguration(kind=HarnessKind.GROK, working_directory="/tmp")
     session = await adapter.start(

@@ -73,14 +73,49 @@ async def test_jsonrpc_error_response() -> None:
 
 
 @pytest.mark.asyncio
-async def test_unknown_response_id_is_protocol_error() -> None:
+@pytest.mark.parametrize("response_id", [999, "1"])
+@pytest.mark.parametrize(
+    "response_body", ['"result":{}', '"error":{"code":-32603,"message":"stale error"}']
+)
+async def test_unmatched_response_does_not_fail_pending_request(
+    response_id: int | str, response_body: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    import json
+
     proc = FakeProcess()
     conn = AcpConnection(proc)  # type: ignore[arg-type]
     await conn.start()
-    # Give router a moment.
-    await proc.feed('{"jsonrpc":"2.0","id":999,"result":{}}')
-    await asyncio.sleep(0.05)
-    # Pending should be empty; connection should have failed pending on protocol error.
+    pending, _ = await conn.request("session/prompt", {"sessionId": "s", "prompt": []})
+    await proc.feed('{"jsonrpc":"2.0","id":' + json.dumps(response_id) + "," + response_body + "}")
+    await proc.feed('{"jsonrpc":"2.0","id":1,"result":{"stopReason":"end_turn"}}')
+    assert await asyncio.wait_for(pending, timeout=1) == {"stopReason": "end_turn"}
+    assert "Discarding ACP response with no pending request" in caplog.text
+    await conn.close()
+
+
+@pytest.mark.parametrize("retire", ["complete", "cancel_pending", "cancel_future"])
+async def test_late_response_does_not_fail_next_request(
+    retire: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    proc = FakeProcess()
+    conn = AcpConnection(proc)  # type: ignore[arg-type]
+    await conn.start()
+    previous, _ = await conn.request("session/prompt", {"sessionId": "s", "prompt": []})
+    if retire == "complete":
+        await proc.feed('{"jsonrpc":"2.0","id":1,"result":{"stopReason":"end_turn"}}')
+        await asyncio.wait_for(previous, timeout=1)
+    elif retire == "cancel_pending":
+        assert conn.cancel_pending(1)
+    else:
+        previous.cancel()
+    pending, _ = await conn.request("session/prompt", {"sessionId": "s", "prompt": []})
+    await proc.feed('{"jsonrpc":"2.0","id":1,"result":{"stopReason":"cancelled"}}')
+    await proc.feed('{"jsonrpc":"2.0","id":2,"result":{"stopReason":"end_turn"}}')
+    assert await asyncio.wait_for(pending, timeout=1) == {"stopReason": "end_turn"}
+    # A reply the caller has abandoned reads differently from one whose id was
+    # never sent: only the former still has a pending entry to abandon.
+    expected = "an abandoned request" if retire == "cancel_future" else "no pending request"
+    assert f"Discarding ACP response with {expected}" in caplog.text
     await conn.close()
 
 

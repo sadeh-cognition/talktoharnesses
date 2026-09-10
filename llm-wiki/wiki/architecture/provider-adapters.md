@@ -7,13 +7,25 @@ audiences:
 tags:
   - type/architecture
   - audience/developer
-last_verified: 2026-09-05
-verified_against_commit: 92bdf81138628204f7b58df5f1f80545abdbbde3
+last_verified: 2026-09-09
+verified_against_commit: aba89791044fd897c152452cccec4d32382058f9
 ---
 
 # Provider Adapters
 
 Each kind lives in its own split project (`tth-<kind>`) under `tth_<kind>.harness` with adapter, probe, compatibility, and control modules; Grok and Cursor carry their own copies of the ACP machinery. The proxy keeps the `HarnessAdapter` protocol re-export, registry, generic `RemoteHarnessAdapter`, and split lifecycle configuration.
+
+The uncommitted ACP correlation fix discards and logs replies without a live
+request, including duplicate replies and replies arriving after local cancellation.
+Such replies cannot resolve another request or abort the connection's pending
+turns. Request IDs retain exact string/integer matching; matching remote errors
+still fail their own request, and malformed frames still fail the connection.
+This prevents an uncorrelated Grok reply from ending an active workflow turn;
+the reason Grok emitted the original reply remains unverified.
+Implementation evidence: `tth-grok/src/tth_grok/acp/connection.py` and its
+synchronized Cursor copy. Test evidence: both splits' `tests/acp/test_connection.py`
+and `tth-grok/tests/harness/test_adapter.py`, including successful terminal and
+usage events after an injected unmatched response.
 
 Adapters normalize native streams into `HarnessEvent` and
 `HarnessInteractionRequest`. Provider token accounting is normalized into

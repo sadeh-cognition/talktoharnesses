@@ -287,18 +287,19 @@ class AcpConnection:
         error: BaseException | None,
     ) -> None:
         future = self._pending.pop(request_id, None)
-        if future is None:
-            raise DomainError(
-                ErrorCode.PROTOCOL_ERROR,
-                "response for unknown request id",
-                details={"id": str(request_id)},
+        if future is None or future.done():
+            # Late, duplicate or unsolicited replies cannot settle a live request.
+            # Keep routing so they do not abort an unrelated in-flight turn. The
+            # two are different diagnoses and read differently in a log: no
+            # pending entry means the id was never sent or was already answered
+            # and retired, while a done entry means the caller gave up on a
+            # request that is still registered.
+            logger.warning(
+                "Discarding ACP response with %s (id=%r)",
+                "no pending request" if future is None else "an abandoned request",
+                request_id,
             )
-        if future.done():
-            raise DomainError(
-                ErrorCode.PROTOCOL_ERROR,
-                "duplicate response for request id",
-                details={"id": str(request_id)},
-            )
+            return
         if error is not None:
             future.set_exception(error)
         else:

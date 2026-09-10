@@ -239,6 +239,14 @@ Entries are appended using `## [YYYY-MM-DD] operation | Title`.
 - Updated the split-services decision, development guidelines, and
   `docs/refactoring-scan.md`.
 
+## [2026-09-09] implementation | Preserve active ACP turns after unmatched replies
+
+- Updated the synchronized Grok/Cursor connection copies to discard replies
+  without live waiters while continuing exact-ID response correlation.
+- Added regressions for unmatched success/error responses, string versus integer
+  IDs, duplicate replies, cancellation, and Grok usage/terminal delivery.
+- Recorded the behavior and upstream uncertainty in [Provider Adapters](architecture/provider-adapters.md).
+
 ## [2026-09-09] implementation | Publish the binding's harness and approval policy on the conversation
 
 - `ConversationDetail` gained `harness_id` and `yolo`, filled from the active
