@@ -239,6 +239,22 @@ Entries are appended using `## [YYYY-MM-DD] operation | Title`.
 - Updated the split-services decision, development guidelines, and
   `docs/refactoring-scan.md`.
 
+## [2026-09-09] implementation | Publish the binding's harness and approval policy on the conversation
+
+- `ConversationDetail` gained `harness_id` and `yolo`, filled from the active
+  binding beside the `harness_kind`, `model`, `mode`, and `effort` it already
+  carried.
+- A conversation outlives the harness it was opened on, so a client resuming one
+  previously had no way to learn which harness ran it, and had to supply an
+  approval policy of its own rather than the one the conversation was created
+  with. Both facts live on the binding; the detail is where they are published.
+- Both `ConversationDetail` builders (`django/persistence.py` and the in-memory
+  test persistence) were updated. Nothing else changes: routes return the domain
+  model directly, so the fields reach the HTTP response and the official client
+  without a schema change.
+- Recorded in [Create and Manage Conversations](requirements/create-and-manage-conversations.md)
+  and [Conversation](domain/conversation.md).
+
 ## Related
 
 - [Wiki index](index.md)

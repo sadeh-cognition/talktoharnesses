@@ -8,15 +8,15 @@ audiences:
 tags:
   - type/domain
   - capability/conversations
-last_verified: 2026-08-20
-verified_against_commit: bb3d2b755500fc663816d6cbd1a7cd7947a8920b
+last_verified: 2026-09-09
+verified_against_commit: aba8979
 ---
 
 # Conversation
 
 A conversation is an owner-scoped durable session. Status values include idle, running, waiting, background-active, and archived. Title display prefers native, then manual, then derived.
 
-Pin, archive, snooze, soft-delete, and retention-exempt flags are stored on the conversation. `next_event_sequence` and `version` support optimistic concurrency and SSE replay. One active binding and at most one active turn are attached at a time.
+Pin, archive, snooze, soft-delete, and retention-exempt flags are stored on the conversation. `next_event_sequence` and `version` support optimistic concurrency and SSE replay. One active binding and at most one active turn are attached at a time. The conversation snapshot publishes that binding's harness kind and id, model, mode, effort, and approval policy, because the binding outlives the harness record and is what a resumed turn is actually launched from.
 
 ## Related
 

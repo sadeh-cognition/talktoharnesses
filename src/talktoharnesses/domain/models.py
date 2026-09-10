@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from decimal import Decimal
-from typing import Annotated, Any, Generic, Literal, TypeVar, cast
+from typing import Annotated, Any, Generic, Literal, TypedDict, TypeVar, cast
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field, TypeAdapter, field_validator, model_validator
@@ -710,14 +710,33 @@ class InteractionProjection(BaseModel):
     created_at: UtcDateTime
 
 
+class BindingProjection(TypedDict, total=False):
+    """The binding fields of a ``ConversationDetail``, spread into its constructor."""
+
+    harness_kind: HarnessKind | None
+    harness_id: UUID | None
+    model: str | None
+    mode: str | None
+    effort: str | None
+    yolo: bool | None
+
+
 class ConversationDetail(BaseModel):
     model_config = FROZEN
 
     conversation: Conversation
     harness_kind: HarnessKind | None = None
+    # The harness the conversation was opened on. None when there is no binding,
+    # and on legacy bindings that never recorded one. The harness record itself
+    # may since have been deleted; the binding keeps the conversation runnable.
+    harness_id: UUID | None = None
     model: str | None = None
     mode: str | None = None
     effort: str | None = None
+    # The binding's approval policy, so a client resuming a conversation runs the
+    # turn under the policy the conversation was created with rather than one it
+    # has to supply itself.
+    yolo: bool | None = None
     turns: tuple[TurnProjection, ...] = ()
     messages: tuple[MessageProjection, ...] = ()
     tools: tuple[ToolProjection, ...] = ()
@@ -725,6 +744,26 @@ class ConversationDetail(BaseModel):
     activity: tuple[ActivityProjection, ...] = ()
     pending_interactions: tuple[InteractionProjection, ...] = ()
     active_command: CommandProjection | None = None
+
+    @staticmethod
+    def binding_projection(
+        binding: ConversationHarnessBinding | None,
+    ) -> BindingProjection:
+        """The binding's fields as the detail publishes them.
+
+        Every persistence builds this detail, and each one projecting the same
+        binding field by field is how the projections drift apart.
+        """
+        if binding is None:
+            return {}
+        return {
+            "harness_kind": binding.kind,
+            "harness_id": binding.harness_instance_id,
+            "model": binding.configuration.model,
+            "mode": binding.configuration.mode,
+            "effort": binding.configuration.effort,
+            "yolo": binding.configuration.yolo,
+        }
 
 
 class ConversationSnapshot(BaseModel):

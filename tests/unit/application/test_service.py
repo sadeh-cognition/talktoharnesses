@@ -153,6 +153,31 @@ async def test_conversation_create_metadata_and_soft_delete() -> None:
 
 
 @pytest.mark.asyncio
+async def test_conversation_detail_reports_the_binding_harness_and_policy() -> None:
+    """The detail carries what a client needs to resume without a harness record.
+
+    A conversation outlives the harness it was opened on, so a client resuming
+    one cannot read the harness for its identity or its approval policy. Both
+    live on the binding, and the detail is where they are published.
+    """
+    service, _p, _publisher = _service()
+    config = HarnessConfiguration(kind=HarnessKind.GROK, working_directory="/tmp/ws", yolo=True)
+    h = await service.create_harness("owner", name="h", configuration=config)
+    snap = await service.create_conversation("owner", h.id)
+    conversation_id = snap.detail.conversation.id
+
+    assert snap.detail.harness_id == h.id
+    assert snap.detail.yolo is True
+
+    await service.delete_harness("owner", h.id)
+
+    resumed = await service.get_conversation("owner", conversation_id)
+    assert resumed.detail.harness_id == h.id
+    assert resumed.detail.yolo is True
+    assert resumed.detail.harness_kind is HarnessKind.GROK
+
+
+@pytest.mark.asyncio
 async def test_submit_turn_idempotency() -> None:
     service, _p, publisher = _service()
     config = HarnessConfiguration(kind=HarnessKind.GROK, working_directory="/tmp/ws")
