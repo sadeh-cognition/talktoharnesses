@@ -239,6 +239,24 @@ Entries are appended using `## [YYYY-MM-DD] operation | Title`.
 - Updated the split-services decision, development guidelines, and
   `docs/refactoring-scan.md`.
 
+## [2026-09-10] implementation | Report turn usage through one shared accumulator
+
+- Six adapters each hand-rolled the accumulation the canonical `usage_updated`
+  payload is defined to carry, with three int-validation rules and four terminal
+  policies between them. `tth_types.usage.TurnUsage` now holds the one rule set
+  and each adapter keeps only its wire-shape mapping.
+- Codex reads the turn's totals as the difference between two of the thread's
+  running totals instead of summing the per-request figures, and the terminal
+  usage branch no production notification could reach was removed with the
+  schema field behind it.
+- Grok no longer derives a total its live frames never sent, and a response
+  frame trailing the turn's terminal figures can no longer restart the running
+  total or raise outside a turn.
+- Token volume is recorded once per turn, when its terminal event arrives, into
+  its own instrument; `tth.token_cost` carries cost alone.
+- Recorded in [Report Harness Token Usage](requirements/report-harness-token-usage.md)
+  and [Conversation Event](domain/conversation-event.md).
+
 ## [2026-09-09] implementation | Preserve active ACP turns after unmatched replies
 
 - Updated the synchronized Grok/Cursor connection copies to discard replies

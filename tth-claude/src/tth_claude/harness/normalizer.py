@@ -32,7 +32,6 @@ from tth_types.events import (
     TurnCompletedPayload,
     TurnFailedPayload,
     TurnInterruptedPayload,
-    UsageUpdatedPayload,
 )
 from tth_types.harness import (
     ApprovalRequestPayload,
@@ -40,6 +39,7 @@ from tth_types.harness import (
     CanonicalToolResult,
     StructuredQuestionPayload,
 )
+from tth_types.usage import TurnUsage, UsageFields
 
 from tth_claude.harness.schemas import (
     ClaudeAssistantMessage,
@@ -78,6 +78,7 @@ class ClaudeNormalizer:
         self._seen_native_ids: set[str] = set()
         self._seen_offsets: set[str] = set()
         self._redaction_patterns: tuple[str, ...] = ()
+        self._usage = TurnUsage()
 
     def set_redaction_patterns(self, patterns: Sequence[str]) -> None:
         self._redaction_patterns = tuple(sorted((p for p in patterns if p), key=len, reverse=True))
@@ -95,6 +96,7 @@ class ClaudeNormalizer:
         self._reasoning_id = None
         self._reasoning_text = ""
         self._interrupt_requested = False
+        self._usage.reset()
 
     def request_interrupt(self) -> None:
         if self._active_turn_id is not None:
@@ -221,7 +223,7 @@ class ClaudeNormalizer:
     def _assistant(self, msg: ClaudeAssistantMessage) -> list[HarnessEvent]:
         if self._active_turn_id is None or self._resync_mode:
             return []
-        events: list[HarnessEvent] = []
+        events: list[HarnessEvent] = list(self._assistant_usage(msg))
         for block in msg.content:
             if isinstance(block, ClaudeTextBlock):
                 events.extend(self._text(block.text, msg.message_id))
@@ -232,6 +234,26 @@ class ClaudeNormalizer:
             else:
                 events.extend(self._tool_result(block))
         return events
+
+    def _assistant_usage(self, msg: ClaudeAssistantMessage) -> list[HarnessEvent]:
+        """Report the turn's tokens so far from this request's usage.
+
+        Claude reports what each request spent, so a long turn's cost is only
+        visible while it runs if the requests are added up as they arrive. The
+        terminal result carries the turn's authoritative total and replaces
+        this running one. The Anthropic usage block carries no total, so the
+        running reports omit that category rather than inventing it.
+        """
+        assert self._active_turn_id is not None
+        if not msg.usage:
+            return []
+        return list(
+            self._usage.add(
+                self._active_turn_id,
+                frame_id=msg.message_id,
+                **_message_usage(msg.usage),
+            )
+        )
 
     def _text(self, text: str, message_id: str | None) -> list[HarnessEvent]:
         assert self._active_turn_id is not None
@@ -338,15 +360,9 @@ class ClaudeNormalizer:
         events = self._close_open_streams()
         usage = _normalized_usage(msg)
         if usage is not None:
-            events.append(
-                UsageUpdatedPayload(
-                    turn_id=self._active_turn_id,
-                    input_tokens=usage["input_tokens"],
-                    output_tokens=usage["output_tokens"],
-                    total_tokens=usage["total_tokens"],
-                    cached_input_tokens=usage["cached_input_tokens"],
-                )
-            )
+            # The result reports the turn's own figures; they supersede what
+            # the assistant messages added up to rather than adding to it.
+            events.extend(self._usage.replace(self._active_turn_id, **usage))
         if (
             msg.total_cost_usd is not None
             and isfinite(msg.total_cost_usd)
@@ -423,7 +439,24 @@ def _as_int(value: object) -> int | None:
     return None
 
 
-def _normalized_usage(msg: ClaudeResultMessage) -> dict[str, int | None] | None:
+def _message_usage(usage: dict[str, Any]) -> UsageFields:
+    """The canonical fields an Anthropic usage block carries.
+
+    Used for both an assistant message's own usage and the terminal result's
+    top-level fallback; the two blocks have the same shape.
+    """
+    return {
+        "input_tokens": _as_int(usage.get("input_tokens")),
+        "output_tokens": _as_int(usage.get("output_tokens")),
+        "total_tokens": _as_int(usage.get("total_tokens")),
+        "cached_input_tokens": _first_int(
+            usage.get("cache_read_input_tokens"),
+            usage.get("cached_input_tokens"),
+        ),
+    }
+
+
+def _normalized_usage(msg: ClaudeResultMessage) -> UsageFields | None:
     buckets: list[dict[str, Any]] = []
     for value in (msg.model_usage or {}).values():
         if isinstance(value, dict):
@@ -443,20 +476,10 @@ def _normalized_usage(msg: ClaudeResultMessage) -> dict[str, int | None] | None:
             return normalized
     if not msg.usage:
         return None
-    return _reported_usage(
-        {
-            "input_tokens": _as_int(msg.usage.get("input_tokens")),
-            "output_tokens": _as_int(msg.usage.get("output_tokens")),
-            "total_tokens": _as_int(msg.usage.get("total_tokens")),
-            "cached_input_tokens": _first_int(
-                msg.usage.get("cache_read_input_tokens"),
-                msg.usage.get("cached_input_tokens"),
-            ),
-        }
-    )
+    return _reported_usage(_message_usage(msg.usage))
 
 
-def _reported_usage(usage: dict[str, int | None]) -> dict[str, int | None] | None:
+def _reported_usage(usage: UsageFields) -> UsageFields | None:
     return usage if any(value is not None for value in usage.values()) else None
 
 

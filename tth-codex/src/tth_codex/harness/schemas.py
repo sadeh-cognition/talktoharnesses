@@ -57,7 +57,6 @@ class CodexTurnCompleted(BaseModel):
     status: str
     final_response: str | None = None
     error_message: str | None = None
-    usage: CodexTurnUsage | None = None
 
 
 class CodexTokenUsageUpdated(BaseModel):
@@ -66,7 +65,11 @@ class CodexTokenUsageUpdated(BaseModel):
     method: Literal["tokenUsageUpdated"] = "tokenUsageUpdated"
     thread_id: str
     turn_id: str
+    # What the thread's last request spent.
     usage: CodexTurnUsage
+    # What the thread has spent since it opened, which the turn's own total is
+    # measured against. Absent on hosts that report only ``usage``.
+    thread_total: CodexTurnUsage | None = None
 
 
 class CodexItemStarted(BaseModel):

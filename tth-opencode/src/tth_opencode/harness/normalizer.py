@@ -24,7 +24,6 @@ from tth_types.events import (
     TurnFailedPayload,
     TurnInterruptedPayload,
     TurnOutcomeUnknownPayload,
-    UsageUpdatedPayload,
 )
 from tth_types.harness import (
     ApprovalRequestPayload,
@@ -32,6 +31,7 @@ from tth_types.harness import (
     StructuredQuestionPayload,
     limit_tool_output_tail,
 )
+from tth_types.usage import TurnUsage
 
 from tth_opencode.harness.schemas import OpenCodeStepFinishPart, parse_server_event
 
@@ -57,9 +57,7 @@ class OpenCodeNormalizer:
         self._child_sessions: set[str] = set()
         self._turn_child_sessions: set[str] = set()
         self._root_message_id: str | None = None
-        self._usage_steps = 0
-        self._usage_all_have_total = True
-        self._usage: dict[str, int] = {}
+        self._usage = TurnUsage()
         self._cost = Decimal(0)
 
     def set_redaction_patterns(self, patterns: Sequence[str]) -> None:
@@ -77,9 +75,7 @@ class OpenCodeNormalizer:
         self._has_assistant_message = False
         self._turn_child_sessions.clear()
         self._root_message_id = root_message_id
-        self._usage_steps = 0
-        self._usage_all_have_total = True
-        self._usage.clear()
+        self._usage.reset()
         self._cost = Decimal(0)
 
     def import_seen(
@@ -357,17 +353,16 @@ class OpenCodeNormalizer:
         if native_key in self._seen_native_ids:
             return
         self._seen_native_ids.add(native_key)
-        self._usage_steps += 1
         self._cost += Decimal(str(part.cost))
-        self._usage["input_tokens"] = self._usage.get("input_tokens", 0) + part.tokens.input
-        self._usage["output_tokens"] = self._usage.get("output_tokens", 0) + part.tokens.output
-        self._usage["cached_input_tokens"] = (
-            self._usage.get("cached_input_tokens", 0) + part.tokens.cache.read
+        # A step that reports no total leaves the turn without one: a sum of
+        # only the steps that did report would understate it.
+        self._usage.add(
+            self._active_turn_id,
+            input_tokens=part.tokens.input,
+            output_tokens=part.tokens.output,
+            total_tokens=part.tokens.total,
+            cached_input_tokens=part.tokens.cache.read,
         )
-        if part.tokens.total is None:
-            self._usage_all_have_total = False
-        else:
-            self._usage["total_tokens"] = self._usage.get("total_tokens", 0) + part.tokens.total
 
     def _session_status(self, props: dict[str, Any]) -> list[HarnessEvent]:
         if self._active_turn_id is None:
@@ -390,19 +385,8 @@ class OpenCodeNormalizer:
             self._message_id = None
             self._message_text = ""
         if status in {"idle", "completed", "done"}:
-            if self._usage_steps:
-                usage = dict(self._usage)
-                if not self._usage_all_have_total:
-                    usage.pop("total_tokens", None)
-                events.append(
-                    UsageUpdatedPayload(
-                        turn_id=self._active_turn_id,
-                        input_tokens=usage.get("input_tokens"),
-                        output_tokens=usage.get("output_tokens"),
-                        total_tokens=usage.get("total_tokens"),
-                        cached_input_tokens=usage.get("cached_input_tokens"),
-                    )
-                )
+            if self._usage.reported:
+                events.extend(self._usage.report(self._active_turn_id))
                 # OpenCode qualifies its native message/step costs as USD in ACP usage.
                 events.append(
                     CostUpdatedPayload(

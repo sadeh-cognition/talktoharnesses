@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from uuid import uuid4
@@ -553,6 +553,141 @@ def test_coerce_public_slotted_notifications() -> None:
         "total_tokens": 13,
         "cached_input_tokens": 4,
     }
+
+
+def test_normalizer_accumulates_per_request_usage_into_the_turn_total() -> None:
+    """Codex reports each request's tokens; canonical usage is the turn's."""
+    from tth_types.events import UsageUpdatedPayload
+
+    normalizer = CodexNormalizer()
+    normalizer.set_session("t1")
+    turn = uuid4()
+    normalizer.begin_turn(turn)
+
+    def report(input_tokens: int, output_tokens: int) -> Sequence[object]:
+        return normalizer.on_notification(
+            {
+                "method": "tokenUsageUpdated",
+                "thread_id": "t1",
+                "turn_id": "u1",
+                "usage": {
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "total_tokens": input_tokens + output_tokens,
+                    "cached_input_tokens": 0,
+                },
+            }
+        )
+
+    assert report(10, 3) == [
+        UsageUpdatedPayload(
+            turn_id=turn,
+            input_tokens=10,
+            output_tokens=3,
+            total_tokens=13,
+            cached_input_tokens=0,
+        )
+    ]
+    assert report(20, 5) == [
+        UsageUpdatedPayload(
+            turn_id=turn,
+            input_tokens=30,
+            output_tokens=8,
+            total_tokens=38,
+            cached_input_tokens=0,
+        )
+    ]
+
+    # A new turn starts its own total rather than continuing the last one.
+    successor = uuid4()
+    normalizer.begin_turn(successor)
+    assert report(7, 1) == [
+        UsageUpdatedPayload(
+            turn_id=successor,
+            input_tokens=7,
+            output_tokens=1,
+            total_tokens=8,
+            cached_input_tokens=0,
+        )
+    ]
+
+
+def test_normalizer_measures_the_turn_against_the_threads_running_total() -> None:
+    """Codex counts per thread; the turn's total is the thread's growth."""
+    from tth_types.events import UsageUpdatedPayload
+
+    normalizer = CodexNormalizer()
+    normalizer.set_session("t1")
+    turn = uuid4()
+    normalizer.begin_turn(turn)
+
+    def report(last: tuple[int, int], total: tuple[int, int]) -> Sequence[object]:
+        return normalizer.on_notification(
+            {
+                "method": "tokenUsageUpdated",
+                "thread_id": "t1",
+                "turn_id": "u1",
+                "usage": {
+                    "input_tokens": last[0],
+                    "output_tokens": last[1],
+                    "total_tokens": last[0] + last[1],
+                    "cached_input_tokens": 0,
+                },
+                "thread_total": {
+                    "input_tokens": total[0],
+                    "output_tokens": total[1],
+                    "total_tokens": total[0] + total[1],
+                    "cached_input_tokens": 0,
+                },
+            }
+        )
+
+    # The thread already spent 100/20 on an earlier turn, so this turn's first
+    # reading counts only what its own first request spent.
+    assert report((10, 3), (110, 23)) == [
+        UsageUpdatedPayload(
+            turn_id=turn,
+            input_tokens=10,
+            output_tokens=3,
+            total_tokens=13,
+            cached_input_tokens=0,
+        )
+    ]
+    # A reading is the turn's total so far, so a notification that never
+    # arrived (the 20/5 request below) cannot be double-counted or lost.
+    assert report((40, 9), (170, 37)) == [
+        UsageUpdatedPayload(
+            turn_id=turn,
+            input_tokens=70,
+            output_tokens=17,
+            total_tokens=87,
+            cached_input_tokens=0,
+        )
+    ]
+    # A replayed notification repeats what the turn already reported rather
+    # than adding to it.
+    assert report((40, 9), (170, 37)) == [
+        UsageUpdatedPayload(
+            turn_id=turn,
+            input_tokens=70,
+            output_tokens=17,
+            total_tokens=87,
+            cached_input_tokens=0,
+        )
+    ]
+
+    # A new turn takes its own baseline from the thread's running total.
+    successor = uuid4()
+    normalizer.begin_turn(successor)
+    assert report((7, 1), (177, 38)) == [
+        UsageUpdatedPayload(
+            turn_id=successor,
+            input_tokens=7,
+            output_tokens=1,
+            total_tokens=8,
+            cached_input_tokens=0,
+        )
+    ]
 
 
 def test_normalizer_reasoning_tool_and_turn_completed_variants() -> None:

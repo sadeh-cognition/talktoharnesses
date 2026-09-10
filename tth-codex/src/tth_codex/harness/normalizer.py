@@ -29,7 +29,6 @@ from tth_types.events import (
     TurnCompletedPayload,
     TurnFailedPayload,
     TurnInterruptedPayload,
-    UsageUpdatedPayload,
 )
 from tth_types.harness import (
     ApprovalRequestPayload,
@@ -38,6 +37,7 @@ from tth_types.harness import (
     FileApprovalAction,
     StructuredQuestionPayload,
 )
+from tth_types.usage import TurnUsage
 
 from tth_codex.harness.schemas import (
     CodexAgentMessageDelta,
@@ -53,6 +53,18 @@ from tth_codex.harness.schemas import (
 )
 
 _NS = UUID("b8d4f0a2-3c5e-4f7a-9b1d-2e3f4a5b6c7d")
+
+
+def _difference(totals: dict[str, Any], baseline: dict[str, Any]) -> dict[str, int | None]:
+    """``totals`` less ``baseline``, dropping any category either one omits."""
+    difference: dict[str, int | None] = {}
+    for name, total in totals.items():
+        start = baseline.get(name)
+        if type(total) is int and type(start) is int and total >= start:
+            difference[name] = total - start
+        else:
+            difference[name] = None
+    return difference
 
 
 def _stable_uuid(native_key: str) -> UUID:
@@ -77,6 +89,8 @@ class CodexNormalizer:
         self._seen_offsets: set[str] = set()
         self._redaction_patterns: tuple[str, ...] = ()
         self._has_assistant_message = False
+        self._usage = TurnUsage()
+        self._usage_baseline: dict[str, int | None] | None = None
 
     def set_redaction_patterns(self, patterns: Sequence[str]) -> None:
         self._redaction_patterns = tuple(sorted((p for p in patterns if p), key=len, reverse=True))
@@ -93,6 +107,8 @@ class CodexNormalizer:
         self._reasoning_id = None
         self._reasoning_text = ""
         self._has_assistant_message = False
+        self._usage.reset()
+        self._usage_baseline = None
 
     def import_seen(
         self,
@@ -321,33 +337,38 @@ class CodexNormalizer:
         ]
 
     def _token_usage_updated(self, note: CodexTokenUsageUpdated) -> list[HarnessEvent]:
+        """Report the turn's totals so far from the thread's running totals.
+
+        Codex counts per thread, not per turn: ``thread_total`` is what the
+        thread has spent since it opened and ``usage`` what its last request
+        spent. The turn's own total is the thread's growth since the turn
+        began, so the reading taken before the turn's first request is the
+        baseline every later reading is measured against. Reading a difference
+        rather than summing the per-request figures keeps a dropped or replayed
+        notification from moving the total.
+        """
         if self._active_turn_id is None or self._resync_mode:
             return []
-        return [
-            UsageUpdatedPayload(
-                turn_id=self._active_turn_id,
-                input_tokens=note.usage.input_tokens,
-                output_tokens=note.usage.output_tokens,
-                total_tokens=note.usage.total_tokens,
-                cached_input_tokens=note.usage.cached_input_tokens,
-            )
-        ]
+        if note.thread_total is None:
+            # A host that reports only the last request's figures leaves the
+            # turn's total to be added up from them.
+            return list(self._usage.add(self._active_turn_id, **note.usage.model_dump()))
+        totals = note.thread_total.model_dump()
+        if self._usage_baseline is None:
+            # The turn's first reading already includes its first request, so
+            # the baseline is that reading less what the request spent.
+            self._usage_baseline = _difference(totals, note.usage.model_dump())
+        turn_totals = _difference(totals, self._usage_baseline)
+        # The thread's totals are already cumulative, so each reading is the
+        # turn's total so far and supersedes the reading before it; the turn
+        # keeps reporting until it ends.
+        return list(self._usage.replace(self._active_turn_id, final=False, **turn_totals))
 
     def _turn_completed(self, note: CodexTurnCompleted) -> list[HarnessEvent]:
         if self._active_turn_id is None:
             return []
         events: list[HarnessEvent] = []
         events.extend(self._close_open_streams())
-        if note.usage is not None:
-            events.append(
-                UsageUpdatedPayload(
-                    turn_id=self._active_turn_id,
-                    input_tokens=note.usage.input_tokens,
-                    output_tokens=note.usage.output_tokens,
-                    total_tokens=note.usage.total_tokens,
-                    cached_input_tokens=note.usage.cached_input_tokens,
-                )
-            )
         status = note.status.lower()
         if status in {"interrupted", "cancelled"}:
             events.append(

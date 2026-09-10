@@ -47,6 +47,24 @@ logger = logging.getLogger(__name__)
 ClientFactory = Callable[[], Any]
 
 
+def _str_keyed(value: object) -> dict[str, Any] | None:
+    """``value`` as a str-keyed dict, or ``None`` if it is not a mapping."""
+    if not isinstance(value, dict):
+        return None
+    return {str(k): v for k, v in cast(dict[object, object], value).items()}
+
+
+def _codex_breakdown(token_usage: dict[str, Any], key: str) -> dict[str, Any]:
+    """One of the SDK's token breakdowns, in the canonical field names."""
+    raw = _str_keyed(token_usage.get(key)) or {}
+    return {
+        "input_tokens": raw.get("input_tokens"),
+        "output_tokens": raw.get("output_tokens"),
+        "total_tokens": raw.get("total_tokens"),
+        "cached_input_tokens": raw.get("cached_input_tokens"),
+    }
+
+
 def _codex_settings(mode: str | None) -> tuple[Any, Any]:
     """Map finite canonical modes to tested Sandbox values."""
     try:
@@ -580,34 +598,23 @@ class CodexAdapter:
         await self._emit_many(events)
 
     def _coerce_notification(self, event: Any) -> dict[str, Any] | None:
-        if isinstance(event, dict):
-            return {str(k): v for k, v in cast(dict[object, object], event).items()}
+        as_mapping = _str_keyed(event)
+        if as_mapping is not None:
+            return as_mapping
         method = getattr(event, "method", None)
         payload = getattr(event, "payload", None)
         payload_dump: dict[str, Any] | None = None
         if payload is not None and hasattr(payload, "model_dump"):
-            dumped = payload.model_dump(mode="json")
-            if isinstance(dumped, dict):
-                payload_dump = {str(k): v for k, v in cast(dict[object, object], dumped).items()}
+            payload_dump = _str_keyed(payload.model_dump(mode="json"))
         if method in {"turn/started", "turn/completed"} and payload_dump is not None:
-            turn_obj = payload_dump.get("turn")
-            turn = (
-                {str(k): v for k, v in cast(dict[object, object], turn_obj).items()}
-                if isinstance(turn_obj, dict)
-                else {}
-            )
+            turn = _str_keyed(payload_dump.get("turn")) or {}
             if method == "turn/started":
                 return {
                     "method": "turnStarted",
                     "thread_id": str(payload_dump.get("thread_id") or ""),
                     "turn_id": str(turn.get("id") or ""),
                 }
-            error_obj = turn.get("error")
-            error = (
-                {str(k): v for k, v in cast(dict[object, object], error_obj).items()}
-                if isinstance(error_obj, dict)
-                else {}
-            )
+            error = _str_keyed(turn.get("error")) or {}
             return {
                 "method": "turnCompleted",
                 "thread_id": str(payload_dump.get("thread_id") or ""),
@@ -617,28 +624,17 @@ class CodexAdapter:
                 "error_message": error.get("message"),
             }
         if method == "thread/tokenUsage/updated" and payload_dump is not None:
-            token_usage_obj = payload_dump.get("token_usage")
-            token_usage = (
-                {str(k): v for k, v in cast(dict[object, object], token_usage_obj).items()}
-                if isinstance(token_usage_obj, dict)
-                else {}
-            )
-            last_obj = token_usage.get("last")
-            last = (
-                {str(k): v for k, v in cast(dict[object, object], last_obj).items()}
-                if isinstance(last_obj, dict)
-                else {}
-            )
+            token_usage = _str_keyed(payload_dump.get("token_usage")) or {}
+            # ``last`` is what the thread's most recent request spent and
+            # ``total`` what the thread has spent since it opened. The turn's
+            # own total is a difference of two ``total`` readings, which a
+            # dropped or replayed notification cannot distort.
             return {
                 "method": "tokenUsageUpdated",
                 "thread_id": str(payload_dump.get("thread_id") or ""),
                 "turn_id": str(payload_dump.get("turn_id") or ""),
-                "usage": {
-                    "input_tokens": last.get("input_tokens"),
-                    "output_tokens": last.get("output_tokens"),
-                    "total_tokens": last.get("total_tokens"),
-                    "cached_input_tokens": last.get("cached_input_tokens"),
-                },
+                "usage": _codex_breakdown(token_usage, "last"),
+                "thread_total": _codex_breakdown(token_usage, "total"),
             }
         if method == "item/agentMessage/delta" and payload_dump is not None:
             return {
@@ -664,12 +660,7 @@ class CodexAdapter:
                 "delta": str(payload_dump.get("delta") or ""),
             }
         if method in {"item/started", "item/completed"} and payload_dump is not None:
-            item_obj = payload_dump.get("item")
-            item = (
-                {str(k): v for k, v in cast(dict[object, object], item_obj).items()}
-                if isinstance(item_obj, dict)
-                else {}
-            )
+            item = _str_keyed(payload_dump.get("item")) or {}
             native_type = str(item.get("type") or "")
             item_type = {
                 "commandExecution": "command",
@@ -695,12 +686,12 @@ class CodexAdapter:
             return None
         # Fake SDK path: plain objects with model_dump / __dict__.
         if hasattr(event, "model_dump"):
-            dumped = event.model_dump()
-            if isinstance(dumped, dict):
-                return {str(k): v for k, v in cast(dict[object, object], dumped).items()}
-        data = getattr(event, "__dict__", None)
-        if isinstance(data, dict) and "method" in data:
-            return {str(k): v for k, v in cast(dict[object, object], data).items()}
+            dumped = _str_keyed(event.model_dump())
+            if dumped is not None:
+                return dumped
+        data = _str_keyed(getattr(event, "__dict__", None))
+        if data is not None and "method" in data:
+            return data
         raise DomainError(
             ErrorCode.UNSUPPORTED_NATIVE_EVENT,
             "unrecognized codex notification shape",

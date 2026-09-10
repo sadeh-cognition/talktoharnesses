@@ -33,7 +33,6 @@ from tth_types.events import (
     TurnFailedPayload,
     TurnInterruptedPayload,
     TurnOutcomeUnknownPayload,
-    UsageUpdatedPayload,
 )
 from tth_types.harness import (
     ApprovalRequestPayload,
@@ -42,6 +41,7 @@ from tth_types.harness import (
     PlanItem,
     StructuredQuestionPayload,
 )
+from tth_types.usage import TurnUsage
 
 # Namespace for deriving stable UUIDs from native IDs within a session.
 _NS = UUID("a7c3e9f1-2b4d-4e6f-8a0c-1d2e3f4a5b6c")
@@ -92,6 +92,7 @@ class AcpSessionNormalizer:
         self._seen_native_ids: set[str] = set()
         self._seen_offsets: set[str] = set()
         self._redaction_patterns: tuple[str, ...] = ()
+        self._usage = TurnUsage()
 
     def set_redaction_patterns(self, patterns: Sequence[str]) -> None:
         self._redaction_patterns = tuple(sorted((p for p in patterns if p), key=len, reverse=True))
@@ -105,6 +106,7 @@ class AcpSessionNormalizer:
         self._resync_mode = False
         self._close_open_streams_state_only()
         self._plan_id = None
+        self._usage.reset()
 
     def on_question(
         self,
@@ -207,7 +209,7 @@ class AcpSessionNormalizer:
         if kind == "plan":
             return self._plan(update)
         if kind == "usage_update":
-            return self._usage(update)
+            return self._usage_update(update)
         raise DomainError(
             ErrorCode.UNSUPPORTED_NATIVE_EVENT,
             f"unsupported sessionUpdate: {kind}",
@@ -475,11 +477,18 @@ class AcpSessionNormalizer:
             )
         ]
 
-    def _usage(self, update: dict[str, Any]) -> list[HarnessEvent]:
+    def _usage_update(self, update: dict[str, Any]) -> list[HarnessEvent]:
+        """Report an ACP usage update as the turn's figures so far.
+
+        The protocol reports the turn's current usage, not what one request
+        spent, so each update supersedes the one before it and the turn keeps
+        reporting. An update trailing a subclass's terminal figures is ignored.
+        """
         turn_id = self._require_turn()
-        return [
-            UsageUpdatedPayload(
-                turn_id=turn_id,
+        return list(
+            self._usage.replace(
+                turn_id,
+                final=False,
                 input_tokens=_optional_int(update.get("inputTokens") or update.get("input_tokens")),
                 output_tokens=_optional_int(
                     update.get("outputTokens") or update.get("output_tokens")
@@ -491,7 +500,7 @@ class AcpSessionNormalizer:
                     or update.get("cached_input_tokens")
                 ),
             )
-        ]
+        )
 
     def on_permission_request(
         self,
@@ -611,7 +620,7 @@ class AcpSessionNormalizer:
         events: list[HarnessEvent] = []
         usage_map = _as_dict(usage)
         if usage_map is not None:
-            events.extend(self._usage(usage_map))
+            events.extend(self._usage_update(usage_map))
         events.extend(self._complete_reasoning())
         events.extend(self._complete_message())
         has_assistant = any(isinstance(e, AssistantMessageCompletedPayload) for e in events)

@@ -7,6 +7,7 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 
 from tth_types import events as ev
 from tth_types.enums import ToolOutcome
+from tth_types.usage import TurnUsage
 
 from tth_muse.shared.redaction import StreamingTextRedactor
 
@@ -70,7 +71,7 @@ class MuseNormalizer:
         self._sequences: dict[str, int] = {}
         self._redactors: dict[str, StreamingTextRedactor] = {}
         self._seen: set[str] = set()
-        self._usage: dict[str, Any] = {}
+        self._usage = TurnUsage()
         self._usage_sequence = -1
         self._has_message = False
 
@@ -92,7 +93,7 @@ class MuseNormalizer:
         self._items.clear()
         self._sequences.clear()
         self._redactors.clear()
-        self._usage.clear()
+        self._usage.reset()
         self._usage_sequence = -1
         self._has_message = False
 
@@ -188,34 +189,31 @@ class MuseNormalizer:
                     return []
                 self._usage_sequence = sequence
             usage = _dict(params.get("usage"))
-            values = {
-                "input_tokens": params.get("promptTokens"),
-                "output_tokens": usage.get("outputTokens"),
-                "total_tokens": params.get("totalTokens"),
-                "cached_input_tokens": usage.get("cacheReadTokens", usage.get("cachedTokens")),
-            }
-            for name, value in values.items():
-                if type(value) is int and value >= 0:
-                    self._usage[name] = self._usage.get(name, 0) + value
-            if self._usage:
-                return [ev.UsageUpdatedPayload(turn_id=self.turn_id, **self._usage)]
-            return []
+            return list(
+                self._usage.add(
+                    self.turn_id,
+                    input_tokens=params.get("promptTokens"),
+                    output_tokens=usage.get("outputTokens"),
+                    total_tokens=params.get("totalTokens"),
+                    cached_input_tokens=usage.get("cacheReadTokens", usage.get("cachedTokens")),
+                )
+            )
         if method == "turn/completed":
             result: list[ev.HarnessEvent] = []
-            # Older hosts may only report the aggregate on the terminal frame.
-            if not self._usage and _dict(params.get("usage")):
+            # The running frames count input once, where the terminal
+            # aggregate counts it cache-inclusive; the two are on different
+            # scales, so the aggregate is used only by older hosts that report
+            # nothing while the turn runs.
+            if not self._usage.reported:
                 usage = _dict(params.get("usage"))
-                values = {
-                    target: usage[source]
-                    for source, target in {
-                        "inputTokens": "input_tokens",
-                        "outputTokens": "output_tokens",
-                        "cachedTokens": "cached_input_tokens",
-                    }.items()
-                    if type(usage.get(source)) is int and usage[source] >= 0
-                }
-                if values:
-                    result.append(ev.UsageUpdatedPayload(turn_id=self.turn_id, **values))
+                result.extend(
+                    self._usage.replace(
+                        self.turn_id,
+                        input_tokens=usage.get("inputTokens"),
+                        output_tokens=usage.get("outputTokens"),
+                        cached_input_tokens=usage.get("cachedTokens"),
+                    )
+                )
             terminal = params.get("terminal")
             if terminal == "completed":
                 result.append(

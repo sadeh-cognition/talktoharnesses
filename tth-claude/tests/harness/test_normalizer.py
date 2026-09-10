@@ -207,6 +207,61 @@ def test_file_permission_scope(
     assert event.request.operation == operation
 
 
+def test_assistant_message_usage_accumulates_and_the_result_replaces_it() -> None:
+    """A long turn reports its tokens as it goes, then settles on the result."""
+    normalizer = ClaudeNormalizer()
+    normalizer.set_session("sess-1")
+    normalizer.begin_turn(uuid4())
+
+    def assistant(message_id: str, input_tokens: int, output_tokens: int):
+        return normalizer.on_message(
+            ClaudeAssistantMessage(
+                content=[ClaudeTextBlock(text="thinking out loud")],
+                model="claude-a",
+                session_id="sess-1",
+                message_id=message_id,
+                usage={
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "cache_read_input_tokens": 4,
+                },
+            )
+        )
+
+    first = next(e for e in assistant("m1", 10, 3) if isinstance(e, UsageUpdatedPayload))
+    assert (first.input_tokens, first.output_tokens, first.cached_input_tokens) == (10, 3, 4)
+
+    second = next(e for e in assistant("m2", 20, 5) if isinstance(e, UsageUpdatedPayload))
+    assert (second.input_tokens, second.output_tokens, second.cached_input_tokens) == (
+        30,
+        8,
+        8,
+    )
+
+    # A re-delivered message must not be counted twice.
+    assert not [e for e in assistant("m2", 20, 5) if isinstance(e, UsageUpdatedPayload)]
+
+    terminal = normalizer.on_message(
+        ClaudeResultMessage(
+            subtype="success",
+            session_id="sess-1",
+            usage={
+                "input_tokens": 31,
+                "output_tokens": 9,
+                "cache_read_input_tokens": 8,
+            },
+        )
+    )
+    final = next(e for e in terminal if isinstance(e, UsageUpdatedPayload))
+    # The result reports the turn's authoritative total, superseding the
+    # running one rather than adding to it.
+    assert (final.input_tokens, final.output_tokens, final.cached_input_tokens) == (
+        31,
+        9,
+        8,
+    )
+
+
 def test_model_usage_is_aggregated_without_inventing_total() -> None:
     normalizer = ClaudeNormalizer()
     normalizer.set_session("sess-1")

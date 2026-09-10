@@ -94,6 +94,37 @@ def test_usage_is_per_turn_and_uses_counted_once_provider_values() -> None:
         assert usage.cached_input_tokens == 1000
 
 
+def test_terminal_aggregate_does_not_replace_counted_once_running_usage() -> None:
+    """The aggregate counts input cache-inclusive; the running frames do not.
+
+    Superseding one with the other would make the turn's figure jump scales
+    on its last report, so the aggregate only stands in when the host sent
+    nothing while the turn ran.
+    """
+    normalizer = MuseNormalizer()
+    normalizer.session_id = "session"
+    aggregate = {"inputTokens": 900, "cachedTokens": 500, "outputTokens": 10}
+
+    normalizer.begin_turn(uuid4())
+    running = normalizer.on_notification(
+        "session/tokenUsage",
+        {"sessionId": "session", "usage": aggregate, "promptTokens": 100, "totalTokens": 110},
+    )
+    assert [e.type for e in running] == ["usage_updated"]
+    terminal = normalizer.on_notification(
+        "turn/completed", {"sessionId": "session", "terminal": "completed", "usage": aggregate}
+    )
+    assert [e.type for e in terminal] == ["turn_completed"]
+
+    normalizer.begin_turn(uuid4())
+    terminal = normalizer.on_notification(
+        "turn/completed", {"sessionId": "session", "terminal": "completed", "usage": aggregate}
+    )
+    assert [e.type for e in terminal] == ["usage_updated", "turn_completed"]
+    usage = cast(UsageUpdatedPayload, terminal[0])
+    assert (usage.input_tokens, usage.cached_input_tokens, usage.total_tokens) == (900, 500, None)
+
+
 def test_secrets_split_across_deltas_are_redacted() -> None:
     normalizer = MuseNormalizer()
     normalizer.session_id = "session"

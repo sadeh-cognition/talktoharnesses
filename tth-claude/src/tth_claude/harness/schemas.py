@@ -64,6 +64,9 @@ class ClaudeAssistantMessage(BaseModel):
     parent_tool_use_id: str | None = None
     session_id: str | None = None
     message_id: str | None = None
+    # What this one API request spent; the turn's total is the sum of them,
+    # and the terminal result reports it authoritatively.
+    usage: dict[str, Any] | None = None
 
 
 class ClaudeUserMessage(BaseModel):

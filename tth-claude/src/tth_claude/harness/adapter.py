@@ -591,6 +591,7 @@ class ClaudeAdapter:
                 "model": getattr(message, "model", "") or "",
                 "session_id": getattr(message, "session_id", None),
                 "message_id": getattr(message, "message_id", None),
+                "usage": getattr(message, "usage", None),
             }
         if isinstance(message, SystemMessage):
             return {

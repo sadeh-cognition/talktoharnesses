@@ -19,7 +19,13 @@ SSE and the official client replay by sequence. The envelope is provider-neutral
 
 `usage_updated` attributes optional input, output, total, and cached-input token
 counts to a turn. Providers may omit categories they do not report; adapters do
-not derive them from other fields.
+not derive them from other fields. A turn may report several times while it
+runs, and every report carries the turn's totals so far rather than the
+increment since the last one, so a later report supersedes an earlier one for
+that turn instead of adding to it. Adapters whose provider reports per-request
+usage accumulate it through the shared `TurnUsage` accumulator to preserve this
+meaning, and a report that trails a turn's authoritative terminal figures is
+dropped rather than allowed to report a smaller total.
 
 ## Related
 

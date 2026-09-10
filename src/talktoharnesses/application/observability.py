@@ -13,6 +13,7 @@ from collections.abc import Generator, Iterator
 from contextlib import contextmanager
 from enum import StrEnum
 from typing import TYPE_CHECKING, Final
+from uuid import UUID
 
 from opentelemetry import metrics, trace
 from opentelemetry.metrics import CallbackOptions, Observation
@@ -38,6 +39,10 @@ from talktoharnesses.domain.events import (
     ProcessStderrTruncatedPayload,
     ToolCompletedPayload,
     ToolFailedPayload,
+    TurnCancelledPayload,
+    TurnCompletedPayload,
+    TurnFailedPayload,
+    TurnInterruptedPayload,
     UsageUpdatedPayload,
 )
 
@@ -145,6 +150,7 @@ HIST_TURN_DURATION: Final = "tth.turn_duration"
 HIST_INTERACTION_WAIT_DURATION: Final = "tth.interaction_wait_duration"
 HIST_SHUTDOWN_DURATION: Final = "tth.shutdown_duration"
 HIST_TOKEN_COST: Final = "tth.token_cost"
+HIST_TURN_TOKENS: Final = "tth.turn_tokens"
 
 _AttrValue = str | StrEnum
 
@@ -206,12 +212,22 @@ def _build_attributes(**typed: _AttrValue | None) -> Attributes:
     return out
 
 
+# Turns whose reported totals are held until their terminal event arrives. A
+# process runs far fewer turns at once than this; the cap only keeps a turn that
+# somehow never ends from leaking.
+_TRACKED_TURN_TOTALS: Final = 1024
+
+
 class Observability:
     """Process-local instruments and typed recording helpers."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._gauge_samples: dict[str, float] = {name: 0.0 for name in GAUGE_SAMPLE_NAMES}
+        # What each unfinished turn last reported. A turn reports its totals so
+        # far many times over, so only the last of them is recorded, once, when
+        # the turn's terminal event says no more are coming.
+        self._turn_totals: dict[UUID, int] = {}
         meter = get_meter()
         self._commands = meter.create_counter(
             METRIC_COMMANDS,
@@ -295,7 +311,12 @@ class Observability:
         )
         self._token_cost = meter.create_histogram(
             HIST_TOKEN_COST,
-            description="Reported token or cost values",
+            description="Reported cost values",
+            unit="1",
+        )
+        self._turn_tokens = meter.create_histogram(
+            HIST_TURN_TOKENS,
+            description="Tokens a turn reported in total",
             unit="1",
         )
         self._register_gauges(meter)
@@ -462,6 +483,39 @@ class Observability:
     def record_token_cost(self, value: float) -> None:
         self._token_cost.record(value)
 
+    def record_turn_tokens(self, tokens: int) -> None:
+        self._turn_tokens.record(float(tokens))
+
+    def _hold_turn_total(self, payload: UsageUpdatedPayload) -> None:
+        """Remember what a turn has reported, without recording it yet.
+
+        Every ``usage_updated`` payload carries the turn's totals so far and
+        supersedes the one before it, so recording each one would count the
+        same tokens once per report. The last one a turn makes is the turn's
+        total, and only ``_record_turn_total`` knows which one that was.
+        """
+        total = _reported_total(payload)
+        if total is None:
+            return
+        if payload.turn_id is None:
+            # Unattributable to a turn, so it can neither be superseded nor
+            # closed out; record it as a turn of its own.
+            self.record_turn_tokens(total)
+            return
+        with self._lock:
+            self._turn_totals[payload.turn_id] = total
+            if len(self._turn_totals) > _TRACKED_TURN_TOTALS:
+                # Dropping an unfinished turn loses its one sample; it can
+                # never add a second one for tokens already recorded.
+                del self._turn_totals[next(iter(self._turn_totals))]
+
+    def _record_turn_total(self, turn_id: UUID) -> None:
+        """Record the last total a finished turn reported, exactly once."""
+        with self._lock:
+            total = self._turn_totals.pop(turn_id, None)
+        if total is not None:
+            self.record_turn_tokens(total)
+
     def observe_committed_events(
         self,
         events: Sequence[ConversationEvent],
@@ -495,11 +549,33 @@ class Observability:
                     )
             elif isinstance(payload, UsageUpdatedPayload):
                 self.record_usage_observation()
-                if payload.total_tokens is not None:
-                    self.record_token_cost(float(payload.total_tokens))
+                self._hold_turn_total(payload)
             elif isinstance(payload, CostUpdatedPayload):
                 self.record_cost_observation()
                 self.record_token_cost(float(payload.cost))
+            elif isinstance(
+                payload,
+                TurnCompletedPayload
+                | TurnFailedPayload
+                | TurnInterruptedPayload
+                | TurnCancelledPayload,
+            ):
+                self._record_turn_total(payload.turn_id)
+
+
+def _reported_total(payload: UsageUpdatedPayload) -> int | None:
+    """The turn's tokens as the payload reports them.
+
+    Providers omit categories they do not report, and several report no total
+    at all. Adapters must not invent one, but a metric that counted only the
+    providers that send it would undercount the rest, so the two halves are
+    added here instead.
+    """
+    if payload.total_tokens is not None:
+        return payload.total_tokens
+    if payload.input_tokens is None and payload.output_tokens is None:
+        return None
+    return (payload.input_tokens or 0) + (payload.output_tokens or 0)
 
 
 _observability: Observability | None = None

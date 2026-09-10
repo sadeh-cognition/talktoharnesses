@@ -65,6 +65,151 @@ def test_xai_turn_completed_maps_usage_and_cost() -> None:
     assert cost.currency == "USD"
 
 
+def test_response_completed_usage_accumulates_to_the_turn_total() -> None:
+    """Grok's live per-response usage adds up to what its turn reports.
+
+    The responses count fresh input apart from cache reads while the turn
+    counts input cache-inclusive, so the running figures must be on the
+    turn's scale for them to climb rather than jump at the end. A response
+    frame reports no total, so the running payloads omit that category rather
+    than deriving one; the turn's terminal frame supplies it.
+    """
+    normalizer = GrokNormalizer()
+    normalizer.set_session("sess-1")
+    turn = uuid4()
+    normalizer.begin_turn(turn)
+
+    def response(input_tokens: int, output_tokens: int, cache_read: int):
+        return normalizer.on_xai_session_notification(
+            {
+                "sessionId": "sess-1",
+                "update": {
+                    "sessionUpdate": "response_completed",
+                    "usage": {
+                        "input_tokens": input_tokens,
+                        "output_tokens": output_tokens,
+                        "cache_read_input_tokens": cache_read,
+                        "cache_creation_input_tokens": 0,
+                        "reasoning_tokens": 0,
+                    },
+                },
+            }
+        )
+
+    first = response(10_340, 128, 6_016)
+    assert first == [
+        UsageUpdatedPayload(
+            turn_id=turn,
+            input_tokens=16_356,
+            output_tokens=128,
+            total_tokens=None,
+            cached_input_tokens=6_016,
+        )
+    ]
+
+    for values in ((6_000, 34, 10_496), (158, 34, 16_384), (76, 24, 16_512)):
+        running = response(*values)
+
+    # The observed turn's own terminal figures, reached by adding up the
+    # responses it made.
+    assert running == [
+        UsageUpdatedPayload(
+            turn_id=turn,
+            input_tokens=65_982,
+            output_tokens=220,
+            total_tokens=None,
+            cached_input_tokens=49_408,
+        )
+    ]
+
+    terminal = normalizer.on_xai_session_notification(
+        {
+            "sessionId": "sess-1",
+            "update": {
+                "sessionUpdate": "turn_completed",
+                "usage": {
+                    "inputTokens": 65_982,
+                    "outputTokens": 220,
+                    "totalTokens": 66_202,
+                    "cachedReadTokens": 49_408,
+                },
+            },
+        }
+    )
+    assert (
+        UsageUpdatedPayload(
+            turn_id=turn,
+            input_tokens=65_982,
+            output_tokens=220,
+            total_tokens=66_202,
+            cached_input_tokens=49_408,
+        )
+        in terminal
+    )
+
+    # A response frame trailing the terminal one cannot restart the total and
+    # report a smaller one than the turn already settled on. Neither can a
+    # protocol-level usage update: both paths report through one accumulator.
+    assert response(76, 24, 16_512) == []
+    assert (
+        normalizer.on_session_update(
+            {
+                "sessionId": "sess-1",
+                "update": {"sessionUpdate": "usage_update", "inputTokens": 5, "outputTokens": 1},
+            }
+        )
+        == []
+    )
+
+    # A successor turn starts its own total rather than continuing this one.
+    successor = uuid4()
+    normalizer.begin_turn(successor)
+    assert response(100, 5, 20) == [
+        UsageUpdatedPayload(
+            turn_id=successor,
+            input_tokens=120,
+            output_tokens=5,
+            total_tokens=None,
+            cached_input_tokens=20,
+        )
+    ]
+
+
+def test_response_completed_outside_a_turn_is_ignored() -> None:
+    """The xAI envelope multiplexes kinds and arrives unbound to a turn.
+
+    Nothing this normalizer does with a session notification may raise, so a
+    response frame that arrives before a turn opens is dropped.
+    """
+    normalizer = GrokNormalizer()
+    normalizer.set_session("sess-1")
+
+    assert (
+        normalizer.on_xai_session_notification(
+            {
+                "sessionId": "sess-1",
+                "update": {
+                    "sessionUpdate": "response_completed",
+                    "usage": {"input_tokens": 10, "output_tokens": 3},
+                },
+            }
+        )
+        == []
+    )
+    assert (
+        normalizer.on_xai_session_notification(
+            {
+                "sessionId": "sess-1",
+                "update": {
+                    "sessionUpdate": "turn_completed",
+                    "usage": {"inputTokens": 10, "outputTokens": 3},
+                },
+            }
+        )
+        == []
+    )
+
+
 def test_xai_session_notification_ignores_non_terminal_updates() -> None:
     normalizer = GrokNormalizer()
     normalizer.set_session("sess-1")
