@@ -90,7 +90,7 @@ accepted; `latest_verified` is advisory only.
 
 | Resume | Interrupt | Steer | Multi-interaction | Nested | MCP servers |
 | --- | --- | --- | --- | --- | --- |
-| yes | yes | no | yes | no | no |
+| yes | yes | no | yes | no | yes |
 
 ### Notes
 
