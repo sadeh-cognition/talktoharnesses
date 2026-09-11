@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 from tests.live.helpers import (
     LiveHttp,
+    assert_rtk_rewrite,
     isolated_sandbox_environment,
     run_live_gate,
     unique_prompt,
@@ -57,4 +58,5 @@ async def test_live_claude_through_tth_docker_sandbox(live_http: LiveHttp) -> No
         ),
         mention_permission=False,
         prompt_fn=_claude_prompt,
+        after_create=assert_rtk_rewrite,
     )

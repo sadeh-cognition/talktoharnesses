@@ -25,6 +25,8 @@ Turns outlive HTTP requests. Harness execution occurs in the kind's split servic
 
 The proxy's `RuntimeManager` mirrors split sessions through `RemoteProcessHandle`; each split's `ProcessSupervisor` creates, watches, and reaps the native runtime. SQLite uses a single-supervisor proxy profile. PostgreSQL may coordinate multiple proxy workers through transactional claims, renewable leases, and notifications without transferring a live split session.
 
+Split images for claude, codex, cursor, and opencode also carry the RTK command rewriter (`rtk`), which prefixes shell commands so the harness reads trimmed output. Claude applies it as an in-process SDK `PreToolUse` hook (`tth_claude.harness.rtk_hook`); the proxy seeds the cursor hook, opencode plugin, and codex rules file into the kind's home volume with `rtk init` during sandbox preparation (`talktoharnesses.remote.sandbox_rtk`). Seeding fails open. grok and muse are not supported by RTK, and prime_agent's `ipython` shell tool is invisible to RTK's Pi extension, so those images are untouched.
+
 ## Requirements
 
 - [Host Django ASGI with readiness](../requirements/host-django-asgi-with-readiness.md)

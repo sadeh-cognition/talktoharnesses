@@ -25,7 +25,7 @@ from tth_types.base import FROZEN
 from tth_types.enums import ErrorCode, HarnessKind
 from tth_types.errors import DomainError
 
-from talktoharnesses.remote import docker_ops, sandbox_auth
+from talktoharnesses.remote import docker_ops, sandbox_auth, sandbox_rtk
 from talktoharnesses.remote.docker_ops import HOST_GATEWAY_ALIAS as _HOST_GATEWAY_ALIAS
 from talktoharnesses.remote.docker_ops import container_otlp_endpoint as _container_otlp_endpoint
 from talktoharnesses.remote.docker_ops import (
@@ -516,6 +516,10 @@ class SandboxManager:
             # Refresh the managed volume even when the running container still
             # matches; host logins can rotate while the sandbox stays alive.
             self._seed_auth_file(client, Mount, kind=kind, image=image, name=name)
+            # Idempotent; re-running also upgrades homes after an image bump.
+            sandbox_rtk.seed_rtk_config(
+                client, Mount, kind=kind, image=image, home_volume=f"{name}-home"
+            )
             self._reconcile_container(
                 client,
                 Mount,

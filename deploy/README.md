@@ -131,6 +131,39 @@ Interactive CLI logins persist in the per-kind home volume, e.g.:
 docker exec -it tth-claude claude login
 ```
 
+## RTK command rewriting
+
+[RTK](https://github.com/rtk-ai/rtk) rewrites shell commands to `rtk <cmd>`
+so the harness reads a token-trimmed version of the output. The pinned
+release binary (`RTK_VERSION` build arg) is installed in the claude, codex,
+cursor and opencode images. grok and muse are not supported by RTK, and
+prime_agent runs shell commands through its `ipython` tool (`%%bash` cells)
+rather than Pi's `bash` tool, so RTK's Pi extension never sees them; those
+three images are untouched. Integration differs per kind:
+
+| Kind | Mechanism | Where it lives |
+|------|-----------|----------------|
+| claude | in-process SDK `PreToolUse` hook calling `rtk hook claude` | `tth_claude.harness.rtk_hook` (the split runs with `setting_sources=[]`, so no settings.json) |
+| cursor | `preToolUse` hook (`rtk hook cursor`) | `/home/agent/.cursor/hooks.json`, seeded |
+| opencode | plugin calling `rtk rewrite` | `/home/agent/.config/opencode/plugins/rtk.ts`, seeded |
+| codex | rules file (prompt-level; the model follows it) | `/home/agent/.codex/AGENTS.md`, seeded with the `RTK.md` rules inlined (Codex does not expand the `@file` reference `rtk init` writes) |
+
+"Seeded" files are written by `rtk init --global …` in a one-shot container
+against the kind's home volume (no network, all capabilities dropped) every
+time the sandbox is prepared, right after credential seeding;
+`rtk init` is idempotent and this also upgrades existing homes after an image
+bump. Seeding and the Claude hook fail open: when `rtk` is missing or errors
+the command runs unmodified.
+
+Confirm inside a prepared sandbox:
+
+```sh
+docker exec tth-codex rtk --version
+docker exec tth-codex cat /home/agent/.codex/AGENTS.md
+docker exec tth-cursor cat /home/agent/.cursor/hooks.json
+docker exec tth-claude rtk gain --history   # rewrites recorded so far
+```
+
 ## OpenTelemetry
 
 The proxy and all seven splits export traces, metrics, and logs by default via

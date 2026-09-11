@@ -16,6 +16,8 @@ from typing import Any
 from tth_types.enums import ErrorCode, HarnessKind
 from tth_types.errors import DomainError
 
+from talktoharnesses.remote import docker_ops
+
 
 @dataclass(frozen=True)
 class AuthFileSpec:
@@ -128,8 +130,11 @@ def seed_auth_file(
         )
     spec = AUTH_FILE_DEFAULTS[kind]
     seed_path = f"/seed/{spec.target_filename}"
-    client.containers.run(
-        image,
+    docker_ops.run_home_seeder(
+        client,
+        mount_type,
+        image=image,
+        home_volume=home_volume,
         command=[
             "python",
             "-c",
@@ -141,17 +146,7 @@ def seed_auth_file(
                 f"(target / {spec.target_filename!r}).chmod(0o600)"
             ),
         ],
-        mounts=[
-            mount_type(
-                target=seed_path,
-                source=str(source),
-                type="bind",
-                read_only=True,
-            ),
-            mount_type(target="/home/agent", source=home_volume, type="volume"),
+        extra_mounts=[
+            mount_type(target=seed_path, source=str(source), type="bind", read_only=True)
         ],
-        network_disabled=True,
-        cap_drop=["ALL"],
-        security_opt=["no-new-privileges:true"],
-        remove=True,
     )

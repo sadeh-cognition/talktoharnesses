@@ -13,7 +13,12 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-from tests.live.helpers import LiveHttp, isolated_sandbox_environment, run_live_gate
+from tests.live.helpers import (
+    LiveHttp,
+    assert_rtk_rewrite,
+    isolated_sandbox_environment,
+    run_live_gate,
+)
 
 from talktoharnesses.domain.enums import HarnessKind
 from talktoharnesses.domain.models import HarnessConfiguration
@@ -54,4 +59,5 @@ async def test_live_opencode_through_tth_docker_sandbox(live_http: LiveHttp) -> 
             model=os.environ.get("TALKTOHARNESSES_OPENCODE_MODEL", "opencode/big-pickle"),
         ),
         min_resume_interactions=0,
+        after_create=assert_rtk_rewrite,
     )

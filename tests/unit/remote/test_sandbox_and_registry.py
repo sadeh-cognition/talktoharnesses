@@ -25,6 +25,7 @@ from talktoharnesses.remote.sandbox import (
     ensure_docker_cli_available,
 )
 from talktoharnesses.remote.sandbox_auth import AUTH_FILE_DEFAULTS
+from talktoharnesses.remote.sandbox_rtk import RTK_INIT_SPECS, seed_rtk_config
 
 
 class FakeStore:
@@ -805,6 +806,129 @@ def test_seed_provider_auth_rejects_missing_configured_file(
 
     assert excinfo.value.code is ErrorCode.SANDBOX_UNAVAILABLE
     assert excinfo.value.details["reason"] == "auth_file_missing"
+
+
+@pytest.mark.parametrize(
+    ("kind", "directories", "init_args"),
+    [
+        (HarnessKind.CODEX, [".codex"], ["--codex"]),
+        (HarnessKind.CURSOR, [".claude", ".cursor"], ["--agent", "cursor", "--auto-patch"]),
+        (HarnessKind.OPENCODE, [".config/opencode/plugins"], ["--opencode", "--auto-patch"]),
+    ],
+)
+def test_seed_rtk_config_runs_rtk_init_against_home_volume(
+    kind: HarnessKind, directories: list[str], init_args: list[str]
+) -> None:
+    calls: list[dict[str, Any]] = []
+
+    class Containers:
+        def run(self, image: str, **kwargs: Any) -> None:
+            calls.append({"image": image, **kwargs})
+
+    def mount_type(**kwargs: Any) -> dict[str, Any]:
+        return kwargs
+
+    client: Any = SimpleNamespace(containers=Containers())
+    seeded = seed_rtk_config(
+        client,
+        mount_type,
+        kind=kind,
+        image=f"tth-{kind.value}:latest",
+        home_volume=f"tth-{kind.value}-home",
+    )
+
+    assert seeded is True
+    assert len(calls) == 1
+    assert calls[0]["image"] == f"tth-{kind.value}:latest"
+    assert calls[0]["command"][:2] == ["python", "-c"]
+    script = calls[0]["command"][2]
+    for directory in directories:
+        assert f"(Path.home() / {directory!r}).mkdir(parents=True, exist_ok=True)" in script
+    assert f"subprocess.run({['rtk', 'init', '--global', *init_args]!r}, check=True)" in script
+    # Codex ignores ``@file`` references in AGENTS.md; the rules get inlined.
+    assert ("AGENTS.md" in script) is (kind is HarnessKind.CODEX)
+    assert calls[0]["environment"] == {"HOME": "/home/agent"}
+    assert calls[0]["mounts"] == [
+        {"target": "/home/agent", "source": f"tth-{kind.value}-home", "type": "volume"}
+    ]
+    assert calls[0]["network_disabled"] is True
+    assert calls[0]["cap_drop"] == ["ALL"]
+    assert calls[0]["remove"] is True
+
+
+@pytest.mark.parametrize("kind", [kind for kind in HarnessKind if kind not in RTK_INIT_SPECS])
+def test_seed_rtk_config_skips_kinds_without_seeded_files(kind: HarnessKind) -> None:
+    class Containers:
+        def run(self, image: str, **kwargs: Any) -> None:
+            raise AssertionError("no seeding container expected")
+
+    client: Any = SimpleNamespace(containers=Containers())
+    assert (
+        seed_rtk_config(
+            client,
+            SimpleNamespace(),
+            kind=kind,
+            image=f"tth-{kind.value}:latest",
+            home_volume=f"tth-{kind.value}-home",
+        )
+        is False
+    )
+
+
+def test_seed_rtk_config_fails_open_on_docker_errors(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from docker.errors import DockerException
+
+    class Containers:
+        def run(self, image: str, **kwargs: Any) -> None:
+            raise DockerException(f"{kwargs['command']} exited 2 in {image}: rtk exploded")
+
+    def mount_type(**kwargs: Any) -> dict[str, Any]:
+        return kwargs
+
+    client: Any = SimpleNamespace(containers=Containers())
+    with caplog.at_level("WARNING"):
+        seeded = seed_rtk_config(
+            client,
+            mount_type,
+            kind=HarnessKind.CODEX,
+            image="tth-codex:latest",
+            home_volume="tth-codex-home",
+        )
+
+    assert seeded is False
+    assert "rtk seeding for codex failed" in caplog.text
+
+
+def test_ensure_container_seeds_rtk_after_auth(monkeypatch: pytest.MonkeyPatch) -> None:
+    manager = SandboxManager(SandboxConfig())
+    client = SimpleNamespace()
+    order: list[str] = []
+
+    def docker_client(kind: HarnessKind) -> Any:
+        return client
+
+    def seed_auth_file(client: Any, mount: Any, **kwargs: Any) -> None:
+        order.append("auth")
+
+    def seed_rtk(
+        client: Any, mount: Any, *, kind: HarnessKind, image: str, home_volume: str
+    ) -> bool:
+        order.append(f"rtk:{kind.value}:{image}:{home_volume}")
+        return True
+
+    def reconcile_container(*args: Any, **kwargs: Any) -> None:
+        order.append("reconcile")
+
+    monkeypatch.setattr(manager, "_docker_client", docker_client)
+    monkeypatch.setattr(manager, "_seed_auth_file", seed_auth_file)
+    monkeypatch.setattr("talktoharnesses.remote.sandbox_rtk.seed_rtk_config", seed_rtk)
+    monkeypatch.setattr(manager, "_reconcile_container", reconcile_container)
+
+    manager._ensure_container(HarnessKind.CURSOR, "token")  # pyright: ignore[reportPrivateUsage]
+
+    assert order == ["auth", "rtk:cursor:tth-cursor:latest:tth-cursor-home", "reconcile"]
 
 
 def test_ensure_container_refreshes_auth_for_matching_container(

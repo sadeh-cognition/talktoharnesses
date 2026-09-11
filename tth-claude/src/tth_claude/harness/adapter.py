@@ -34,6 +34,7 @@ from tth_claude.harness.compatibility import (
 )
 from tth_claude.harness.normalizer import ClaudeNormalizer
 from tth_claude.harness.probe import probe_claude
+from tth_claude.harness.rtk_hook import build_pre_tool_use_hook
 from tth_claude.harness.schemas import parse_claude_message
 from tth_claude.shared.questions import canonical_answer_values, canonical_questions
 
@@ -328,52 +329,24 @@ class ClaudeAdapter:
             }
             options["can_use_tool"] = self._can_use_tool_yolo if config.yolo else self._can_use_tool
             return options
-        cli_path = None
-
-        if config.yolo:
-            return ClaudeAgentOptions(
-                cwd=cwd,
-                model=config.model,
-                effort=_claude_effort(config.effort),
-                resume=resume,
-                session_id=session_id,
-                permission_mode="bypassPermissions",
-                can_use_tool=self._can_use_tool_yolo,
-                cli_path=cli_path,
-                # Avoid project/local auto-allow settings; user auth still applies via SDK login.
-                setting_sources=[],
-                mcp_servers=_sdk_mcp_servers(config),
-            )
-
-        async def _force_broker_ask(
-            input_data: dict[str, Any],
-            tool_use_id: str | None,
-            context: Any,
-        ) -> dict[str, Any]:
-            del input_data, tool_use_id, context
-            # Keep tool execution on the can_use_tool → answer_interaction path.
-            return {
-                "hookSpecificOutput": {
-                    "hookEventName": "PreToolUse",
-                    "permissionDecision": "ask",
-                }
-            }
-
+        # Non-yolo matches every tool so the hook can force the broker ask;
+        # yolo only needs the Bash rewrite.
+        hook = build_pre_tool_use_hook(yolo=config.yolo)
         return ClaudeAgentOptions(
             cwd=cwd,
             model=config.model,
             effort=_claude_effort(config.effort),
             resume=resume,
             session_id=session_id,
-            permission_mode="default",
-            can_use_tool=self._can_use_tool,
-            cli_path=cli_path,
+            permission_mode="bypassPermissions" if config.yolo else "default",
+            can_use_tool=self._can_use_tool_yolo if config.yolo else self._can_use_tool,
+            cli_path=None,
             # Avoid project/local auto-allow settings; user auth still applies via SDK login.
             setting_sources=[],
             mcp_servers=_sdk_mcp_servers(config),
             hooks={
                 "PreToolUse": [
-                    HookMatcher(matcher=None, hooks=[cast(Any, _force_broker_ask)]),
+                    HookMatcher(matcher="Bash" if config.yolo else None, hooks=[cast(Any, hook)]),
                 ]
             },
         )

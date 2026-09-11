@@ -17,6 +17,7 @@ import pytest
 from tests.live.helpers import (
     LiveHttp,
     LiveStream,
+    assert_rtk_rewrite,
     isolated_sandbox_environment,
     run_live_gate,
     unique_prompt,
@@ -78,6 +79,7 @@ async def _after_create(
     )
     await stream.collect_turn(restore.turn.id)
     await _assert_baseline(client, conversation_id)
+    await assert_rtk_rewrite(stream, client, conversation_id)
 
 
 async def test_live_cursor_through_tth_docker_sandbox(live_http: LiveHttp) -> None:

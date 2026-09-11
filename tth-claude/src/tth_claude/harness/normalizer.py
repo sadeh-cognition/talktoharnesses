@@ -162,6 +162,13 @@ class ClaudeNormalizer:
                     operation = None
         elif tool_name in {"Edit", "Write"}:
             operation = FileOperation.MODIFY
+        # Claude hands over a shell line, not an argv, so it is shown to
+        # approvers in the summary (after PreToolUse rewrites such as rtk)
+        # rather than modelled as a command action.
+        summary = f"Claude tool permission: {tool_name}"
+        command = tool_input.get("command") if tool_name == "Bash" else None
+        if isinstance(command, str) and command.strip():
+            summary = f"{summary}: {command.strip()}"
         return [
             InteractionRequestedPayload(
                 turn_id=self._active_turn_id,
@@ -171,7 +178,7 @@ class ClaudeNormalizer:
                     tool_name=tool_name,
                     path=path if isinstance(path, str) and path.strip() else None,
                     operation=operation,
-                    summary=f"Claude tool permission: {tool_name}",
+                    summary=summary,
                     available_decisions=(
                         ApprovalDecision.ALLOW_ONCE,
                         ApprovalDecision.ALLOW_SESSION,

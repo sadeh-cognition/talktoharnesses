@@ -11,6 +11,7 @@ import logging
 import os
 import shutil
 import subprocess
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
@@ -186,3 +187,36 @@ def build_image(kind: HarnessKind, image: str, *, root: Path, timeout: float) ->
             },
         )
     logger.info("built sandbox image %s", image)
+
+
+SANDBOX_HOME = "/home/agent"
+
+
+def run_home_seeder(
+    client: Any,
+    mount_type: Any,
+    *,
+    image: str,
+    home_volume: str,
+    command: Sequence[str],
+    extra_mounts: Sequence[Any] = (),
+) -> None:
+    """Run ``command`` in a hardened one-shot container against a kind's home volume.
+
+    The container runs the split image with networking disabled, every
+    capability dropped, and no privilege escalation; it is removed on exit.
+    Callers say what to run, this says how.
+    """
+    client.containers.run(
+        image,
+        command=list(command),
+        environment={"HOME": SANDBOX_HOME},
+        mounts=[
+            *extra_mounts,
+            mount_type(target=SANDBOX_HOME, source=home_volume, type="volume"),
+        ],
+        network_disabled=True,
+        cap_drop=["ALL"],
+        security_opt=["no-new-privileges:true"],
+        remove=True,
+    )

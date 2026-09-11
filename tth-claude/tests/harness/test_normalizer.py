@@ -172,6 +172,12 @@ def test_permission_request_mapping() -> None:
     )
     assert events
     assert ApprovalDecision.ALLOW_ONCE in events[0].request.available_decisions  # type: ignore[attr-defined]
+    assert events[0].request.command_args is None  # type: ignore[attr-defined]
+    assert events[0].request.summary == "Claude tool permission: Bash: ls"  # type: ignore[attr-defined]
+    read = n.on_permission_request(
+        tool_name="Read", tool_input={"file_path": "/repo/a"}, interaction_id=uuid4()
+    )
+    assert read[0].request.summary == "Claude tool permission: Read"  # type: ignore[attr-defined]
     assert n.fail_active_turn(error_code="x", message="y")
     assert n.fail_active_turn(error_code="x", message="y") == []
 

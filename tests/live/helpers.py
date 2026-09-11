@@ -94,6 +94,7 @@ def isolated_sandbox_environment(
         monkeypatch.delenv(credential_environment_variable, raising=False)
     monkeypatch.setenv(auth_environment_variable, auth_file)
     monkeypatch.setenv(f"TTH_SPLIT_PORT_{kind_name}", str(_available_port()))
+    monkeypatch.setenv(LIVE_CONTAINER_ENV, container_name)
     monkeypatch.setattr(SandboxManager, "_container_name", test_container_name)
     monkeypatch.setattr(SandboxManager, "_image", test_image)
     monkeypatch.setattr(SandboxManager, "_mount_roots", test_mount_roots)
@@ -208,6 +209,66 @@ AfterCreateHook = Callable[
 ]
 
 
+# The isolated sandbox container's name, for tests that inspect it directly.
+LIVE_CONTAINER_ENV = "TALKTOHARNESSES_LIVE_SANDBOX_CONTAINER"
+
+RTK_REWRITE_PROMPT = (
+    "Your only task is to invoke the native shell tool with this exact command: "
+    "`git status`. Do not add flags, do not run anything else, and do not respond "
+    "with text before invoking the tool."
+)
+
+
+async def assert_rtk_rewrite(
+    stream: LiveStream,
+    client: AsyncTalkToHarnessesClient,
+    conversation_id: UUID,
+) -> None:
+    """Prove RTK rewrote a shell command inside the sandbox (``git status`` → ``rtk git status``).
+
+    Usable as ``after_create`` for kinds with a transparent RTK hook/plugin.
+    Event streams report the model's original tool call, so the evidence is
+    RTK's own history in the sandbox home: every rewrite it executes is logged
+    there and ``rtk gain --history`` lists it.
+    """
+    submitted = await client.submit_turn(
+        conversation_id,
+        prompt=RTK_REWRITE_PROMPT,
+        idempotency_key=f"rtk-rewrite-{conversation_id}",
+    )
+    events = await stream.collect_turn(submitted.turn.id)
+    tool_events = [
+        (event.type, event.model_dump_json()[:400])
+        for event in events
+        if event.type.startswith(("tool_", "interaction_"))
+    ]
+    assert tool_events, (
+        f"the harness ran no tool for the rtk prompt; assistant text: {_assistant_text(events)!r}"
+    )
+    history = await asyncio.to_thread(_sandbox_rtk_history)
+    assert "rtk git status" in history, (
+        "rtk did not rewrite `git status` inside the sandbox; "
+        f"rtk history: {history!r}; tool events: {tool_events}"
+    )
+
+
+def _sandbox_rtk_history() -> str:
+    """``rtk gain --history`` output from the live sandbox container's home."""
+    import docker
+
+    container_name = os.environ[LIVE_CONTAINER_ENV]
+    client = docker.from_env()
+    try:
+        container = client.containers.get(container_name)
+        exit_code, output = container.exec_run(["rtk", "gain", "--history"], user="agent")
+    finally:
+        client.close()
+    raw = output if isinstance(output, bytes) else b"".join(output)
+    text = raw.decode("utf-8", errors="replace")
+    assert exit_code == 0, f"rtk gain --history failed in {container_name}: {text}"
+    return text
+
+
 def unique_prompt(prefix: str, *, mention_permission: bool = True) -> str:
     token = uuid4().hex[:12]
     # Workspace-relative write keeps Claude from treating /tmp markers as injection.
@@ -298,16 +359,29 @@ def _assert_turn(
     matching = [event for event in window if event_turn_id(event) == turn_id]
     terminals = [event for event in matching if event.type in TERMINAL_TYPES]
     assert terminals, "live turn did not produce a terminal event"
-    assert terminals[0].type == expected_terminal, f"live turn ended with {terminals[0].type}"
+    assert terminals[0].type == expected_terminal, (
+        f"live turn ended with {terminals[0].type}: {terminals[0].model_dump_json()[:1500]}"
+    )
     interactions = [event for event in matching if event.type == "interaction_requested"]
     if min_interactions:
         assert len(interactions) >= min_interactions, (
             f"live turn completed with {len(interactions)} interactions; "
-            f"expected >= {min_interactions}"
+            f"expected >= {min_interactions}; events: {[event.type for event in matching]}; "
+            f"assistant text: {_assistant_text(matching)!r}"
         )
     if require_usage:
         _assert_token_usage(matching, terminals[0])
     return matching
+
+
+def _assistant_text(events: Sequence[ConversationEvent]) -> str:
+    parts: list[str] = []
+    for event in events:
+        payload = event.payload
+        text = getattr(payload, "text", None) or getattr(payload, "delta", None)
+        if isinstance(text, str) and event.type.startswith("assistant_message"):
+            parts.append(text)
+    return "".join(parts)[:2000]
 
 
 def _assert_token_usage(
@@ -318,7 +392,10 @@ def _assert_token_usage(
     for index, event in enumerate(matching):
         if isinstance(event.payload, UsageUpdatedPayload):
             usage_events.append((index, event.payload))
-    assert usage_events, "live turn did not produce usage_updated before terminal"
+    assert usage_events, (
+        "live turn did not produce usage_updated before terminal; "
+        f"events: {[event.type for event in matching]}"
+    )
     usage_index, usage = usage_events[-1]
     assert usage_index < matching.index(terminal), "live turn produced usage_updated after terminal"
     values: tuple[int | None, ...] = (

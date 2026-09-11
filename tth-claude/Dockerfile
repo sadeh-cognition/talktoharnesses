@@ -40,6 +40,19 @@ RUN pip install ./tth-types .
 # executable-ownership check passes for the service user.
 RUN chown -R ${UID}:${GID} /usr/local/lib/python3.12/site-packages /usr/local/bin
 
+# RTK (https://github.com/rtk-ai/rtk) rewrites shell commands to `rtk <cmd>` so
+# the harness sees a token-trimmed version of the output. Pinned release binary.
+ARG RTK_VERSION=0.49.0
+RUN set -eu; case "$(uname -m)" in \
+      x86_64)  rtk_target=x86_64-unknown-linux-musl ;; \
+      aarch64) rtk_target=aarch64-unknown-linux-gnu ;; \
+      *) echo "unsupported architecture for rtk: $(uname -m)" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL "https://github.com/rtk-ai/rtk/releases/download/v${RTK_VERSION}/rtk-${rtk_target}.tar.gz" \
+      | tar -xz -C /usr/local/bin rtk \
+    && chmod 0755 /usr/local/bin/rtk \
+    && rtk --version
+
 USER agent
 ENV HOME=/home/agent
 EXPOSE 8010

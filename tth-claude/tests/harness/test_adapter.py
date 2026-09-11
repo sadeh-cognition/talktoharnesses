@@ -512,7 +512,9 @@ async def test_yolo_keeps_structured_question_callback_on_create_and_resume(
     )
     assert _option_get(clients[0].options, "permission_mode") == "bypassPermissions"
     assert _option_get(clients[0].options, "can_use_tool") is not None
-    assert _option_get(clients[0].options, "hooks") is None
+    yolo_hooks = _option_get(clients[0].options, "hooks")
+    assert isinstance(yolo_hooks, dict)
+    assert [matcher.matcher for matcher in yolo_hooks["PreToolUse"]] == ["Bash"]
     await adapter.close(session)
 
     resume_adapter = ClaudeAdapter(client_factory=factory)
