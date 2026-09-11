@@ -8,16 +8,18 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
-ROOT = Path(__file__).resolve().parents[1]
-SPLITS = (
-    ("grok", "tth-grok", "Grok"),
-    ("cursor", "tth-cursor", "Cursor"),
-    ("codex", "tth-codex", "Codex"),
-    ("claude", "tth-claude", "Claude Code"),
-    ("opencode", "tth-opencode", "OpenCode"),
-    ("prime_agent", "tth-prime-agent", "Prime Agent"),
-    ("muse", "tth-muse", "Muse Code"),
-)
+from splits import KINDS, ROOT, package_name, split_root
+
+TITLES = {
+    "grok": "Grok",
+    "cursor": "Cursor",
+    "codex": "Codex",
+    "claude": "Claude Code",
+    "prime-agent": "Prime Agent",
+    "opencode": "OpenCode",
+    "muse": "Muse Code",
+}
+assert set(TITLES) == set(KINDS)
 CAPABILITIES = (
     "supports_resume",
     "supports_interrupt",
@@ -29,18 +31,17 @@ CAPABILITIES = (
 KNOWN_PLATFORMS = frozenset({"linux", "darwin", "win32"})
 
 
-def _document_path(kind: str, directory: str) -> Path:
-    return ROOT / directory / "src" / f"tth_{kind}" / "data" / "compatibility" / f"{kind}.json"
-
-
 def load_documents() -> list[tuple[str, str, dict[str, Any]]]:
+    """Yield ``(kind, title, document)`` with kind as the HarnessKind value (underscored)."""
     documents: list[tuple[str, str, dict[str, Any]]] = []
-    for kind, directory, title in SPLITS:
-        path = _document_path(kind, directory)
+    for kind in KINDS:
+        value = kind.replace("-", "_")
+        path = split_root(kind) / "src" / package_name(kind) / "data" / "compatibility"
+        path /= f"{value}.json"
         document = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(document, dict):
             raise ValueError(f"{path} must contain a JSON object")
-        documents.append((kind, title, document))
+        documents.append((value, TITLES[kind], document))
     return documents
 
 

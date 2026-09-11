@@ -22,13 +22,23 @@ All seven expose the identical HTTP+SSE API defined by the shared
 ## Building the split images
 
 ```sh
-deploy/build-splits.sh            # all seven, tag "latest"
-deploy/build-splits.sh v1 claude  # one kind, custom tag
+deploy/build-splits.sh                 # all seven in parallel, tag "latest"
+deploy/build-splits.sh v1 claude muse  # some kinds, custom tag
 ```
 
-Images embed the harness CLI (chowned to the build UID/GID so the split's
-executable-ownership check passes) and run
-`uvicorn tth_<kind>.asgi:application` on container port 8010.
+The script wraps `docker buildx bake` (`docker-bake.hcl` at the repo root, one
+matrix target per kind), which builds the requested kinds concurrently. Every
+`tth-<kind>/Dockerfile` and `.dockerignore` is rendered from one template by
+`scripts/render_dockerfiles.py` (the static gate runs it with `--check`), so
+edit the template, not the generated files. The shared instructions come first
+and nothing per-kind is set above them, so BuildKit reuses the apt, service-user
+and uv layers across the splits that take the same branch (plain, Node, Cursor's
+extra packages). Images embed the harness CLI (owned by the build UID/GID so the
+split's executable-ownership check passes), install the locked Python
+dependencies with `uv sync --frozen` into `/opt/venv`, and run
+`uvicorn tth_<kind>.asgi:application` on container port 8010. The per-kind
+layers are ordered by change frequency (locked dependencies, tth-types, service
+source), so a source edit rebuilds only the last thin layer.
 
 Pre-building is an optimization, not a requirement: the proxy builds a missing
 `tth-<kind>` image itself on the first request for that kind (editable/repo

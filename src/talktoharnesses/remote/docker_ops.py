@@ -125,9 +125,12 @@ def resolve_build_root(kind: HarnessKind) -> Path:
     import talktoharnesses
 
     root = Path(talktoharnesses.__file__).resolve().parents[2]
-    dockerfile = root / f"tth-{kind_slug(kind)}" / "Dockerfile"
-    tth_types = root / "tth-types" / "pyproject.toml"
-    if not dockerfile.is_file() or not tth_types.is_file():
+    required = (
+        root / "docker-bake.hcl",
+        root / f"tth-{kind_slug(kind)}" / "Dockerfile",
+        root / "tth-types" / "pyproject.toml",
+    )
+    if not all(path.is_file() for path in required):
         raise DomainError(
             ErrorCode.SANDBOX_UNAVAILABLE,
             f"no build context for {kind.value} under {root}",
@@ -137,31 +140,33 @@ def resolve_build_root(kind: HarnessKind) -> Path:
 
 
 def build_image(kind: HarnessKind, image: str, *, root: Path, timeout: float) -> None:
-    """Blocking replication of deploy/build-splits.sh for one kind.
+    """Blocking build of one kind's bake target (the recipe lives in docker-bake.hcl).
 
     buildx is required: the split Dockerfiles consume the shared tth-types
     sources through a named build context, which docker-py cannot express.
+    Bake runs from ``root`` because it only reads contexts below the working
+    directory.
     """
     docker_bin = ensure_docker_cli_available(kind)
+    slug = kind_slug(kind)
     command = [
         docker_bin,
         "buildx",
-        "build",
-        "--build-context",
-        f"tth_types={root / 'tth-types'}",
-        "--build-arg",
-        f"UID={os.getuid()}",
-        "--build-arg",
-        f"GID={os.getgid()}",
+        "bake",
+        "-f",
+        "docker-bake.hcl",
         "--load",
-        "-t",
-        image,
-        str(root / f"tth-{kind_slug(kind)}"),
+        "--set",
+        f"{slug}.tags={image}",
+        slug,
     ]
+    env = {**os.environ, "HOST_UID": str(os.getuid()), "HOST_GID": str(os.getgid())}
     logger.info("building sandbox image %s", image)
     try:
         result = subprocess.run(
             command,
+            cwd=root,
+            env=env,
             capture_output=True,
             text=True,
             timeout=timeout,

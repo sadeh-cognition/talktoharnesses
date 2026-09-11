@@ -12,13 +12,17 @@ ci_setup() {
 }
 
 ci_static() {
+  # Optional first argument selects a render_supported validation mode ("stable"
+  # for the release gate).
+  local validate="${1:-}"
   uv lock --check
   uv run ruff check .
   uv run ruff format --check .
   uv run pyright
   uv run pytest tests/test_migration_drift.py -q --tb=short
-  uv run python scripts/render_supported.py --check
+  uv run python scripts/render_supported.py ${validate:+--validate "$validate"} --check
   uv run python scripts/check_split_drift.py
+  uv run python scripts/render_dockerfiles.py --check
 }
 
 ci_coverage() {
@@ -77,13 +81,7 @@ ci_build() {
 }
 
 ci_stable_gate() {
-  uv lock --check
-  uv run ruff check .
-  uv run ruff format --check .
-  uv run pyright
-  uv run pytest tests/test_migration_drift.py -q --tb=short
-  uv run python scripts/render_supported.py --validate stable --check
-  uv run python scripts/check_split_drift.py
+  ci_static stable
   ci_coverage --cov-fail-under=91
   ci_providers
   ci_performance

@@ -19,7 +19,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+from splits import KINDS, package_name, split_root
 
 
 @dataclass(frozen=True)
@@ -29,7 +29,7 @@ class Split:
 
     @property
     def package(self) -> str:
-        return "tth_" + self.kind.replace("-", "_")
+        return package_name(self.kind)
 
     @property
     def upper(self) -> str:
@@ -37,7 +37,7 @@ class Split:
 
     @property
     def root(self) -> Path:
-        return ROOT / f"tth-{self.kind}"
+        return split_root(self.kind)
 
     @property
     def group(self) -> str:
@@ -53,6 +53,7 @@ SPLITS: tuple[Split, ...] = (
     Split("claude", None),
     Split("codex", None),
 )
+assert {split.kind for split in SPLITS} == set(KINDS)
 
 # Files that must be identical (after normalization) across every split that has
 # them. ``grouped`` files are allowed to differ between the supervised and the
