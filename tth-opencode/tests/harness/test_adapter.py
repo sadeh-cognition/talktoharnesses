@@ -1050,3 +1050,59 @@ async def test_mcp_attachment_on_create_and_resume(resume: bool, mcp_status: str
         )
     finally:
         await adapter._close_http()  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.asyncio
+async def test_create_and_resume_ignore_unknown_session_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Upstream additions to the session body must not break create or resume.
+
+    The adapter reads only ``id`` from the session body. Rejecting unknown keys
+    made every OpenCode release that added a session field unresumable for every
+    stored conversation, which is far worse than tolerating drift here.
+    """
+    monkeypatch.setattr(
+        "tth_opencode.harness.adapter.probe_opencode",
+        _probe_opencode,
+    )
+    unknown_fields: dict[str, Any] = {
+        "parentID": "parent-1",
+        "time": {"created": 1, "updated": 2, "archived": 3},
+        "summary": {"files": 1, "additions": 2, "deletions": 3, "diffs": []},
+        "newField": {"nested": True},
+    }
+    config = HarnessConfiguration(kind=HarnessKind.OPENCODE, working_directory="/tmp")
+
+    client = FakeHttpClient("http://127.0.0.1")
+    client.session_metadata = dict(unknown_fields)
+    adapter = OpenCodeAdapter(http_client_factory=lambda base_url: client)
+    adapter.prepare_port(19510)
+    await adapter.probe(config)
+    session = await adapter.start(
+        StartSessionRequest(
+            conversation_id=uuid4(),
+            binding_id=uuid4(),
+            configuration=config,
+            launch=_launch(),
+        )
+    )
+    assert session.native_session_id == "sess-1"
+    await adapter.close(session)
+
+    resume_client = FakeHttpClient("http://127.0.0.1")
+    resume_client.session_metadata = dict(unknown_fields)
+    resume_adapter = OpenCodeAdapter(http_client_factory=lambda base_url: resume_client)
+    resume_adapter.prepare_port(19511)
+    await resume_adapter.probe(config)
+    resumed = await resume_adapter.resume(
+        ResumeSessionRequest(
+            conversation_id=uuid4(),
+            binding_id=uuid4(),
+            configuration=config,
+            native_session_id="sess-1",
+            launch=_launch(),
+        )
+    )
+    assert resumed.native_session_id == "sess-1"
+    await resume_adapter.close(resumed)

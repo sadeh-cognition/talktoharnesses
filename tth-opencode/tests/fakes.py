@@ -56,21 +56,34 @@ class _FakeOpenCodeHttp:
         self.closed = False
         self.events: asyncio.Queue[bytes] = asyncio.Queue()
 
+    @staticmethod
+    def _session_body(sid: str) -> dict[str, Any]:
+        """A realistic session body, including a key the schemas do not know.
+
+        Real OpenCode returns far more than ``{"id": ...}`` and adds fields
+        between releases; the adapter must keep creating and resuming anyway.
+        """
+        return {
+            "id": sid,
+            "directory": "/tmp",
+            "title": "conformance",
+            "version": "1.2.27",
+            "time": {"created": 1, "updated": 2, "archived": None},
+            "unknownUpstreamField": {"nested": True},
+        }
+
     async def get(self, path: str) -> _HttpResponse:
         if path == "/global/health":
             return _HttpResponse(200, {"healthy": True, "version": "1.2.27"})
         if path.startswith("/session/"):
             sid = path.rsplit("/", 1)[-1]
-            if sid != self.session_id and sid != self.session_id:
-                # Allow resume of known id only; create path sets session_id.
-                return _HttpResponse(200, {"id": sid})
-            return _HttpResponse(200, {"id": sid})
+            return _HttpResponse(200, self._session_body(sid))
         return _HttpResponse(404, {})
 
     async def post(self, path: str, json: dict[str, Any] | None = None) -> _HttpResponse:
         del json
         if path == "/session":
-            return _HttpResponse(200, {"id": self.session_id})
+            return _HttpResponse(200, self._session_body(self.session_id))
         if path.endswith("/prompt_async"):
             payload = {
                 "type": "session.status",

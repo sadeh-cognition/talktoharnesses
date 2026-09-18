@@ -7,6 +7,11 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 _STRICT = ConfigDict(extra="forbid", frozen=True)
+# The adapter reads only ``id`` from ``POST /session`` and ``GET /session/{id}``.
+# Forbidding extras there turned every upstream session field addition into a
+# resume failure for every stored conversation, so the session body and the
+# nested objects only it uses tolerate unknown keys.
+_SESSION_BODY = ConfigDict(extra="ignore", frozen=True)
 
 
 class OpenCodeHealth(BaseModel):
@@ -17,14 +22,14 @@ class OpenCodeHealth(BaseModel):
 
 
 class OpenCodeSessionTime(BaseModel):
-    model_config = _STRICT
+    model_config = _SESSION_BODY
 
     created: int | None = None
     updated: int | None = None
 
 
 class OpenCodeSessionSummary(BaseModel):
-    model_config = _STRICT
+    model_config = _SESSION_BODY
 
     additions: int | None = None
     deletions: int | None = None
@@ -32,7 +37,7 @@ class OpenCodeSessionSummary(BaseModel):
 
 
 class OpenCodeSession(BaseModel):
-    model_config = _STRICT
+    model_config = _SESSION_BODY
 
     id: str
     title: str | None = None
