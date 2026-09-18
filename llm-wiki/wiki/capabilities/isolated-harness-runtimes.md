@@ -27,13 +27,17 @@ The proxy's `RuntimeManager` mirrors split sessions through `RemoteProcessHandle
 
 Split images for claude, codex, cursor, and opencode also carry the RTK command rewriter (`rtk`), which prefixes shell commands so the harness reads trimmed output. Claude applies it as an in-process SDK `PreToolUse` hook (`tth_claude.harness.rtk_hook`); the proxy seeds the cursor hook, opencode plugin, and codex rules file into the kind's home volume with `rtk init` during sandbox preparation (`talktoharnesses.remote.sandbox_rtk`). Seeding fails open. grok and muse are not supported by RTK, and prime_agent's `ipython` shell tool is invisible to RTK's Pi extension, so those images are untouched.
 
+Every image carries `uv`, Node 22, `npm` and `corepack` for agents working in mounted projects, with interpreter and package caches on the per-kind `/data` volume; the split service's own venv is root-owned, off `PATH` and never referenced by an exported `UV_*` variable, and the harness child inherits neither the split token nor the split's Django settings module. Before a session starts or resumes in a working directory, the proxy runs that directory's repo-declared `.tth/setup.sh` inside the sandbox (stamped, locked, timed out, and reported through `workspace_setup_started` / `workspace_setup_completed`); a failing setup fails the turn with `workspace_setup_failed`. See [Provision sandbox workspaces](../requirements/provision-sandbox-workspaces.md).
+
 ## Requirements
 
 - [Host Django ASGI with readiness](../requirements/host-django-asgi-with-readiness.md)
 - [Submit turns and stream events](../requirements/submit-turns-and-stream-events.md)
+- [Provision sandbox workspaces](../requirements/provision-sandbox-workspaces.md)
 
 ## Related
 
 - [Runtime isolation architecture](../architecture/runtime-isolation.md)
 - [Runtime isolation decision](../decisions/runtime-isolation.md)
+- [Sandbox toolchain hygiene decision](../decisions/sandbox-toolchain-hygiene.md)
 - [System context](../architecture/system-context.md)

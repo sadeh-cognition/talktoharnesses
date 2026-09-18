@@ -60,6 +60,8 @@ from tth_types.events import TurnStartedPayload as TurnStartedPayload
 from tth_types.events import TurnSteeringPayload as TurnSteeringPayload
 from tth_types.events import TurnWaitingPayload as TurnWaitingPayload
 from tth_types.events import UsageUpdatedPayload as UsageUpdatedPayload
+from tth_types.events import WorkspaceSetupCompletedPayload as WorkspaceSetupCompletedPayload
+from tth_types.events import WorkspaceSetupStartedPayload as WorkspaceSetupStartedPayload
 from tth_types.events import conversation_event_adapter as conversation_event_adapter
 from tth_types.events import event_payload_adapter as event_payload_adapter
 from tth_types.events import event_turn_id as event_turn_id

@@ -195,6 +195,7 @@ class ErrorCode(StrEnum):
     SANDBOX_PREPARING = "sandbox_preparing"
     SANDBOX_UNAVAILABLE = "sandbox_unavailable"
     SANDBOX_PATH_NOT_MOUNTED = "sandbox_path_not_mounted"
+    WORKSPACE_SETUP_FAILED = "workspace_setup_failed"
     NO_ACTIVE_TURN = "no_active_turn"
     NO_QUEUED_PROMPT = "no_queued_prompt"
     IDEMPOTENCY_CONFLICT = "idempotency_conflict"

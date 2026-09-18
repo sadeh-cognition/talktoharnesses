@@ -48,8 +48,8 @@ accepted; `latest_verified` is advisory only.
 ## Codex
 
 - Adapter version: `2026.8.5`
-- Floor: SDK `0.144.4` + `openai-codex-cli-bin` `0.144.4` (exact) on linux
-- Latest verified: `codex-openai-codex-0.144.4` on linux
+- Floor: SDK `0.154.0` + `openai-codex-cli-bin` `0.154.0` (exact) on linux
+- Latest verified: `codex-openai-codex-0.154.0` on linux
 - Models, modes, and efforts are discovered at probe from the installed CLI.
 
 ### Adapter capabilities

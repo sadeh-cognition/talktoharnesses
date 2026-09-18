@@ -833,6 +833,11 @@ async def test_steer_failure_queues_instead_of_delivered() -> None:
         ),
         DomainError(ErrorCode.PROTOCOL_ERROR, "split HTTP 500"),
         DomainError(ErrorCode.RUNTIME_TIMEOUT, "startup timed out"),
+        DomainError(
+            ErrorCode.WORKSPACE_SETUP_FAILED,
+            "private output: .tth/setup.sh exited 7",
+            details={"reason": "exit_status", "exit_code": 7, "output_tail": "private output"},
+        ),
         RuntimeError("unexpected startup failure with private output"),
     ],
 )
@@ -919,6 +924,10 @@ async def test_startup_error_settles_command_instead_of_retrying(
     assert "private output" not in failures[0].message
     if expected_code is ErrorCode.PROVIDER_INCOMPATIBLE:
         assert "authentication failed" in failures[0].message
+    if expected_code is ErrorCode.WORKSPACE_SETUP_FAILED:
+        assert failures[0].message == (
+            "workspace setup script (.tth/setup.sh) exited with an error"
+        )
     await processor._handle_command(claimed)  # pyright: ignore[reportPrivateUsage]
     assert len(publisher.events) == 1
 

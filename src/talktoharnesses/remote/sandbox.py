@@ -14,6 +14,7 @@ import asyncio
 import logging
 import os
 import secrets
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -25,7 +26,7 @@ from tth_types.base import FROZEN
 from tth_types.enums import ErrorCode, HarnessKind
 from tth_types.errors import DomainError
 
-from talktoharnesses.remote import docker_ops, sandbox_auth, sandbox_rtk
+from talktoharnesses.remote import docker_ops, sandbox_auth, sandbox_rtk, sandbox_workspace
 from talktoharnesses.remote.docker_ops import HOST_GATEWAY_ALIAS as _HOST_GATEWAY_ALIAS
 from talktoharnesses.remote.docker_ops import container_otlp_endpoint as _container_otlp_endpoint
 from talktoharnesses.remote.docker_ops import (
@@ -34,6 +35,10 @@ from talktoharnesses.remote.docker_ops import (
 from talktoharnesses.remote.docker_ops import kind_slug as _kind_slug
 from talktoharnesses.remote.docker_ops import rewrite_loopback_url as rewrite_loopback_url
 from talktoharnesses.remote.sandbox_auth import AuthFileSpec as AuthFileSpec
+from talktoharnesses.remote.sandbox_workspace import TOOLCHAIN_ENV as TOOLCHAIN_ENV
+from talktoharnesses.remote.sandbox_workspace import WorkspaceSetupFailed as WorkspaceSetupFailed
+from talktoharnesses.remote.sandbox_workspace import WorkspaceSetupOutcome as WorkspaceSetupOutcome
+from talktoharnesses.remote.sandbox_workspace import WorkspaceSetupStarted as WorkspaceSetupStarted
 
 logger = logging.getLogger(__name__)
 
@@ -61,10 +66,15 @@ DEFAULT_ENV_PASSTHROUGH: dict[HarnessKind, tuple[str, ...]] = {
 _OTEL_ENDPOINT_ENV = "OTEL_EXPORTER_OTLP_ENDPOINT"
 _OTEL_HEADERS_ENV = "OTEL_EXPORTER_OTLP_HEADERS"
 # Container env the manager owns; operator passthrough may never override it.
-_MANAGED_ENV_KEYS = frozenset({"TTH_SPLIT_TOKEN", _OTEL_ENDPOINT_ENV, _OTEL_HEADERS_ENV})
+_MANAGED_ENV_KEYS = frozenset(
+    {"TTH_SPLIT_TOKEN", _OTEL_ENDPOINT_ENV, _OTEL_HEADERS_ENV, *TOOLCHAIN_ENV}
+)
 
 
 _CONTAINER_PORT = 8010
+DEFAULT_WORKSPACE_SETUP_TIMEOUT = 900.0
+# Headroom over the runner's own deadline before the proxy gives up on the exec.
+_WORKSPACE_SETUP_GRACE = 60.0
 
 
 def _split_port_env(kind: HarnessKind) -> str:
@@ -108,6 +118,10 @@ class SandboxConfig(BaseModel):
     health_poll_interval: float = 1.0
     build_timeout: float = 1800.0
     prepare_grace: float = 60.0
+    # Repo-declared ``.tth/setup.sh`` runs before a session starts in a
+    # working directory; TTH_WORKSPACE_SETUP=0 is the operator kill switch.
+    workspace_setup_enabled: bool = True
+    workspace_setup_timeout: float = DEFAULT_WORKSPACE_SETUP_TIMEOUT
 
     @classmethod
     def from_env(cls, environ: dict[str, str] | None = None) -> SandboxConfig:
@@ -129,6 +143,7 @@ class SandboxConfig(BaseModel):
             mount_roots = tuple(root.strip() for root in raw_mount_roots.split(":") if root.strip())
         else:
             mount_roots = (str(Path(home) / "dev"),) if home else ()
+        raw_setup_timeout = env.get("TTH_WORKSPACE_SETUP_TIMEOUT")
         return cls(
             ports=ports,
             image_tag=env.get("TTH_SANDBOX_IMAGE_TAG", "latest"),
@@ -136,6 +151,10 @@ class SandboxConfig(BaseModel):
             env_passthrough=passthrough,
             auth_files=auth_files,
             forward_otel_headers=env.get("TTH_SANDBOX_FORWARD_OTEL_HEADERS") == "1",
+            workspace_setup_enabled=env.get("TTH_WORKSPACE_SETUP") != "0",
+            workspace_setup_timeout=(
+                float(raw_setup_timeout) if raw_setup_timeout else DEFAULT_WORKSPACE_SETUP_TIMEOUT
+            ),
         )
 
 
@@ -198,12 +217,23 @@ class SandboxManager:
     _auth_signatures: dict[HarnessKind, sandbox_auth.AuthSignature | None] = field(
         default_factory=dict[HarnessKind, sandbox_auth.AuthSignature | None]
     )
+    _workspace_locks: dict[tuple[HarnessKind, str], asyncio.Lock] = field(
+        default_factory=dict[tuple[HarnessKind, str], asyncio.Lock]
+    )
 
     def _lock_for(self, kind: HarnessKind) -> asyncio.Lock:
         lock = self._locks.get(kind)
         if lock is None:
             lock = asyncio.Lock()
             self._locks[kind] = lock
+        return lock
+
+    def _workspace_lock_for(self, kind: HarnessKind, working_directory: str) -> asyncio.Lock:
+        key = (kind, working_directory)
+        lock = self._workspace_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._workspace_locks[key] = lock
         return lock
 
     def _port_for(self, kind: HarnessKind) -> int:
@@ -258,6 +288,83 @@ class SandboxManager:
                 f"sandbox for {kind.value} is being prepared",
                 details={"kind": kind.value},
             ) from None
+
+    async def prepare_workspace(
+        self,
+        kind: HarnessKind,
+        working_directory: str,
+        *,
+        redaction_patterns: tuple[str, ...] = (),
+        on_started: Callable[[WorkspaceSetupStarted], None] | None = None,
+    ) -> WorkspaceSetupOutcome | None:
+        """Run the working directory's ``.tth/setup.sh`` in the kind's sandbox.
+
+        Returns ``None`` when workspace setup is disabled. Callers resolve the
+        kind's endpoint first so the container is running and healthy.
+        Raises ``DomainError(WORKSPACE_SETUP_FAILED)`` on any failure.
+        """
+        self._require_mounted(kind, (working_directory,))
+        if not self.config.workspace_setup_enabled:
+            return None
+        timeout = self.config.workspace_setup_timeout
+        loop = asyncio.get_running_loop()
+        # Contract with the caller: ``on_started`` never fires after this
+        # coroutine has returned. The worker thread outlives a cancelled or
+        # timed-out await (a thread cannot be cancelled), so its callback is
+        # dropped here rather than left for every caller to guard against.
+        active = True
+
+        def deliver(event: WorkspaceSetupStarted) -> None:
+            if active and on_started is not None:
+                on_started(event)
+
+        def started(event: WorkspaceSetupStarted) -> None:
+            if active:
+                loop.call_soon_threadsafe(deliver, event)
+
+        try:
+            async with self._workspace_lock_for(kind, working_directory):
+                try:
+                    return await asyncio.wait_for(
+                        asyncio.to_thread(
+                            self._run_workspace_setup,
+                            kind,
+                            working_directory,
+                            timeout=timeout,
+                            redaction_patterns=redaction_patterns,
+                            on_started=started,
+                        ),
+                        timeout + _WORKSPACE_SETUP_GRACE,
+                    )
+                except TimeoutError:
+                    raise sandbox_workspace.WorkspaceSetupFailed(
+                        "timeout",
+                        kind=kind,
+                        working_directory=working_directory,
+                        message=f"workspace setup for {working_directory} did not finish in time",
+                    ) from None
+        finally:
+            active = False
+
+    def _run_workspace_setup(
+        self,
+        kind: HarnessKind,
+        working_directory: str,
+        *,
+        timeout: float,
+        redaction_patterns: tuple[str, ...],
+        on_started: Callable[[WorkspaceSetupStarted], None],
+    ) -> WorkspaceSetupOutcome:
+        """Blocking docker-py path; always called via asyncio.to_thread."""
+        return sandbox_workspace.run_setup(
+            self._docker_client(kind),
+            container_name=self._container_name(kind),
+            kind=kind,
+            working_directory=working_directory,
+            timeout=timeout,
+            redaction_patterns=redaction_patterns,
+            on_started=on_started,
+        )
 
     async def _prepare(self, kind: HarnessKind) -> SplitEndpoint:
         name = self._container_name(kind)
@@ -356,6 +463,7 @@ class SandboxManager:
         # OTEL_SERVICE_NAME is deliberately not forwarded: each split bakes
         # its own service name.
         environment = {
+            **TOOLCHAIN_ENV,
             "TTH_SPLIT_TOKEN": token,
             _OTEL_ENDPOINT_ENV: _container_otlp_endpoint(os.environ.get(_OTEL_ENDPOINT_ENV)),
         }
@@ -393,9 +501,7 @@ class SandboxManager:
             if "=" in item
         }
         managed_environment = {
-            "TTH_SPLIT_TOKEN",
-            _OTEL_ENDPOINT_ENV,
-            _OTEL_HEADERS_ENV,
+            *_MANAGED_ENV_KEYS,
             *self.config.env_passthrough.get(kind, ()),
         }
         if any(

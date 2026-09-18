@@ -83,6 +83,32 @@ class SessionFailedPayload(BaseModel):
     message: str
 
 
+class WorkspaceSetupStartedPayload(BaseModel):
+    """The sandbox began running the working directory's ``.tth/setup.sh``."""
+
+    model_config = FROZEN
+
+    type: Literal["workspace_setup_started"] = "workspace_setup_started"
+    binding_id: UUID
+    working_directory: str
+    setup_file: str
+    stamp: str
+
+
+class WorkspaceSetupCompletedPayload(BaseModel):
+    """Outcome of a ``.tth/setup.sh`` run; ``output_tail`` is redacted and bounded."""
+
+    model_config = FROZEN
+
+    type: Literal["workspace_setup_completed"] = "workspace_setup_completed"
+    binding_id: UUID
+    working_directory: str
+    status: Literal["succeeded", "failed", "timed_out"]
+    exit_code: int | None = None
+    duration_ms: int | None = None
+    output_tail: str = ""
+
+
 class ProcessStderrTruncatedPayload(BaseModel):
     model_config = FROZEN
 
@@ -546,6 +572,8 @@ EventPayload = Annotated[
     | SessionRotatedPayload
     | SessionClosedPayload
     | SessionFailedPayload
+    | WorkspaceSetupStartedPayload
+    | WorkspaceSetupCompletedPayload
     | ProcessStderrTruncatedPayload
     | ProcessHealthPayload
     | ProcessExitedPayload

@@ -45,6 +45,7 @@ async def test_live_codex_through_tth_docker_sandbox(live_http: LiveHttp) -> Non
         configuration=HarnessConfiguration(
             kind=HarnessKind.CODEX,
             working_directory=str(live_http.workspace),
+            model="gpt-6-astra",
             mode="workspace_write",
         ),
     )

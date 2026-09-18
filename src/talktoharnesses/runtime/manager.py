@@ -63,6 +63,7 @@ from talktoharnesses.runtime.events import (
 )
 from talktoharnesses.runtime.paths import resolve_directory
 from talktoharnesses.runtime.policy import RuntimePolicy
+from talktoharnesses.runtime.workspace_setup import WorkspaceSetupRecorder, prepare_workspace
 
 logger = logging.getLogger(__name__)
 
@@ -437,6 +438,23 @@ class RuntimeManager:
             )
             state = await self._persistence.get_worker_snapshot(conversation_id)
 
+            # A changed image or manifest since the crash reruns .tth/setup.sh
+            # here exactly as a client resume would; a matching stamp is free.
+            await prepare_workspace(
+                plan.adapter,
+                configuration,
+                recorder=WorkspaceSetupRecorder(
+                    self._persistence,
+                    self._clock,
+                    conversation_id=conversation_id,
+                    binding_id=binding.id,
+                    worker_id=worker_id,
+                    fence=fence,
+                    refresh=lambda: self._persistence.get_worker_snapshot(conversation_id),
+                ),
+            )
+            state = await self._persistence.get_worker_snapshot(conversation_id)
+
             try:
                 session = await _await_start_resume(
                     plan.adapter,
@@ -677,6 +695,24 @@ class RuntimeManager:
                 events=(),
                 worker_id=worker_id,
                 fence=fence,
+            )
+            state = await self._persistence.get_snapshot(conversation_id, owner_id)
+
+            # A repo-declared .tth/setup.sh runs in the sandbox before the
+            # harness does; its failure fails the session like any startup
+            # DomainError below.
+            await prepare_workspace(
+                adapter,
+                configuration,
+                recorder=WorkspaceSetupRecorder(
+                    self._persistence,
+                    self._clock,
+                    conversation_id=conversation_id,
+                    binding_id=binding.id,
+                    worker_id=worker_id,
+                    fence=fence,
+                    refresh=lambda: self._persistence.get_snapshot(conversation_id, owner_id),
+                ),
             )
             state = await self._persistence.get_snapshot(conversation_id, owner_id)
 
@@ -1046,6 +1082,9 @@ class RuntimeManager:
                 configuration=configuration,
                 adapter_version=adapter_version,
             )
+            # Candidates write no lifecycle rows, so workspace setup runs
+            # without its events; a failure still rejects the candidate.
+            await prepare_workspace(plan.adapter, configuration, recorder=None)
             # Candidates always create a new native session; never resume.
             session = await _await_start_resume(
                 plan.adapter,

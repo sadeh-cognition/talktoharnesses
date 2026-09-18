@@ -15,6 +15,47 @@ verified_against_commit: 78003994d9fe93108ce5a6bc3591ab2e2ef904d9
 
 Entries are appended using `## [YYYY-MM-DD] operation | Title`.
 
+## [2026-09-18] operation | Harden workspace setup lifecycle
+
+- Review follow-ups on workspace provisioning: setup moved out of the
+  manager into `runtime/workspace_setup.py`, whose `prepare_workspace` now
+  serves client starts, recovery resumes and candidate runtimes (recovery
+  previously skipped setup, so an image or manifest change went unchecked).
+- `WorkspaceSetupRecorder` owns the setup event commits and writes no
+  process row, so a late `on_started` from the uncancellable docker exec
+  thread can no longer revive a failed process; conflicts are retried instead
+  of escaping as a retryable `optimistic_conflict`.
+  `SandboxManager.prepare_workspace` also stops delivering the callback once
+  it has returned. The sandbox raises a typed `WorkspaceSetupFailed`
+  (`reason`, `exit_code`, `output_tail`) instead of a details dict the
+  runtime had to pick apart.
+- Runner: SIGKILL is sent to the whole process group after the grace period
+  independent of the shell's fate; the `fcntl` import is deferred so the
+  proxy package imports on Windows.
+- Proxy: setup output is kept as a rolling 4 KiB tail and logged line by line
+  while streaming instead of accumulating in memory.
+- Updated [Provision sandbox workspaces](requirements/provision-sandbox-workspaces.md)
+  (behavior, gap, acceptance criteria).
+
+## [2026-09-18] ingest | Sandbox workspace provisioning
+
+- Added the approved product source `raw/product/sandbox-workspace-provisioning.md`
+  (approved 2026-09-18): TTH owns project-environment setup inside sandboxes
+  through a repo-declared `.tth/setup.sh`, toolchains download on demand into
+  `/data`, and the split service's runtime is invisible to agents.
+- New requirement [Provision sandbox workspaces](requirements/provision-sandbox-workspaces.md)
+  and decision [Sandbox toolchain hygiene](decisions/sandbox-toolchain-hygiene.md);
+  updated split-services, isolated-harness-runtimes, deployment, the HTTP API
+  map, requirements-by-status and the index.
+- Implementation: root-owned `/opt/tth/venv` and Node/corepack in every
+  rendered Dockerfile, managed toolchain env and `SandboxManager.prepare_workspace`,
+  the in-container `workspace_runner`, `RuntimeManager` events
+  `workspace_setup_started` / `workspace_setup_completed`, error code
+  `workspace_setup_failed`, and split-side `private_env.seal`.
+- Verified against `f7e2c5e25226f669f969fe6ff5fbf25b8af5fa96` plus the
+  workspace provisioning work in the working tree; the live gate
+  `tests/live/test_sandbox_workspace_live.py` passed against a codex image.
+
 ## [2026-09-02] operation | Document the runtime close endpoint
 
 - Added `POST /conversations/{id}/runtime/close` to the HTTP API map and the

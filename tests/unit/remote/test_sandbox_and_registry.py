@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import shutil
+import threading
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,9 +21,12 @@ from talktoharnesses.remote.adapter import RemoteHarnessAdapter
 from talktoharnesses.remote.docker_ops import container_otlp_endpoint
 from talktoharnesses.remote.registry import build_remote_adapter_registry
 from talktoharnesses.remote.sandbox import (
+    TOOLCHAIN_ENV,
     SandboxConfig,
     SandboxManager,
     SandboxRecordData,
+    WorkspaceSetupOutcome,
+    WorkspaceSetupStarted,
     ensure_docker_cli_available,
 )
 from talktoharnesses.remote.sandbox_auth import AUTH_FILE_DEFAULTS
@@ -1130,3 +1135,217 @@ def test_reconcile_recreates_container_whose_image_was_pruned(
     )
 
     assert events == ["reload", "stop", "remove(force=True)", "run:tth-muse:latest"]
+
+
+# ---------------------------------------------------------------------------
+# Workspace setup and toolchain environment
+# ---------------------------------------------------------------------------
+
+
+def test_environment_injects_toolchain_caches_and_passthrough_cannot_override_them(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("UV_CACHE_DIR", "/operator/uv")
+    config = SandboxConfig.from_env({"TTH_SANDBOX_ENV_GROK": "UV_CACHE_DIR,XAI_API_KEY"})
+    manager = SandboxManager(config)
+
+    environment = manager._environment(  # pyright: ignore[reportPrivateUsage]
+        HarnessKind.GROK, "tok"
+    )
+
+    for name, value in TOOLCHAIN_ENV.items():
+        assert environment[name] == value
+    assert environment["UV_CACHE_DIR"] == "/data/uv/cache"
+    # The image exports no uv settings of its own; only the caches are managed.
+    assert "UV_PROJECT_ENVIRONMENT" not in environment
+    assert "UV_PYTHON_DOWNLOADS" not in environment
+
+
+def test_container_without_toolchain_env_is_recreated(tmp_path: Path) -> None:
+    config = SandboxConfig(mount_roots=(str(tmp_path),))
+    manager = SandboxManager(config)
+    environment = manager._environment(  # pyright: ignore[reportPrivateUsage]
+        HarnessKind.CODEX, "split"
+    )
+    env_lines = [f"{name}={value}" for name, value in environment.items()]
+    container: Any = SimpleNamespace(
+        image=SimpleNamespace(tags=["tth-codex:latest"]),
+        attrs={
+            "Config": {"Env": list(env_lines)},
+            "HostConfig": {
+                "PortBindings": {"8010/tcp": [{"HostIp": "127.0.0.1", "HostPort": "8113"}]},
+                "SecurityOpt": ["no-new-privileges:true", "seccomp=unconfined"],
+                "PidsLimit": 512,
+                "ExtraHosts": ["host.docker.internal:host-gateway"],
+            },
+            "Mounts": [
+                {"Destination": "/home/agent", "Name": "tth-codex-home", "Type": "volume"},
+                {"Destination": "/data", "Name": "tth-codex-data", "Type": "volume"},
+                {"Destination": str(tmp_path), "Type": "bind"},
+            ],
+        },
+    )
+
+    def matches() -> bool:
+        return manager._container_matches(  # pyright: ignore[reportPrivateUsage]
+            container,
+            HarnessKind.CODEX,
+            image="tth-codex:latest",
+            name="tth-codex",
+            environment=environment,
+        )
+
+    assert matches()
+    # A container from before the toolchain rollout carries none of the cache vars.
+    container.attrs["Config"]["Env"] = [
+        line for line in env_lines if not line.startswith("UV_PYTHON_INSTALL_DIR=")
+    ]
+    assert not matches()
+
+
+def test_from_env_reads_workspace_setup_settings() -> None:
+    default = SandboxConfig.from_env({})
+    assert default.workspace_setup_enabled is True
+    assert default.workspace_setup_timeout == 900.0
+
+    tuned = SandboxConfig.from_env(
+        {"TTH_WORKSPACE_SETUP": "0", "TTH_WORKSPACE_SETUP_TIMEOUT": "120"}
+    )
+    assert tuned.workspace_setup_enabled is False
+    assert tuned.workspace_setup_timeout == 120.0
+
+
+async def test_prepare_workspace_rejects_unmounted_paths_before_docker(tmp_path: Path) -> None:
+    manager = SandboxManager(SandboxConfig(mount_roots=(str(tmp_path),)))
+
+    with pytest.raises(DomainError) as excinfo:
+        await manager.prepare_workspace(HarnessKind.CODEX, "/elsewhere/project")
+
+    assert excinfo.value.code is ErrorCode.SANDBOX_PATH_NOT_MOUNTED
+
+
+async def test_prepare_workspace_kill_switch_runs_nothing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    manager = SandboxManager(
+        SandboxConfig(mount_roots=(str(tmp_path),), workspace_setup_enabled=False)
+    )
+
+    def unexpected(*args: Any, **kwargs: Any) -> WorkspaceSetupOutcome:
+        raise AssertionError("setup must not run when disabled")
+
+    monkeypatch.setattr(manager, "_run_workspace_setup", unexpected)
+
+    assert await manager.prepare_workspace(HarnessKind.CODEX, str(tmp_path / "p")) is None
+
+
+async def test_prepare_workspace_serializes_per_kind_and_directory(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    manager = SandboxManager(SandboxConfig(mount_roots=(str(tmp_path),)))
+    active = 0
+    peak = 0
+    started_events: list[WorkspaceSetupStarted] = []
+
+    def run(
+        kind: HarnessKind,
+        working_directory: str,
+        *,
+        timeout: float,
+        redaction_patterns: tuple[str, ...],
+        on_started: Any,
+    ) -> WorkspaceSetupOutcome:
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        on_started(
+            WorkspaceSetupStarted(
+                working_directory=working_directory, setup_file=".tth/setup.sh", stamp="s"
+            )
+        )
+        import time
+
+        time.sleep(0.05)
+        active -= 1
+        assert timeout == 900.0
+        assert redaction_patterns == ("hush",)
+        return WorkspaceSetupOutcome(status="succeeded", working_directory=working_directory)
+
+    monkeypatch.setattr(manager, "_run_workspace_setup", run)
+    directory = str(tmp_path / "p")
+
+    outcomes = await asyncio.gather(
+        manager.prepare_workspace(
+            HarnessKind.CODEX,
+            directory,
+            redaction_patterns=("hush",),
+            on_started=started_events.append,
+        ),
+        manager.prepare_workspace(
+            HarnessKind.CODEX,
+            directory,
+            redaction_patterns=("hush",),
+            on_started=started_events.append,
+        ),
+    )
+
+    assert peak == 1
+    assert [outcome.status for outcome in outcomes if outcome is not None] == [
+        "succeeded",
+        "succeeded",
+    ]
+    # on_started is delivered on the event loop, not the worker thread.
+    assert [event.working_directory for event in started_events] == [directory, directory]
+
+
+async def test_prepare_workspace_maps_proxy_side_timeout(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    manager = SandboxManager(
+        SandboxConfig(mount_roots=(str(tmp_path),), workspace_setup_timeout=0.01)
+    )
+    monkeypatch.setattr("talktoharnesses.remote.sandbox._WORKSPACE_SETUP_GRACE", 0.01, raising=True)
+
+    def hang(*args: Any, **kwargs: Any) -> WorkspaceSetupOutcome:
+        import time
+
+        time.sleep(0.5)
+        return WorkspaceSetupOutcome(status="absent", working_directory="x")
+
+    monkeypatch.setattr(manager, "_run_workspace_setup", hang)
+
+    with pytest.raises(DomainError) as excinfo:
+        await manager.prepare_workspace(HarnessKind.CODEX, str(tmp_path / "p"))
+
+    assert excinfo.value.code is ErrorCode.WORKSPACE_SETUP_FAILED
+    assert excinfo.value.details["reason"] == "timeout"
+
+
+async def test_prepare_workspace_drops_progress_reported_after_it_returned(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The docker exec thread outlives a timed-out await; its callback must not."""
+    manager = SandboxManager(
+        SandboxConfig(mount_roots=(str(tmp_path),), workspace_setup_timeout=0.01)
+    )
+    monkeypatch.setattr("talktoharnesses.remote.sandbox._WORKSPACE_SETUP_GRACE", 0.01, raising=True)
+    started_events: list[WorkspaceSetupStarted] = []
+    finished = threading.Event()
+
+    def late_start(*args: Any, on_started: Any, **kwargs: Any) -> WorkspaceSetupOutcome:
+        time.sleep(0.1)
+        on_started(WorkspaceSetupStarted(working_directory="x", setup_file="s", stamp="late"))
+        finished.set()
+        return WorkspaceSetupOutcome(status="succeeded", working_directory="x")
+
+    monkeypatch.setattr(manager, "_run_workspace_setup", late_start)
+
+    with pytest.raises(DomainError) as excinfo:
+        await manager.prepare_workspace(
+            HarnessKind.CODEX, str(tmp_path / "p"), on_started=started_events.append
+        )
+    assert excinfo.value.details["reason"] == "timeout"
+
+    await asyncio.to_thread(finished.wait, 2)
+    await asyncio.sleep(0.05)
+    assert started_events == []

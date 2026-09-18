@@ -7,17 +7,18 @@ inside a Docker sandbox the proxy always injects a token at container create.
 from __future__ import annotations
 
 import hmac
-import os
 
 from django.http import HttpRequest
 from ninja.security import APIKeyHeader
+
+from tth_muse.shared.private_env import split_token
 
 
 class SplitTokenAuth(APIKeyHeader):
     param_name = "X-TTH-Split-Token"
 
     def authenticate(self, request: HttpRequest, key: str | None) -> str | None:
-        expected = os.environ.get("TTH_SPLIT_TOKEN")
+        expected = split_token()
         if not expected:
             return "open"
         if key is not None and hmac.compare_digest(key, expected):

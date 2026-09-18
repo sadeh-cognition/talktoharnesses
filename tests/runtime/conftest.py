@@ -267,6 +267,13 @@ class FakeAdapter:
         self.closed = True
 
 
+class ResumingSdkAdapter(FakeAdapter):
+    """SDK-managed adapter that advertises resume support."""
+
+    async def probe(self, config: HarnessConfiguration) -> HarnessCapabilities:
+        return HarnessCapabilities(kind=self.kind, version="test-1", supports_resume=True)
+
+
 @pytest.fixture
 def fake_adapter_factory() -> type[FakeAdapter]:
     FakeAdapter.instances.clear()

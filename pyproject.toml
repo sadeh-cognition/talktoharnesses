@@ -87,6 +87,8 @@ skip_glob = ["**/migrations/**"]
 typeCheckingMode = "strict"
 pythonVersion = "3.11"
 include = ["src", "tests"]
+# tests/test_render_dockerfiles.py imports the Dockerfile template from scripts/.
+extraPaths = ["scripts"]
 # Migrations use Django's untyped historical-model API (same reason Ruff skips them).
 exclude = ["**/migrations/**"]
 

@@ -15,32 +15,32 @@ FROM python:${PYTHON_VERSION}-slim-bookworm
 # by (and committable for) the host-side workflow worker.
 ARG UID=1000
 ARG GID=1000
+# Node 22 is the last line that ships corepack; agents get node/npm/pnpm/yarn
+# in every sandbox regardless of what the harness itself needs.
+ARG NODE_MAJOR=22
 
 ENV PYTHONUNBUFFERED=1
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends git curl ca-certificates \
+    && curl -fsSL https://deb.nodesource.com/setup_${NODE_MAJOR}.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && corepack enable \
     && rm -rf /var/lib/apt/lists/*
 
 RUN groupadd --gid ${GID} agent \
     && useradd --uid ${UID} --gid ${GID} --create-home --shell /bin/bash agent \
-    && mkdir -p /data /opt/venv \
-    && chown ${UID}:${GID} /data /opt/venv
+    && mkdir -p /data \
+    && chown ${UID}:${GID} /data
 
 RUN git config --system user.name "Agentbahn Sandbox Agent" \
     && git config --system user.email "agent-sandbox@localhost" \
     && git config --system safe.directory "*"
 
-# Python packages go into a venv owned by the service user: the SDK-managed
-# harnesses ship their CLI inside site-packages and the executable-ownership
-# check needs it owned by the effective UID (a chown -R afterwards would
-# duplicate the whole layer).
+# Plain uv for agents working in mounted projects. No UV_* settings are exported:
+# the service venv below is built with its own, and an image-wide
+# UV_PROJECT_ENVIRONMENT once let an agent's `uv run` replace the service venv.
 COPY --from=uv /uv /bin/uv
-ENV PATH=/opt/venv/bin:$PATH \
-    UV_PROJECT_ENVIRONMENT=/opt/venv \
-    UV_PYTHON=/usr/local/bin/python3 \
-    UV_PYTHON_DOWNLOADS=never \
-    UV_LINK_MODE=copy
 
 # RTK (https://github.com/rtk-ai/rtk) rewrites shell commands to `rtk <cmd>` so
 # the harness sees a token-trimmed version of the output. Pinned release binary.
@@ -62,19 +62,26 @@ ENV HOME=/home/agent
 # third-party dependencies, then the shared schemas, then the service source.
 ENV DJANGO_SETTINGS_MODULE=tth_claude.settings
 
+# The service runtime is installed by root into /opt/tth/venv, which stays
+# off PATH and read-only for the service user. Executable-ownership checks
+# only apply to the process-bound harness CLIs installed above, never to the
+# venv (the SDK-managed kinds have no checked executable).
+USER root
 # uv.lock pins tth-types as ../tth-types relative to the project directory.
 WORKDIR /app/service
 COPY pyproject.toml README.md uv.lock ./
-RUN --mount=type=cache,target=/home/agent/.cache/uv,uid=${UID},gid=${GID} \
-    uv sync --frozen --no-dev --no-editable \
-      --no-install-project --no-install-package tth-types
+RUN --mount=type=cache,target=/root/.cache/uv \
+    UV_PROJECT_ENVIRONMENT=/opt/tth/venv UV_CACHE_DIR=/root/.cache/uv UV_PYTHON=/usr/local/bin/python3 UV_PYTHON_DOWNLOADS=never UV_LINK_MODE=copy \
+    uv sync --frozen --no-dev --no-editable --no-install-project --no-install-package tth-types
 COPY --from=tth_types pyproject.toml README.md uv.lock ../tth-types/
 COPY --from=tth_types src ../tth-types/src
 COPY src ./src
-RUN --mount=type=cache,target=/home/agent/.cache/uv,uid=${UID},gid=${GID} \
+RUN --mount=type=cache,target=/root/.cache/uv \
+    UV_PROJECT_ENVIRONMENT=/opt/tth/venv UV_CACHE_DIR=/root/.cache/uv UV_PYTHON=/usr/local/bin/python3 UV_PYTHON_DOWNLOADS=never UV_LINK_MODE=copy \
     uv sync --frozen --no-dev --no-editable
+USER agent
 
 EXPOSE 8010
 HEALTHCHECK --interval=15s --timeout=3s --start-period=20s \
     CMD curl -fsS http://127.0.0.1:8010/v1/health || exit 1
-CMD ["python", "-m", "uvicorn", "tth_claude.asgi:application", "--host", "0.0.0.0", "--port", "8010"]
+CMD ["/opt/tth/venv/bin/python", "-m", "uvicorn", "tth_claude.asgi:application", "--host", "0.0.0.0", "--port", "8010"]

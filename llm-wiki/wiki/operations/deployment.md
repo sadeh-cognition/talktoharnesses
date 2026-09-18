@@ -29,6 +29,15 @@ Muse Code uses port 8117 and image `tth-muse`. The proxy forwards
 `TTH_SANDBOX_MUSE_AUTH_FILE` overrides the source. Deployment evidence:
 `src/talktoharnesses/remote/sandbox.py`, `src/talktoharnesses/remote/sandbox_auth.py`, and `tth-muse/Dockerfile`.
 
+Sandboxes provision project environments themselves: a working directory's
+`.tth/setup.sh` runs inside the kind's container before a session starts
+there, toolchain caches live on the per-kind `/data` volume, and
+`TTH_WORKSPACE_SETUP=0` / `TTH_WORKSPACE_SETUP_TIMEOUT` tune it. Upgrading
+from images that exported `UV_PROJECT_ENVIRONMENT` recreates every kind's
+container on its next request. The operator contract is in the repository's
+`deploy/README.md` (Toolchains and caches, Workspace setup); see
+[Provision sandbox workspaces](../requirements/provision-sandbox-workspaces.md).
+
 ## Related
 
 - [Engineering deployment source](../../raw/engineering/deployment.md)
@@ -37,4 +46,5 @@ Muse Code uses port 8117 and image `tth-muse`. The proxy forwards
 - [Upgrading](upgrading.md)
 - [JWT authentication decision](../decisions/jwt-authentication.md)
 - [Split services decision](../decisions/split-services.md)
+- [Provision sandbox workspaces](../requirements/provision-sandbox-workspaces.md)
 - [Approved split runtime ownership](../../raw/product/split-service-runtime-ownership.md)

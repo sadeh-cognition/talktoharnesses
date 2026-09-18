@@ -16,6 +16,7 @@ instrument_django()
 from django.core.asgi import get_asgi_application  # noqa: E402
 
 from tth_muse.sessions import get_session_store  # noqa: E402
+from tth_muse.shared.private_env import seal  # noqa: E402
 
 Scope = MutableMapping[str, Any]
 Message = MutableMapping[str, Any]
@@ -43,3 +44,6 @@ def _lifespan(app: ASGIApp) -> ASGIApp:
 
 
 application = _lifespan(cast(ASGIApp, get_asgi_application()))
+# Django is configured now; harness children must not inherit the split's
+# settings module or the proxy's shared secret.
+seal()

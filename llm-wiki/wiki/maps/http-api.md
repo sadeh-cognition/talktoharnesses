@@ -24,7 +24,7 @@ The Django Ninja API is mounted at `/api/v1`. Health, readiness, and OpenAPI doc
 - Interactions: list pending, draft, resolve.
 - Approval rules and interaction audits.
 - Search and retention.
-- SSE event stream with `Last-Event-ID` replay.
+- SSE event stream with `Last-Event-ID` replay, including the `workspace_setup_started` / `workspace_setup_completed` events that bracket a sandbox's repo-declared setup; a failing setup ends the turn with `workspace_setup_failed` (409 on direct HTTP surfaces).
 
 ## Related
 
@@ -33,3 +33,4 @@ The Django Ninja API is mounted at `/api/v1`. Health, readiness, and OpenAPI doc
 - [Authenticate with JWT](../requirements/authenticate-with-jwt.md)
 - [Host Django ASGI with readiness](../requirements/host-django-asgi-with-readiness.md)
 - [Official HTTP client interface](../interfaces/official-http-client.md)
+- [Provision sandbox workspaces](../requirements/provision-sandbox-workspaces.md)

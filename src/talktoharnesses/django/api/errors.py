@@ -33,6 +33,7 @@ _CONFLICT_CODES = frozenset(
         ErrorCode.NO_QUEUED_PROMPT,
         ErrorCode.SANDBOX_PREPARING,
         ErrorCode.SANDBOX_UNAVAILABLE,
+        ErrorCode.WORKSPACE_SETUP_FAILED,
     }
 )
 

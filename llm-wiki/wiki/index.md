@@ -49,6 +49,7 @@ Use this catalog to route into the maintained knowledge graph. Obsidian users sh
 - [Export and import transcripts](requirements/export-and-import-transcripts.md)
 - [Authenticate with JWT](requirements/authenticate-with-jwt.md)
 - [Host Django ASGI with readiness](requirements/host-django-asgi-with-readiness.md)
+- [Provision sandbox workspaces](requirements/provision-sandbox-workspaces.md)
 - [Host Django and run a conversation](journeys/host-django-and-run-a-conversation.md)
 - [Resolve a pending approval](journeys/resolve-a-pending-approval.md)
 - [Search conversations and apply retention](journeys/search-conversations-and-apply-retention.md)
@@ -81,6 +82,7 @@ Use this catalog to route into the maintained knowledge graph. Obsidian users sh
 - [JWT authentication decision](decisions/jwt-authentication.md)
 - [Retention decision](decisions/retention.md)
 - [Floor-and-probe compatibility decision](decisions/floor-and-probe-compatibility.md)
+- [Sandbox toolchain hygiene decision](decisions/sandbox-toolchain-hygiene.md): repo-declared workspace setup and an agent-proof service runtime.
 - [Development guidelines](operations/development-guidelines.md)
 - [Testing guidelines](operations/testing-guidelines.md)
 - [Deployment](operations/deployment.md)

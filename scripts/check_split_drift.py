@@ -84,6 +84,7 @@ VENDORED_SOURCE: dict[str, bool] = {
     "shared/model_discovery.py": False,
     "shared/paths.py": True,
     "shared/policy.py": False,
+    "shared/private_env.py": False,
     "shared/questions.py": False,
     "shared/redaction.py": False,
     "shared/sse_decoder.py": False,
@@ -98,6 +99,7 @@ VENDORED_TESTS: dict[str, bool] = {
     "acp/test_jsonrpc.py": False,
     "test_effort.py": False,
     "test_logging_config.py": False,
+    "test_private_env.py": False,
     "test_process_bound.py": False,
     "test_telemetry.py": False,
 }

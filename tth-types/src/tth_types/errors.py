@@ -34,6 +34,7 @@ _PUBLIC_MESSAGES: Final[dict[ErrorCode, str]] = {
         "path is not mounted into the harness sandbox; working directories and "
         "workspace roots must live under a mounted host root"
     ),
+    ErrorCode.WORKSPACE_SETUP_FAILED: "workspace setup (.tth/setup.sh) failed",
     ErrorCode.NO_ACTIVE_TURN: "no active turn",
     ErrorCode.NO_QUEUED_PROMPT: "no queued prompt",
     ErrorCode.IDEMPOTENCY_CONFLICT: "idempotency conflict",
@@ -68,6 +69,19 @@ _SANDBOX_UNAVAILABLE_REASONS: Final[dict[str, str]] = {
     ),
 }
 
+# Fixed vocabulary for repo-declared workspace setup failures; the script's
+# own output never reaches these messages.
+_WORKSPACE_SETUP_REASONS: Final[dict[str, str]] = {
+    "exit_status": "workspace setup script (.tth/setup.sh) exited with an error",
+    "timeout": "workspace setup script (.tth/setup.sh) timed out",
+    "lock_timeout": (
+        "workspace setup is already running for this working directory; retry shortly"
+    ),
+    "runner_error": (
+        "workspace setup could not be executed in the sandbox; check TalkToHarnesses server logs"
+    ),
+}
+
 
 def public_message(code: ErrorCode, *, details: Mapping[str, Any] | None = None) -> str:
     """Return a short generic message for a stable error code."""
@@ -81,19 +95,23 @@ def public_message(code: ErrorCode, *, details: Mapping[str, Any] | None = None)
         if version_message is not None:
             return version_message
     if code is ErrorCode.SANDBOX_UNAVAILABLE:
-        reason_message = _sandbox_unavailable_message(details)
+        reason_message = _reason_message(_SANDBOX_UNAVAILABLE_REASONS, details)
+        if reason_message is not None:
+            return reason_message
+    if code is ErrorCode.WORKSPACE_SETUP_FAILED:
+        reason_message = _reason_message(_WORKSPACE_SETUP_REASONS, details)
         if reason_message is not None:
             return reason_message
     return _PUBLIC_MESSAGES.get(code, _DEFAULT_PUBLIC_MESSAGE)
 
 
-def _sandbox_unavailable_message(details: Mapping[str, Any] | None) -> str | None:
+def _reason_message(table: Mapping[str, str], details: Mapping[str, Any] | None) -> str | None:
     if details is None:
         return None
     reason = details.get("reason")
     if not isinstance(reason, str):
         return None
-    return _SANDBOX_UNAVAILABLE_REASONS.get(reason)
+    return table.get(reason)
 
 
 def _version_mismatch_message(details: Mapping[str, Any] | None) -> str | None:

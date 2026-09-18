@@ -35,10 +35,19 @@ and nothing per-kind is set above them, so BuildKit reuses the apt, service-user
 and uv layers across the splits that take the same branch (plain, Node, Cursor's
 extra packages). Images embed the harness CLI (owned by the build UID/GID so the
 split's executable-ownership check passes), install the locked Python
-dependencies with `uv sync --frozen` into `/opt/venv`, and run
-`uvicorn tth_<kind>.asgi:application` on container port 8010. The per-kind
-layers are ordered by change frequency (locked dependencies, tth-types, service
-source), so a source edit rebuilds only the last thin layer.
+dependencies with `uv sync --frozen` into a **root-owned** `/opt/tth/venv`, and
+run `/opt/tth/venv/bin/python -m uvicorn tth_<kind>.asgi:application` on
+container port 8010. That venv is the service's alone: it is not on `PATH`,
+not writable by the service user, and no `UV_*` variable in the image points at
+it, so an agent running `uv sync`, `uv run` or `pip` in a mounted project gets
+uv's ordinary behaviour (a `.venv` in the project) and cannot replace the
+runtime that serves `/v1/health`. The per-kind layers are ordered by change
+frequency (locked dependencies, tth-types, service source), so a source edit
+rebuilds only the last thin layer.
+
+Every image also ships the agent-facing toolchain: `uv`, Node 22 with `npm`,
+and `corepack` (so `pnpm` and `yarn` resolve on first use). See
+[Toolchains and caches](#toolchains-and-caches) for where their downloads go.
 
 Pre-building is an optimization, not a requirement: the proxy builds a missing
 `tth-<kind>` image itself on the first request for that kind (editable/repo
@@ -135,11 +144,97 @@ grok therefore replaces the existing `tth-grok` container the next time a
 grok harness is prepared, which drops any grok sessions still running in it;
 schedule that upgrade when grok conversations are idle.
 
+Upgrading from a build that exported `UV_PROJECT_ENVIRONMENT=/opt/venv` in the
+image likewise recreates every kind's container on its next request, because
+the toolchain cache variables below are now part of the managed environment.
+
 Interactive CLI logins persist in the per-kind home volume, e.g.:
 
 ```sh
 docker exec -it tth-claude claude login
 ```
+
+## Toolchains and caches
+
+Agents (and workspace setup scripts, below) work in bind-mounted projects with
+plain `uv`, `node`, `npm`, `pnpm` and `yarn`. The proxy injects these variables
+into every sandbox container so interpreter downloads and package caches land
+on the persistent per-kind `tth-<kind>-data` volume instead of the container's
+writable layer or the project tree:
+
+| Variable | Value |
+|---|---|
+| `UV_CACHE_DIR` | `/data/uv/cache` |
+| `UV_PYTHON_INSTALL_DIR` | `/data/uv/python` (uv downloads the Python a project pins here) |
+| `UV_LINK_MODE` | `copy` (projects and the cache sit on different filesystems) |
+| `npm_config_cache` | `/data/npm/cache` |
+| `npm_config_update_notifier` | `false` |
+| `COREPACK_HOME` | `/data/corepack` |
+| `COREPACK_ENABLE_DOWNLOAD_PROMPT` | `0` |
+| `npm_config_store_dir` | `/data/pnpm/store` |
+| `YARN_CACHE_FOLDER` | `/data/yarn/cache` |
+
+They are managed like the split token: `TTH_SANDBOX_ENV_<KIND>` cannot override
+them, and a container whose environment lacks them is recreated. Inspect what a
+kind has cached with `docker exec tth-<kind> ls /data/uv/python /data/npm/cache`;
+remove the `tth-<kind>-data` volume to start over.
+
+The harness process itself never sees the split's own configuration: the split
+moves `TTH_SPLIT_TOKEN` and `DJANGO_SETTINGS_MODULE` out of its environment once
+Django is configured, so a Django project's `manage.py` inside the sandbox
+resolves its own settings.
+
+## Workspace setup
+
+A repository declares how its environment is prepared in
+**`.tth/setup.sh`** at the working directory's root. Nothing is detected or
+inferred, and nothing about it crosses the API: TTH runs the file when it is
+there and does nothing when it is not. A Python backend with a Node frontend
+typically ships:
+
+```sh
+uv sync --frozen
+(cd frontend && npm ci)
+```
+
+Contract:
+
+- TTH runs `/bin/bash -e .tth/setup.sh` (no execute bit needed) with the
+  working directory as cwd, as the service user, inside the kind's running
+  container, before every session start or resume in that directory. The
+  script sees the same mounts, resource limits and network as the harness.
+- Environment: `PATH`, `HOME`, `LANG=C.UTF-8`, `TERM=dumb`, `USER=agent`,
+  `TTH_WORKSPACE_SETUP=1`, `TTH_HARNESS_KIND=<kind>` and the toolchain
+  variables above. Provider credentials, the split token and the split's
+  Django settings are never passed. stdin is closed; stdout and stderr are
+  merged.
+- It must be idempotent. TTH stamps a successful run (a digest of the script,
+  the container image and the dependency manifests and lockfiles found in the
+  working directory and one level down: `pyproject.toml`, `uv.lock`,
+  `requirements.txt`, `package.json`, `package-lock.json`, `pnpm-lock.yaml`,
+  `yarn.lock`, `.python-version`, `.nvmrc`, `Cargo.lock`, `go.sum`,
+  `Gemfile.lock` and the like) under `/data/tth/workspaces/<key>/` and skips
+  the script while the stamp matches. Editing any of those, rebuilding the
+  image or a failed run makes the next session run it again.
+- Exit status 0 is success. Anything else fails the session: the turn ends
+  with `turn_failed` / `session_failed` carrying `workspace_setup_failed` and
+  a reason (`exit_status`, `timeout`, `lock_timeout`, `runner_error`); the
+  turn is not retried. The redacted last 4 KiB of output travel in the
+  `workspace_setup_completed` event; the full output is in the proxy log and
+  in `/data/tth/workspaces/<key>/setup.log` (capped at 4 MiB).
+- `workspace_setup_started` and `workspace_setup_completed` events bracket a
+  run so clients can show "preparing workspace"; a missing script or a
+  matching stamp emits nothing.
+- Concurrent sessions in the same directory and kind wait for each other
+  (`asyncio` lock in the proxy, `flock` on the data volume). Different kinds
+  do not serialize; keep the script safe to run twice.
+
+Tuning:
+
+- `TTH_WORKSPACE_SETUP=0` disables workspace setup entirely (operator kill
+  switch; scripts are ignored).
+- `TTH_WORKSPACE_SETUP_TIMEOUT` — seconds a run may take before its process
+  group is killed (default 900).
 
 ## RTK command rewriting
 
@@ -202,6 +297,16 @@ OTLP/HTTP:
 
 The docker sandbox path has an opt-in gate: `TALKTOHARNESSES_SANDBOX_DOCKER=1`
 runs `tests/live/test_sandbox_docker.py`.
+
+Workspace setup has its own credential-free gate:
+`TALKTOHARNESSES_SANDBOX_WORKSPACE=1` runs
+`tests/live/test_sandbox_workspace_live.py`, which boots a throwaway container
+(kind `claude` by default, `TALKTOHARNESSES_SANDBOX_WORKSPACE_KIND` to change
+it; the image must be built), provisions a repository that pins Python 3.13 and
+carries a `frontend/package.json` through `.tth/setup.sh`, and checks the
+stamp, skip, failure, cache and hygiene contracts (`/opt/tth/venv` stays
+read-only and `/v1/health` stays 200). It downloads a Python and an npm
+package, so it needs network access.
 
 Every kind has a sandbox live gate: `tests/live/test_<kind>_sandbox_live.py`,
 enabled with `TALKTOHARNESSES_LIVE_<KIND>_SANDBOX=1`. The fixture selects the

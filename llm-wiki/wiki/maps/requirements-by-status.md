@@ -38,6 +38,7 @@ Plugin-free delivery view of the public contracts documented in this vault.
 - [Export and import transcripts](../requirements/export-and-import-transcripts.md)
 - [Authenticate with JWT](../requirements/authenticate-with-jwt.md)
 - [Host Django ASGI with readiness](../requirements/host-django-asgi-with-readiness.md)
+- [Provision sandbox workspaces](../requirements/provision-sandbox-workspaces.md)
 
 ## Historical decisions
 

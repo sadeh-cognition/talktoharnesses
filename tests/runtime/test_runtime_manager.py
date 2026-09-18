@@ -14,6 +14,7 @@ import pytest
 from tests.runtime.conftest import (
     FakeAdapter,
     MemoryPersistence,
+    ResumingSdkAdapter,
     conversation_id_of,
     make_state,
 )
@@ -26,7 +27,7 @@ from tth_types.process import (
 from tth_types.split_api import ProcessFrame, ProcessSnapshot
 
 from talktoharnesses.domain import DomainError, ErrorCode, HarnessKind, append_events, submit_turn
-from talktoharnesses.domain.enums import ActivityStatus, CommandKind, CommandStatus
+from talktoharnesses.domain.enums import ActivityStatus, CommandKind, CommandStatus, ProcessStatus
 from talktoharnesses.domain.events import ProviderWarningPayload
 from talktoharnesses.domain.models import (
     BackgroundActivity,
@@ -785,24 +786,11 @@ async def test_shutdown_closes_unpromoted_remote_candidate_without_changing_bind
     assert exc.value.code is ErrorCode.INVALID_STATE
 
 
-class _ResumingSdkAdapter(FakeAdapter):
-    """SDK-managed adapter that advertises resume support."""
-
-    sdk_managed = True
-
-    async def probe(self, config: HarnessConfiguration):
-        return HarnessCapabilities(
-            kind=self.kind,
-            version="test-1",
-            supports_resume=True,
-        )
-
-
 class _NoResumeSdkAdapter(FakeAdapter):
     sdk_managed = True
 
 
-class _ResumeRejectingAdapter(_ResumingSdkAdapter):
+class _ResumeRejectingAdapter(ResumingSdkAdapter):
     async def resume(self, request: ResumeSessionRequest) -> HarnessSession:
         del request
         raise DomainError(ErrorCode.PROVIDER_INCOMPATIBLE, "native resume rejected")
@@ -828,7 +816,7 @@ async def test_resume_for_recovery_happy_path(
     store.ownership[cid] = ("worker-a", 3, datetime.now(UTC) + timedelta(hours=1))
 
     registry = AdapterRegistry()
-    registry.register(HarnessKind.OPENCODE, _ResumingSdkAdapter)
+    registry.register(HarnessKind.OPENCODE, ResumingSdkAdapter)
     mgr = RuntimeManager(store, registry, policy=short_policy)
     previous = LaunchSnapshot(
         harness_version="test-1",
@@ -873,7 +861,7 @@ async def test_resume_for_recovery_rejects_busy_and_kind_mismatch(
     cid = state.conversation.id
     store.ownership[cid] = ("worker-a", 1, datetime.now(UTC) + timedelta(hours=1))
     registry = AdapterRegistry()
-    registry.register(HarnessKind.OPENCODE, _ResumingSdkAdapter)
+    registry.register(HarnessKind.OPENCODE, ResumingSdkAdapter)
     mgr = RuntimeManager(store, registry, policy=short_policy)
 
     await mgr.resume_for_recovery(
@@ -1000,7 +988,7 @@ async def test_recovery_handoff_fallback_success_and_failure(
     binding_id = state.binding.id
     store.ownership[cid] = ("worker-a", 2, datetime.now(UTC) + timedelta(hours=1))
     registry = AdapterRegistry()
-    registry.register(HarnessKind.OPENCODE, _ResumingSdkAdapter)
+    registry.register(HarnessKind.OPENCODE, ResumingSdkAdapter)
     mgr = RuntimeManager(store, registry, policy=short_policy)
 
     candidate = await mgr.recovery_handoff_fallback(
@@ -1069,7 +1057,6 @@ async def test_persist_failure_retries_conflict_then_swallows(
     workdir: Path,
     now: datetime,
 ) -> None:
-    from talktoharnesses.domain.enums import ProcessStatus
     from talktoharnesses.domain.models import ProcessRecord
 
     store = MemoryPersistence()
@@ -1134,7 +1121,7 @@ async def test_recovery_handoff_recreation_flag_failure_is_swallowed(
     cid = state.conversation.id
     binding_id = state.binding.id  # type: ignore[union-attr]
     registry = AdapterRegistry()
-    registry.register(HarnessKind.OPENCODE, _ResumingSdkAdapter)
+    registry.register(HarnessKind.OPENCODE, ResumingSdkAdapter)
     mgr = RuntimeManager(store, registry, policy=short_policy)
     mgr.start_candidate = AsyncMock(side_effect=RuntimeError("boom"))  # type: ignore[method-assign]
 
@@ -1171,7 +1158,7 @@ async def test_resume_for_recovery_rejects_when_shutting_down(
     cid = state.conversation.id
     store.ownership[cid] = ("worker-a", 1, datetime.now(UTC) + timedelta(hours=1))
     registry = AdapterRegistry()
-    registry.register(HarnessKind.OPENCODE, _ResumingSdkAdapter)
+    registry.register(HarnessKind.OPENCODE, ResumingSdkAdapter)
     mgr = RuntimeManager(store, registry, policy=short_policy)
     mgr._shutting_down = True  # pyright: ignore[reportPrivateUsage]
     with pytest.raises(DomainError) as exc:
@@ -1199,7 +1186,7 @@ async def test_resume_for_recovery_probe_failure_maps_incompatible(
 
     from talktoharnesses.domain.enums import RecoveryReasonCode
 
-    class _ProbeFailSdk(_ResumingSdkAdapter):
+    class _ProbeFailSdk(ResumingSdkAdapter):
         async def probe(self, config: HarnessConfiguration):
             del config
             raise DomainError(ErrorCode.PROVIDER_INCOMPATIBLE, "probe refused")

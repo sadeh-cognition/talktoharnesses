@@ -8,8 +8,8 @@ split service this adapter talks to.
 from __future__ import annotations
 
 import logging
-from collections.abc import AsyncIterator
-from typing import Protocol
+from collections.abc import AsyncIterator, Callable
+from typing import Protocol, runtime_checkable
 from uuid import UUID
 
 import httpx
@@ -51,6 +51,10 @@ from talktoharnesses._sse import SseDecoder
 from talktoharnesses.domain.events import HarnessEvent
 from talktoharnesses.remote.handle import RemoteProcessHandle
 from talktoharnesses.remote.sandbox import rewrite_loopback_url
+from talktoharnesses.remote.sandbox_workspace import (
+    WorkspaceSetupOutcome,
+    WorkspaceSetupStarted,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +71,24 @@ class SplitEndpointProvider(Protocol):
         kind: HarnessKind,
         required_paths: tuple[str, ...] = (),
     ) -> ResolvedEndpoint: ...
+
+
+@runtime_checkable
+class WorkspaceSetupProvider(Protocol):
+    """Optional: runs a working directory's repo-declared setup in the split's sandbox.
+
+    Implemented by the proxy-managed ``SandboxManager``; a provider for splits
+    reached through a URL has no sandbox to run it in and simply omits it.
+    """
+
+    async def prepare_workspace(
+        self,
+        kind: HarnessKind,
+        working_directory: str,
+        *,
+        redaction_patterns: tuple[str, ...] = (),
+        on_started: Callable[[WorkspaceSetupStarted], None] | None = None,
+    ) -> WorkspaceSetupOutcome | None: ...
 
 
 class ResolvedEndpoint(Protocol):
@@ -231,6 +253,31 @@ class RemoteHarnessAdapter:
         if self._session_id is None:
             raise DomainError(ErrorCode.INVALID_STATE, "remote adapter has no active session")
         return self._session_id
+
+    async def prepare_workspace(
+        self,
+        configuration: HarnessConfiguration,
+        *,
+        on_started: Callable[[WorkspaceSetupStarted], None] | None = None,
+    ) -> WorkspaceSetupOutcome | None:
+        """Run ``.tth/setup.sh`` in the sandbox before a session starts there.
+
+        Duck-typed hook read by RuntimeManager. Returns ``None`` when the
+        endpoint provider has no sandbox to run setup in; raises
+        ``DomainError(WORKSPACE_SETUP_FAILED)`` when the script fails.
+        """
+        provider = self._endpoints
+        if not isinstance(provider, WorkspaceSetupProvider):
+            return None
+        self._required_paths = (configuration.working_directory, *configuration.workspace_roots)
+        # The sandbox must be up before anything can be exec'd in it.
+        await self._resolved_endpoint()
+        return await provider.prepare_workspace(
+            self.kind,
+            configuration.working_directory,
+            redaction_patterns=self._redaction_patterns,
+            on_started=on_started,
+        )
 
     # ------------------------------------------------------------------
     # HarnessAdapter protocol

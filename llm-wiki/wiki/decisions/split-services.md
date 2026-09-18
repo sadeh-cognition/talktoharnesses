@@ -63,6 +63,10 @@ The monolith was split at the `HarnessAdapter` seam in commit `4764402`.
 - Sandbox lifecycle can contain narrowly scoped credential setup required for
   deployment: per-kind host credential files are seeded into the managed home
   volume at container creation. This is not provider adapter or protocol logic.
+- Sandbox lifecycle also runs a working directory's repo-declared
+  `.tth/setup.sh` before a session starts there, from the proxy over
+  `docker exec`; see the
+  [sandbox toolchain hygiene decision](sandbox-toolchain-hygiene.md).
 - Executable-scoped approval rules still resolve against the proxy host
   filesystem, while launch snapshots record container paths; such rules only
   match when the path exists identically on both sides.
@@ -72,6 +76,7 @@ The monolith was split at the `HarnessAdapter` seam in commit `4764402`.
 ## Related
 
 - [Runtime isolation decision](runtime-isolation.md)
+- [Sandbox toolchain hygiene decision](sandbox-toolchain-hygiene.md)
 - [Runtime isolation architecture](../architecture/runtime-isolation.md)
 - [System context](../architecture/system-context.md)
 - [Provider adapters](../architecture/provider-adapters.md)

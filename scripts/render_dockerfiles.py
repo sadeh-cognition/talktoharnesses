@@ -99,7 +99,6 @@ Dockerfile
 @dataclass(frozen=True)
 class Split:
     kind: str  # directory suffix, e.g. "prime-agent"
-    node: bool = False
     extra_apt: tuple[str, ...] = ()
     root_installs: tuple[str, ...] = ()  # before USER agent
     agent_installs: tuple[str, ...] = ()  # as the service user
@@ -108,40 +107,72 @@ class Split:
 SPLITS: dict[str, Split] = {
     split.kind: split
     for split in (
-        Split("grok", node=True, root_installs=(GROK_INSTALL,)),
+        Split("grok", root_installs=(GROK_INSTALL,)),
         Split(
             "cursor",
-            node=True,
             # Pyright's nodeenv Node needs libatomic.so.1 (not in slim).
             extra_apt=("libatomic1", "make", "ripgrep"),
             root_installs=(CURSOR_INSTALL, RTK_INSTALL),
         ),
         Split("codex", root_installs=(RTK_INSTALL,)),
         Split("claude", root_installs=(RTK_INSTALL,)),
-        Split("opencode", node=True, root_installs=(OPENCODE_INSTALL, RTK_INSTALL)),
-        Split("prime-agent", node=True, root_installs=(PRIME_AGENT_INSTALL,)),
+        Split("opencode", root_installs=(OPENCODE_INSTALL, RTK_INSTALL)),
+        Split("prime-agent", root_installs=(PRIME_AGENT_INSTALL,)),
         Split("muse", agent_installs=(MUSE_INSTALL,)),
     )
 }
 assert tuple(SPLITS) == KINDS
+
+# The service runtime. Root-owned and off PATH so nothing an agent runs in a
+# mounted workspace (uv, pip, npm) can see or alter it; only the CMD and
+# HEALTHCHECK name it, by absolute path.
+SERVICE_VENV = "/opt/tth/venv"
+
+# uv settings for building the service venv. They are scoped to the two RUN
+# lines below instead of the image ENV so the agent's shell gets uv's dev-box
+# defaults (a .venv in the project, interpreter downloads allowed). The cache
+# dir is explicit because HOME is already /home/agent when root runs uv, and a
+# cache under the service user's home would be baked into the image and seeded
+# into the home volume.
+_SERVICE_UV_CACHE = "/root/.cache/uv"
+_SERVICE_UV_ENV = " ".join(
+    (
+        f"UV_PROJECT_ENVIRONMENT={SERVICE_VENV}",
+        f"UV_CACHE_DIR={_SERVICE_UV_CACHE}",
+        "UV_PYTHON=/usr/local/bin/python3",
+        "UV_PYTHON_DOWNLOADS=never",
+        "UV_LINK_MODE=copy",
+    )
+)
 
 
 def _run(steps: list[str]) -> str:
     return "RUN " + " \\\n    && ".join(steps)
 
 
+def _uv_sync(*extra: str) -> str:
+    args = " ".join(("uv sync --frozen --no-dev --no-editable", *extra))
+    return (
+        f"RUN --mount=type=cache,target={_SERVICE_UV_CACHE} \\\n"
+        f"    {_SERVICE_UV_ENV} \\\n"
+        f"    {args}"
+    )
+
+
 def render_dockerfile(split: Split) -> str:
     package = package_name(split.kind)
-    apt = ["apt-get update"]
-    apt.append(
+    apt = [
+        "apt-get update",
         "apt-get install -y --no-install-recommends "
-        + " ".join(("git", "curl", "ca-certificates", *split.extra_apt))
-    )
-    if split.node:
-        apt.append("curl -fsSL https://deb.nodesource.com/setup_${NODE_MAJOR}.x | bash -")
-        apt.append("apt-get install -y --no-install-recommends nodejs")
-    apt.append("rm -rf /var/lib/apt/lists/*")
-    command = ["python", "-m", "uvicorn", f"{package}.asgi:application"]
+        + " ".join(("git", "curl", "ca-certificates", *split.extra_apt)),
+        "curl -fsSL https://deb.nodesource.com/setup_${NODE_MAJOR}.x | bash -",
+        "apt-get install -y --no-install-recommends nodejs",
+        # pnpm/yarn shims; the managers themselves download on first use into
+        # COREPACK_HOME, which the sandbox manager points at the /data volume.
+        "corepack enable",
+        "rm -rf /var/lib/apt/lists/*",
+    ]
+    command = [f"{SERVICE_VENV}/bin/python", "-m", "uvicorn", f"{package}.asgi:application"]
     command += ["--host", "0.0.0.0", "--port", "8010"]
 
     blocks = [
@@ -162,12 +193,13 @@ FROM python:${{PYTHON_VERSION}}-slim-bookworm
 # Match the host user so agent-created files in mounted worktrees are owned
 # by (and committable for) the host-side workflow worker.
 ARG UID=1000
-ARG GID=1000""",
+ARG GID=1000
+# Node 22 is the last line that ships corepack; agents get node/npm/pnpm/yarn
+# in every sandbox regardless of what the harness itself needs.
+ARG NODE_MAJOR=22""",
     ]
-    if split.node:
-        blocks.append("ARG NODE_MAJOR=22")
     # Everything from here to the DJANGO_SETTINGS_MODULE line is shared between
-    # the splits that take the same branch (node or not, extra apt packages, harness
+    # the splits that take the same branch (extra apt packages, harness
     # installer). BuildKit keys RUN layers on their environment, so nothing per-kind
     # may be set above that line or the shared layers stop being shared.
     blocks += [
@@ -177,8 +209,8 @@ ARG GID=1000""",
             [
                 "groupadd --gid ${GID} agent",
                 "useradd --uid ${UID} --gid ${GID} --create-home --shell /bin/bash agent",
-                "mkdir -p /data /opt/venv",
-                "chown ${UID}:${GID} /data /opt/venv",
+                "mkdir -p /data",
+                "chown ${UID}:${GID} /data",
             ]
         ),
         _run(
@@ -189,16 +221,10 @@ ARG GID=1000""",
             ]
         ),
         """\
-# Python packages go into a venv owned by the service user: the SDK-managed
-# harnesses ship their CLI inside site-packages and the executable-ownership
-# check needs it owned by the effective UID (a chown -R afterwards would
-# duplicate the whole layer).
-COPY --from=uv /uv /bin/uv
-ENV PATH=/opt/venv/bin:$PATH \\
-    UV_PROJECT_ENVIRONMENT=/opt/venv \\
-    UV_PYTHON=/usr/local/bin/python3 \\
-    UV_PYTHON_DOWNLOADS=never \\
-    UV_LINK_MODE=copy""",
+# Plain uv for agents working in mounted projects. No UV_* settings are exported:
+# the service venv below is built with its own, and an image-wide
+# UV_PROJECT_ENVIRONMENT once let an agent's `uv run` replace the service venv.
+COPY --from=uv /uv /bin/uv""",
         *split.root_installs,
         "USER agent\nENV HOME=/home/agent",
         *split.agent_installs,
@@ -207,17 +233,20 @@ ENV PATH=/opt/venv/bin:$PATH \\
 # third-party dependencies, then the shared schemas, then the service source.
 ENV DJANGO_SETTINGS_MODULE={package}.settings
 
+# The service runtime is installed by root into {SERVICE_VENV}, which stays
+# off PATH and read-only for the service user. Executable-ownership checks
+# only apply to the process-bound harness CLIs installed above, never to the
+# venv (the SDK-managed kinds have no checked executable).
+USER root
 # uv.lock pins tth-types as ../tth-types relative to the project directory.
 WORKDIR /app/service
 COPY pyproject.toml README.md uv.lock ./
-RUN --mount=type=cache,target=/home/agent/.cache/uv,uid=${{UID}},gid=${{GID}} \\
-    uv sync --frozen --no-dev --no-editable \\
-      --no-install-project --no-install-package tth-types
+{_uv_sync("--no-install-project --no-install-package tth-types")}
 COPY --from=tth_types pyproject.toml README.md uv.lock ../tth-types/
 COPY --from=tth_types src ../tth-types/src
 COPY src ./src
-RUN --mount=type=cache,target=/home/agent/.cache/uv,uid=${{UID}},gid=${{GID}} \\
-    uv sync --frozen --no-dev --no-editable
+{_uv_sync()}
+USER agent
 
 EXPOSE 8010
 HEALTHCHECK --interval=15s --timeout=3s --start-period=20s \\
