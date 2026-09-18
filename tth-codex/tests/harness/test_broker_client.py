@@ -11,10 +11,10 @@ from tth_types.adapter import StartSessionRequest
 from tth_types.enums import ApprovalDecision
 from tth_types.harness import HarnessConfiguration
 
-from tests.harness.test_adapter import (
+from tests.harness.fakes import (
     FakeCodex,
-    _config,  # pyright: ignore[reportPrivateUsage]
-    _launch,  # pyright: ignore[reportPrivateUsage]
+    harness_config,
+    launch_snapshot,
 )
 from tth_codex.harness import adapter as adapter_mod
 from tth_codex.harness.adapter import CodexAdapter
@@ -74,13 +74,13 @@ async def test_interrupt_and_close_cancel_pending(
 
     monkeypatch.setattr(adapter_mod, "probe_codex", fake_probe)
     adapter = CodexAdapter(client_factory=FakeCodex)
-    await adapter.probe(_config())
+    await adapter.probe(harness_config())
     session = await adapter.start(
         StartSessionRequest(
             conversation_id=uuid4(),
             binding_id=uuid4(),
-            configuration=_config(),
-            launch=_launch(),
+            configuration=harness_config(),
+            launch=launch_snapshot(),
         )
     )
     loop = __import__("asyncio").get_running_loop()

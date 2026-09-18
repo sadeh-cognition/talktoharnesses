@@ -7,8 +7,8 @@ audiences:
 tags:
   - type/map
   - audience/developer
-last_verified: 2026-09-05
-verified_against_commit: 92bdf81138628204f7b58df5f1f80545abdbbde3
+last_verified: 2026-09-18
+verified_against_commit: d337f342d5fe7bb427ad5235880c1a1aca09f677
 ---
 
 # Compatibility and Adapters
@@ -27,6 +27,11 @@ split.
 
 Muse Code owns its MSP v1 floor in `tth-muse/src/tth_muse/data/compatibility/muse.json`.
 Its adapter uses the same HTTP/SSE contract as the existing splits.
+
+Codex brokers MCP tool confirmation elicitations through its existing approval
+interactions. See [supported shapes and limitations](../requirements/resolve-approvals-and-structured-questions.md).
+Its [adapter](../architecture/provider-adapters.md) preserves native error
+messages and retries, with terminal outcomes driven by `turn/completed`.
 
 ## Capability flags
 

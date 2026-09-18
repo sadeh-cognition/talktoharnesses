@@ -7,10 +7,7 @@ from typing import Any
 from uuid import UUID, uuid5
 
 from tth_types.enums import (
-    ApprovalDecision,
     ErrorCode,
-    FileOperation,
-    InteractionKind,
     ToolOutcome,
 )
 from tth_types.errors import DomainError
@@ -20,6 +17,7 @@ from tth_types.events import (
     AssistantMessageStartedPayload,
     HarnessEvent,
     InteractionRequestedPayload,
+    ProviderWarningPayload,
     ReasoningCompletedPayload,
     ReasoningDeltaPayload,
     ReasoningStartedPayload,
@@ -30,23 +28,16 @@ from tth_types.events import (
     TurnFailedPayload,
     TurnInterruptedPayload,
 )
-from tth_types.harness import (
-    ApprovalRequestPayload,
-    CanonicalQuestion,
-    CommandApprovalAction,
-    FileApprovalAction,
-    StructuredQuestionPayload,
-)
 from tth_types.usage import TurnUsage
 
 from tth_codex.harness.schemas import (
     CodexAgentMessageDelta,
-    CodexApprovalParams,
-    CodexCommandApprovalParams,
+    CodexError,
     CodexItemCompleted,
     CodexItemStarted,
     CodexNotification,
     CodexReasoningDelta,
+    CodexServerRequestParams,
     CodexTokenUsageUpdated,
     CodexTurnCompleted,
     parse_codex_notification,
@@ -144,85 +135,26 @@ class CodexNormalizer:
             return self._item_completed(note)
         if isinstance(note, CodexTokenUsageUpdated):
             return self._token_usage_updated(note)
+        if isinstance(note, CodexError):
+            return self._error(note)
         if isinstance(note, CodexTurnCompleted):
             return self._turn_completed(note)
         return []
 
-    def on_approval_request(
+    def on_server_request(
         self,
+        params: CodexServerRequestParams,
         *,
-        method: str,
-        params: CodexApprovalParams,
         interaction_id: UUID,
-    ) -> list[HarnessEvent]:
+    ) -> InteractionRequestedPayload:
         if self._active_turn_id is None:
-            raise DomainError(ErrorCode.INVALID_STATE, "approval without active turn")
-        if isinstance(params, CodexCommandApprovalParams):
-            argv = tuple(params.command or ())
-            action = CommandApprovalAction(argv=argv) if argv else None
-            return [
-                InteractionRequestedPayload(
-                    turn_id=self._active_turn_id,
-                    interaction_id=interaction_id,
-                    kind=InteractionKind.APPROVAL,
-                    request=ApprovalRequestPayload(
-                        tool_name="commandExecution",
-                        command_args=argv or None,
-                        summary=params.reason or "Codex command approval",
-                        action=action,
-                        available_decisions=(
-                            ApprovalDecision.ALLOW_ONCE,
-                            ApprovalDecision.ALLOW_SESSION,
-                            ApprovalDecision.DENY,
-                            ApprovalDecision.CANCEL,
-                        ),
-                    ),
-                )
-            ]
-        first = (params.files or [None])[0]
-        path = first.path if first is not None else None
-        operation = _file_operation(first.kind if first is not None else None)
-        action = (
-            FileApprovalAction(path=path, operation=operation)
-            if path is not None and operation is not None
-            else None
+            raise DomainError(ErrorCode.INVALID_STATE, "server request without active turn")
+        return InteractionRequestedPayload(
+            turn_id=self._active_turn_id,
+            interaction_id=interaction_id,
+            kind=params.interaction_kind,
+            request=params.to_request(),
         )
-        return [
-            InteractionRequestedPayload(
-                turn_id=self._active_turn_id,
-                interaction_id=interaction_id,
-                kind=InteractionKind.APPROVAL,
-                request=ApprovalRequestPayload(
-                    tool_name="fileChange",
-                    path=path,
-                    operation=operation,
-                    summary=params.reason or "Codex file change approval",
-                    action=action,
-                    available_decisions=(
-                        ApprovalDecision.ALLOW_ONCE,
-                        ApprovalDecision.DENY,
-                        ApprovalDecision.CANCEL,
-                    ),
-                ),
-            )
-        ]
-
-    def on_user_input_request(
-        self,
-        *,
-        questions: tuple[CanonicalQuestion, ...],
-        interaction_id: UUID,
-    ) -> list[HarnessEvent]:
-        if self._active_turn_id is None:
-            raise DomainError(ErrorCode.INVALID_STATE, "user input without active turn")
-        return [
-            InteractionRequestedPayload(
-                turn_id=self._active_turn_id,
-                interaction_id=interaction_id,
-                kind=InteractionKind.STRUCTURED_QUESTION,
-                request=StructuredQuestionPayload(questions=questions),
-            )
-        ]
 
     def fail_active_turn(self, *, error_code: str, message: str) -> list[HarnessEvent]:
         if self._active_turn_id is None:
@@ -342,6 +274,21 @@ class CodexNormalizer:
             )
         ]
 
+    def _error(self, note: CodexError) -> list[HarnessEvent]:
+        """Surface a native error as a warning; ``turn/completed`` settles the outcome.
+
+        Error notifications also describe retries Codex performs itself, so
+        none of them ends the active turn.
+        """
+        if self._active_turn_id is None or self._resync_mode:
+            return []
+        return [
+            ProviderWarningPayload(
+                message=note.message,
+                code="provider_retry" if note.will_retry else "provider_error",
+            )
+        ]
+
     def _token_usage_updated(self, note: CodexTokenUsageUpdated) -> list[HarnessEvent]:
         """Report the turn's totals so far from the thread's running totals.
 
@@ -433,18 +380,3 @@ class CodexNormalizer:
             if pattern:
                 out = out.replace(pattern, "***")
         return out
-
-
-def _file_operation(kind: str | None) -> FileOperation | None:
-    if kind is None:
-        return FileOperation.MODIFY
-    normalized = kind.lower()
-    if normalized in {"create", "add", "write"}:
-        return FileOperation.CREATE
-    if normalized in {"delete", "remove", "unlink"}:
-        return FileOperation.DELETE
-    if normalized in {"read", "view"}:
-        return FileOperation.READ
-    if normalized in {"edit", "modify", "update", "patch"}:
-        return FileOperation.MODIFY
-    return FileOperation.MODIFY

@@ -9,8 +9,8 @@ tags:
   - type/requirement
   - capability/interactions
   - status/partially-implemented
-last_verified: 2026-09-05
-verified_against_commit: 92bdf81138628204f7b58df5f1f80545abdbbde3
+last_verified: 2026-09-18
+verified_against_commit: d337f342d5fe7bb427ad5235880c1a1aca09f677
 ---
 
 # Resolve Approvals and Structured Questions
@@ -23,12 +23,25 @@ When a harness requests an approval or structured question, the owner can list t
 
 Pending interactions are listed per conversation. Approval resolution accepts `allow_once`, `allow_session`, `deny`, or `cancel`. Structured questions accept a canonical `answers` object. Resolution is a durable command. The first accepted answer wins. Yolo harnesses do not publish approval interactions.
 
+The Codex MCP approval fix adds support for `mcpServer/elicitation/request`
+when Codex marks a confirmation as `codex_approval_kind: mcp_tool_call` and
+requests an empty form. It emits an approval named `mcp__<server>__<tool>` so
+consumers can apply their existing MCP policies. `allow_once`, `deny`, and
+`cancel` become native `accept`, `decline`, and `cancel` actions; acceptance
+returns empty content. Interrupting or closing the session cancels the request.
+No session or permanent grant is offered.
+
 Muse approval receipt requests and approval notifications remain distinct.
 Decision delivery is deduplicated before IO; repeated answers share the original
 outcome. SDK-style retries retain the command identity and apply only to explicit
 overload/backpressure errors. Internal errors remain visible.
 
 ## Gap
+
+General MCP data forms and URL elicitations remain unsupported. They must not
+be mistaken for tool approvals. Codex 0.154 puts the tool name only in its
+confirmation message, so the adapter requires that exact native message format
+and matching server identity.
 
 Muse Code `1.0.3-R2198.1` can reject approval decisions after resume with
 MSP `-32603` and an approval-ledger durability error. This reproduces with Meta's
@@ -46,6 +59,9 @@ finish and enough interaction requests appear. Deterministic closed-loop test ev
 
 ## Implementation evidence
 
+- `tth-codex/src/tth_codex/harness/schemas.py`, `normalizer.py`, and `adapter.py`
+  (MCP tool confirmation parsing, canonical approval, and native response).
+
 - `tth-muse/src/tth_muse/harness/` (Muse Code MSP integration)
 
 - `src/talktoharnesses/application/service.py` (`list_pending_interactions`, `update_interaction_draft`, `resolve_interaction`)
@@ -54,6 +70,9 @@ finish and enough interaction requests appear. Deterministic closed-loop test ev
 - `src/talktoharnesses/django/api/routes.py`
 
 ## Test evidence
+
+- `tth-codex/tests/harness/test_mcp_approvals.py` covers brokered decisions,
+  interruption, and rejection of data forms or mismatched server identities.
 
 - `tth-muse/tests/test_muse.py`
 - `tests/live/test_muse_sandbox_live.py`

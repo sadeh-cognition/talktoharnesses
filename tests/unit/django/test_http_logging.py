@@ -10,8 +10,8 @@ from unittest.mock import Mock
 import pytest
 from django.http import HttpRequest, HttpResponse
 from django.test import RequestFactory
+from loguru import logger as loguru_logger
 
-from talktoharnesses.django import http_logging
 from talktoharnesses.django.http_logging import (
     RequestResponseLoggingMiddleware,
     configure_logging,
@@ -45,7 +45,7 @@ def test_request_and_response_bodies_are_not_logged(monkeypatch: pytest.MonkeyPa
         return HttpResponse(b'{"access":"live-jwt"}')
 
     debug = Mock()
-    monkeypatch.setattr(http_logging.logger, "debug", debug)
+    monkeypatch.setattr(loguru_logger, "debug", debug)
     middleware = RequestResponseLoggingMiddleware(get_response)
     middleware(RequestFactory().post("/api/v1/auth/token/rotate", {"refresh": "secret"}))
 
@@ -60,8 +60,8 @@ def test_file_logging_has_bounded_rotation(
     tmp_path: Path,
 ) -> None:
     add = Mock(side_effect=[1, 2])
-    monkeypatch.setattr(http_logging.logger, "remove", Mock())
-    monkeypatch.setattr(http_logging.logger, "add", add)
+    monkeypatch.setattr(loguru_logger, "remove", Mock())
+    monkeypatch.setattr(loguru_logger, "add", add)
 
     configure_logging(log_file=tmp_path / "requests.log")
 
@@ -73,8 +73,6 @@ def test_file_logging_has_bounded_rotation(
 def test_stdlib_records_reach_loguru_with_attribution_and_extras(
     tmp_path: Path,
 ) -> None:
-    from loguru import logger as loguru_logger
-
     from talktoharnesses.django.http_logging import intercept_stdlib_logging
 
     captured: list[Any] = []
@@ -110,8 +108,8 @@ def test_configure_logging_reads_single_level_env(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     add = Mock(side_effect=[1, 2])
-    monkeypatch.setattr(http_logging.logger, "remove", Mock())
-    monkeypatch.setattr(http_logging.logger, "add", add)
+    monkeypatch.setattr(loguru_logger, "remove", Mock())
+    monkeypatch.setattr(loguru_logger, "add", add)
     monkeypatch.setenv("TTH_LOG_LEVEL", "warning")
 
     configure_logging(log_file=tmp_path / "requests.log")

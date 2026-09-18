@@ -7,7 +7,8 @@ audiences:
   - developer
 tags:
   - type/index
-last_verified: 2026-09-05
+last_verified: 2026-09-18
+verified_against_commit: d337f342d5fe7bb427ad5235880c1a1aca09f677
 ---
 
 # Wiki Index
@@ -27,7 +28,7 @@ Use this catalog to route into the maintained knowledge graph. Obsidian users sh
 
 - [Unified harness adapters](capabilities/unified-harness-adapters.md)
 - [Persistent conversations and turns](capabilities/persistent-conversations.md)
-- [Approvals and structured questions](capabilities/approvals-and-questions.md)
+- [Approvals and structured questions](capabilities/approvals-and-questions.md), including Codex MCP tool confirmations.
 - [Django HTTP and SSE surface](capabilities/django-http-sse.md)
 - [Floor-and-probe compatibility](capabilities/floor-and-probe-compatibility.md)
 - [Search, retention, and transcripts](capabilities/search-retention-transcripts.md)
@@ -61,7 +62,7 @@ Use this catalog to route into the maintained knowledge graph. Obsidian users sh
 - [System context](architecture/system-context.md)
 - [Technology stack](architecture/technology-stack.md)
 - [Layered architecture](architecture/layered-architecture.md)
-- [Provider adapters](architecture/provider-adapters.md)
+- [Provider adapters](architecture/provider-adapters.md), including Codex native error and retry handling.
 - [Runtime isolation architecture](architecture/runtime-isolation.md)
 - [Persistence and event sequencing](architecture/persistence-and-event-sequencing.md)
 - [Observability](architecture/observability.md)

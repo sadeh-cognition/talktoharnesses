@@ -10,7 +10,7 @@ from tth_claude.shared import private_env
 
 
 @pytest.fixture(autouse=True)
-def _reset_sealed(monkeypatch: pytest.MonkeyPatch) -> None:
+def reset_sealed(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(private_env, "_sealed", {})
 
 

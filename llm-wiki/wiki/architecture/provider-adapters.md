@@ -7,8 +7,8 @@ audiences:
 tags:
   - type/architecture
   - audience/developer
-last_verified: 2026-09-09
-verified_against_commit: aba89791044fd897c152452cccec4d32382058f9
+last_verified: 2026-09-18
+verified_against_commit: d337f342d5fe7bb427ad5235880c1a1aca09f677
 ---
 
 # Provider Adapters
@@ -48,6 +48,25 @@ checks, and non-admission retries. Approval delivery shares the first decision's
 outcome across concurrent calls and replay.
 Implementation evidence: `tth-muse/src/tth_muse/harness/`. Protocol fixtures and
 adapter tests: `tth-muse/tests/test_muse.py`.
+
+Codex's MCP tool confirmation elicitations are parsed in its adapter-owned
+schemas and normalized into existing approval interactions. Responses use the
+MCP `action` and `content` fields instead of command/file approval `decision`.
+Implementation: `tth-codex/src/tth_codex/harness/`. Regression evidence:
+`tth-codex/tests/harness/test_mcp_approvals.py`. Supported request shapes and
+remaining gaps are recorded in
+[Resolve approvals and structured questions](../requirements/resolve-approvals-and-structured-questions.md).
+
+Codex SDK `error` notifications retain their native message as provider warnings.
+`willRetry` selects `provider_retry` or `provider_error`; neither notification
+ends the active turn. The native `turn/completed` notification determines the
+outcome, including the provider's terminal error message. This prevents a model
+capacity error from being replaced by an unsupported-notification failure and
+allows native retries to finish. Implementation evidence:
+`tth-codex/src/tth_codex/harness/{adapter,schemas,normalizer}.py`.
+Test evidence: `tth-codex/tests/harness/test_error_notifications.py` exercises
+the pinned SDK's slotted notifications, recovery, terminal errors, and duplicate
+completion delivery.
 
 ## Related
 

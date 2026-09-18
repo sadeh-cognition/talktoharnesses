@@ -9,8 +9,8 @@ tags:
   - type/capability
   - capability/interactions
   - status/implemented
-last_verified: 2026-08-20
-verified_against_commit: bb3d2b755500fc663816d6cbd1a7cd7947a8920b
+last_verified: 2026-09-18
+verified_against_commit: d337f342d5fe7bb427ad5235880c1a1aca09f677
 ---
 
 # Approvals and Structured Questions
@@ -24,6 +24,11 @@ Hosts keep humans in the loop for tool permission and provider-native questions 
 ## Current implementation
 
 Adapters emit `HarnessInteractionRequest`. The interaction broker admits pending interactions, applies matching rules, and records audits. Resolution is a durable command. First accepted answer wins.
+
+Codex MCP tool confirmations use the same approval broker and preserve the
+server and tool name. Approval applies to the current call only. General MCP
+data forms and URL elicitations remain unsupported; see
+[Resolve approvals and structured questions](../requirements/resolve-approvals-and-structured-questions.md).
 
 ## Requirements
 

@@ -322,6 +322,23 @@ Entries are appended using `## [YYYY-MM-DD] operation | Title`.
 - Recorded in [Create and Manage Conversations](requirements/create-and-manage-conversations.md)
   and [Conversation](domain/conversation.md).
 
+## [2026-09-18] implementation | Broker Codex MCP tool approvals
+
+Codex's `mcpServer/elicitation/request` tool confirmations now use canonical
+approval interactions with the MCP server and tool identity preserved. The
+adapter waits for a decision and sends the MCP action/content response.
+Tests cover approval, denial, cancellation, interruption, and separation from
+unsupported forms. Scope and evidence are recorded in
+[Resolve Approvals and Structured Questions](requirements/resolve-approvals-and-structured-questions.md).
+
+## [2026-09-18] implementation | Preserve Codex provider errors and retries
+
+Codex `error` notifications now produce provider warnings instead of aborting
+stream decoding. Native completion supplies the terminal outcome and original
+error message. Regression cases use the pinned SDK notification models for
+retry recovery, capacity failures, and duplicate completion delivery. See
+[Provider Adapters](architecture/provider-adapters.md).
+
 ## Related
 
 - [Wiki index](index.md)

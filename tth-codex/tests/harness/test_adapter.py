@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Sequence
-from dataclasses import dataclass, field
+from collections.abc import Sequence
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -19,17 +18,19 @@ from tth_types.adapter import (
 from tth_types.enums import (
     ApprovalDecision,
     ErrorCode,
+    FileOperation,
     HarnessKind,
     InteractionKind,
 )
 from tth_types.errors import DomainError
 from tth_types.events import (
     HarnessEvent,
-    InteractionRequestedPayload,
     TurnCompletedPayload,
     TurnFailedPayload,
 )
 from tth_types.harness import (
+    ApprovalRequestPayload,
+    FileApprovalAction,
     HarnessCapabilities,
     HarnessConfiguration,
     HarnessMcpHeader,
@@ -38,105 +39,15 @@ from tth_types.harness import (
     LaunchSnapshot,
 )
 
+from tests.harness.fakes import FakeCodex, harness_config, launch_snapshot
 from tth_codex.harness.adapter import CodexAdapter
 from tth_codex.harness.normalizer import CodexNormalizer
-from tth_codex.shared.questions import canonical_questions
-
-
-@dataclass
-class FakeTurnHandle:
-    id: str
-    thread_id: str
-    prompt: str
-    events: list[dict[str, object]] = field(default_factory=list[dict[str, object]])
-    steered: list[str] = field(default_factory=list[str])
-    interrupted: bool = False
-    options: dict[str, object] = field(default_factory=dict[str, object])
-
-    def stream(self) -> AsyncIterator[dict[str, object]]:
-        async def _gen() -> AsyncIterator[dict[str, object]]:
-            for event in self.events:
-                yield event
-            yield {
-                "method": "turnCompleted",
-                "thread_id": self.thread_id,
-                "turn_id": self.id,
-                "status": "completed",
-                "final_response": None,
-            }
-
-        return _gen()
-
-    async def steer(self, prompt: str) -> None:
-        self.steered.append(prompt)
-
-    async def interrupt(self) -> None:
-        self.interrupted = True
-
-
-@dataclass
-class FakeThread:
-    id: str
-    handles: list[FakeTurnHandle] = field(default_factory=list[FakeTurnHandle])
-
-    async def turn(self, prompt: str, **options: object) -> FakeTurnHandle:
-        handle = FakeTurnHandle(
-            id=f"turn-{len(self.handles) + 1}",
-            thread_id=self.id,
-            prompt=prompt,
-            options=options,
-        )
-        self.handles.append(handle)
-        return handle
-
-
-class FakeCodex:
-    instances: list[FakeCodex] = []
-
-    def __init__(self) -> None:
-        self.closed = False
-        self.threads: list[FakeThread] = []
-        self.start_kwargs: dict[str, object] = {}
-        self._id = str(uuid4())
-        FakeCodex.instances.append(self)
-
-    async def __aenter__(self) -> FakeCodex:
-        return self
-
-    async def __aexit__(self, *_exc: object) -> None:
-        self.closed = True
-
-    async def close(self) -> None:
-        self.closed = True
-
-    async def thread_start(self, **kwargs: object) -> FakeThread:
-        self.start_kwargs = kwargs
-        thread = FakeThread(id=f"thread-{self._id}")
-        self.threads.append(thread)
-        return thread
-
-    async def thread_resume(self, thread_id: str, **kwargs: object) -> FakeThread:
-        del kwargs
-        thread = FakeThread(id=thread_id)
-        self.threads.append(thread)
-        return thread
-
-
-def _config() -> HarnessConfiguration:
-    return HarnessConfiguration(
-        kind=HarnessKind.CODEX,
-        working_directory="/tmp",
-        effort="high",
-    )
-
-
-def _launch() -> LaunchSnapshot:
-    return LaunchSnapshot(
-        harness_version="0.154.0",
-        working_directory="/tmp",
-        adapter_version="2026.8.1",
-        capabilities=HarnessCapabilities(kind=HarnessKind.CODEX, version="0.154.0"),
-    )
+from tth_codex.harness.schemas import (
+    CodexCommandApprovalParams,
+    CodexFileApprovalParams,
+    CodexFileChangeEntry,
+    CodexUserInputParams,
+)
 
 
 @pytest.mark.asyncio
@@ -155,14 +66,14 @@ async def test_start_submit_terminal_without_final_and_steer(
     monkeypatch.setattr("tth_codex.harness.adapter.probe_codex", fake_probe)
 
     adapter = CodexAdapter(client_factory=FakeCodex)
-    caps = await adapter.probe(_config())
+    caps = await adapter.probe(harness_config())
     assert caps.supports_steer is True
     session = await adapter.start(
         StartSessionRequest(
             conversation_id=uuid4(),
             binding_id=uuid4(),
-            configuration=_config(),
-            launch=_launch(),
+            configuration=harness_config(),
+            launch=launch_snapshot(),
         )
     )
     assert session.native_session_id is not None
@@ -202,22 +113,22 @@ async def test_two_conversations_isolated(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setattr("tth_codex.harness.adapter.probe_codex", fake_probe)
     a1 = CodexAdapter(client_factory=FakeCodex)
     a2 = CodexAdapter(client_factory=FakeCodex)
-    await a1.probe(_config())
-    await a2.probe(_config())
+    await a1.probe(harness_config())
+    await a2.probe(harness_config())
     s1 = await a1.start(
         StartSessionRequest(
             conversation_id=uuid4(),
             binding_id=uuid4(),
-            configuration=_config(),
-            launch=_launch(),
+            configuration=harness_config(),
+            launch=launch_snapshot(),
         )
     )
     s2 = await a2.start(
         StartSessionRequest(
             conversation_id=uuid4(),
             binding_id=uuid4(),
-            configuration=_config(),
-            launch=_launch(),
+            configuration=harness_config(),
+            launch=launch_snapshot(),
         )
     )
     assert s1.native_session_id != s2.native_session_id
@@ -236,13 +147,13 @@ async def test_stream_approval_notification_fails_closed(monkeypatch: pytest.Mon
 
     monkeypatch.setattr("tth_codex.harness.adapter.probe_codex", fake_probe)
     adapter = CodexAdapter(client_factory=FakeCodex)
-    await adapter.probe(_config())
+    await adapter.probe(harness_config())
     session = await adapter.start(
         StartSessionRequest(
             conversation_id=uuid4(),
             binding_id=uuid4(),
-            configuration=_config(),
-            launch=_launch(),
+            configuration=harness_config(),
+            launch=launch_snapshot(),
         )
     )
     turn_id = uuid4()
@@ -277,29 +188,10 @@ async def test_stream_approval_notification_fails_closed(monkeypatch: pytest.Mon
     await adapter.close(session)
 
 
-@pytest.mark.asyncio
 async def test_brokered_approval_handler_awaits_answer(
-    monkeypatch: pytest.MonkeyPatch,
+    broker: tuple[CodexAdapter, HarnessSession],
 ) -> None:
-    async def fake_probe(config: HarnessConfiguration):
-        from tth_codex.harness.compatibility import match_release
-
-        release = match_release(sdk_version="0.154.0", runtime_version="0.154.0", platform="linux")
-        return release.to_harness_capabilities(), release
-
-    monkeypatch.setattr("tth_codex.harness.adapter.probe_codex", fake_probe)
-    adapter = CodexAdapter(client_factory=FakeCodex)
-    await adapter.probe(_config())
-    session = await adapter.start(
-        StartSessionRequest(
-            conversation_id=uuid4(),
-            binding_id=uuid4(),
-            configuration=_config(),
-            launch=_launch(),
-        )
-    )
-    # Keep an active turn without racing the fake stream terminal event.
-    adapter._normalizer.begin_turn(uuid4())  # pyright: ignore[reportPrivateUsage]
+    adapter, session = broker
 
     async def _answer_when_requested() -> None:
         async for item in adapter.events(session):
@@ -329,31 +221,12 @@ async def test_brokered_approval_handler_awaits_answer(
     )
     await asyncio.wait_for(answer_task, timeout=2.0)
     assert result == {"decision": "accept"}
-    await adapter.close(session)
 
 
-@pytest.mark.asyncio
 async def test_brokered_user_input_handler_awaits_structured_answers(
-    monkeypatch: pytest.MonkeyPatch,
+    broker: tuple[CodexAdapter, HarnessSession],
 ) -> None:
-    async def fake_probe(config: HarnessConfiguration):
-        from tth_codex.harness.compatibility import match_release
-
-        release = match_release(sdk_version="0.154.0", runtime_version="0.154.0", platform="linux")
-        return release.to_harness_capabilities(), release
-
-    monkeypatch.setattr("tth_codex.harness.adapter.probe_codex", fake_probe)
-    adapter = CodexAdapter(client_factory=FakeCodex)
-    await adapter.probe(_config())
-    session = await adapter.start(
-        StartSessionRequest(
-            conversation_id=uuid4(),
-            binding_id=uuid4(),
-            configuration=_config(),
-            launch=_launch(),
-        )
-    )
-    adapter._normalizer.begin_turn(uuid4())  # pyright: ignore[reportPrivateUsage]
+    adapter, session = broker
 
     async def _answer_when_requested() -> None:
         async for item in adapter.events(session):
@@ -394,7 +267,6 @@ async def test_brokered_user_input_handler_awaits_structured_answers(
             "scope": {"answers": ["All surfaces"]},
         }
     }
-    await adapter.close(session)
 
 
 def test_normalizer_rejects_unknown_field() -> None:
@@ -906,52 +778,51 @@ def test_normalizer_reasoning_tool_and_turn_completed_variants() -> None:
     assert normalizer.fail_active_turn(error_code="x", message="y") == []
 
 
-def test_approval_decision_mapping() -> None:
-    adapter = CodexAdapter(client_factory=FakeCodex)
-    assert adapter._to_approval_result(  # pyright: ignore[reportPrivateUsage]
-        "item/commandExecution/requestApproval", ApprovalDecision.ALLOW_ONCE
-    ) == {"decision": "accept"}
-    assert adapter._to_approval_result(  # pyright: ignore[reportPrivateUsage]
-        "item/commandExecution/requestApproval", ApprovalDecision.ALLOW_SESSION
-    ) == {"decision": "acceptForSession"}
-    assert adapter._to_approval_result(  # pyright: ignore[reportPrivateUsage]
-        "item/commandExecution/requestApproval", ApprovalDecision.CANCEL
-    ) == {"decision": "cancel"}
-    assert adapter._to_approval_result(  # pyright: ignore[reportPrivateUsage]
-        "item/fileChange/requestApproval", ApprovalDecision.DENY
-    ) == {"decision": "decline"}
+def test_approval_answers_encode_to_native_results() -> None:
+    def answer(decision: ApprovalDecision | None) -> InteractionAnswer:
+        return InteractionAnswer(interaction_id=uuid4(), decision=decision)
+
+    command = CodexCommandApprovalParams(command=["ls"])
+    assert command.to_native_result(answer(ApprovalDecision.ALLOW_ONCE)) == {"decision": "accept"}
+    assert command.to_native_result(answer(ApprovalDecision.ALLOW_SESSION)) == {
+        "decision": "acceptForSession"
+    }
+    assert command.to_native_result(answer(ApprovalDecision.CANCEL)) == {"decision": "cancel"}
+    file = CodexFileApprovalParams()
+    assert file.to_native_result(answer(ApprovalDecision.DENY)) == {"decision": "decline"}
+    # A decision the request never offered fails closed.
+    assert file.to_native_result(answer(ApprovalDecision.ALLOW_SESSION)) == {"decision": "decline"}
+    assert file.to_native_result(answer(None)) == {"decision": "decline"}
 
 
-def test_normalizer_on_approval_request_command_and_file() -> None:
-    from tth_codex.harness.schemas import (
-        CodexCommandApprovalParams,
-        CodexFileApprovalParams,
-        CodexFileChangeEntry,
-    )
-
+def test_normalizer_on_server_request_command_and_file() -> None:
     normalizer = CodexNormalizer()
     normalizer.set_session("t1")
     normalizer.begin_turn(uuid4())
-    command = normalizer.on_approval_request(
-        method="item/commandExecution/requestApproval",
-        params=CodexCommandApprovalParams(command=["ls", "-la"], reason="list"),
+    command = normalizer.on_server_request(
+        CodexCommandApprovalParams(command=["ls", "-la"], reason="list"),
         interaction_id=uuid4(),
     )
-    assert any(isinstance(e, InteractionRequestedPayload) for e in command)
-    file_events = normalizer.on_approval_request(
-        method="item/fileChange/requestApproval",
-        params=CodexFileApprovalParams(
+    assert command.kind is InteractionKind.APPROVAL
+    assert isinstance(command.request, ApprovalRequestPayload)
+    assert command.request.tool_name == "commandExecution"
+    assert command.request.command_args == ("ls", "-la")
+    assert command.request.available_decisions == CodexCommandApprovalParams.offered_decisions
+    file_events = normalizer.on_server_request(
+        CodexFileApprovalParams(
             files=[CodexFileChangeEntry(path="a.py", kind="edit")],
             reason="edit",
         ),
         interaction_id=uuid4(),
     )
-    assert any(isinstance(e, InteractionRequestedPayload) for e in file_events)
+    assert isinstance(file_events.request, ApprovalRequestPayload)
+    assert file_events.request.tool_name == "fileChange"
+    assert file_events.request.action == FileApprovalAction(
+        path="a.py", operation=FileOperation.MODIFY
+    )
 
 
-def test_normalizer_on_user_input_request() -> None:
-    from tth_codex.harness.schemas import CodexUserInputParams
-
+def test_normalizer_on_server_request_user_input() -> None:
     normalizer = CodexNormalizer()
     normalizer.set_session("t1")
     normalizer.begin_turn(uuid4())
@@ -972,15 +843,7 @@ def test_normalizer_on_user_input_request() -> None:
             ],
         }
     )
-    questions = canonical_questions(
-        [question.model_dump(by_alias=True, exclude_none=True) for question in params.questions]
-    )
-    events = normalizer.on_user_input_request(
-        questions=questions,
-        interaction_id=uuid4(),
-    )
-    event = events[0]
-    assert isinstance(event, InteractionRequestedPayload)
+    event = normalizer.on_server_request(params, interaction_id=uuid4())
     assert event.kind is InteractionKind.STRUCTURED_QUESTION
     assert event.request.questions[0].id == "scope"  # type: ignore[attr-defined]
     assert event.request.questions[0].allow_other is True  # type: ignore[attr-defined]
@@ -1118,28 +981,10 @@ async def test_build_broker_async_codex_thread_start_and_resume(
     assert resumed and resumed[0][0] == "broker-thread"
 
 
-@pytest.mark.asyncio
 async def test_approval_handler_file_deny_and_cancel_paths(
-    monkeypatch: pytest.MonkeyPatch,
+    broker: tuple[CodexAdapter, HarnessSession],
 ) -> None:
-    async def fake_probe(config: HarnessConfiguration):
-        from tth_codex.harness.compatibility import match_release
-
-        release = match_release(sdk_version="0.154.0", runtime_version="0.154.0", platform="linux")
-        return release.to_harness_capabilities(), release
-
-    monkeypatch.setattr("tth_codex.harness.adapter.probe_codex", fake_probe)
-    adapter = CodexAdapter(client_factory=FakeCodex)
-    await adapter.probe(_config())
-    session = await adapter.start(
-        StartSessionRequest(
-            conversation_id=uuid4(),
-            binding_id=uuid4(),
-            configuration=_config(),
-            launch=_launch(),
-        )
-    )
-    adapter._normalizer.begin_turn(uuid4())  # pyright: ignore[reportPrivateUsage]
+    adapter, session = broker
 
     async def _answer(decision: ApprovalDecision) -> None:
         async for item in adapter.events(session):
@@ -1190,7 +1035,6 @@ async def test_approval_handler_file_deny_and_cancel_paths(
             "item/unknown/requestApproval",
             {},
         )
-    await adapter.close(session)
 
 
 @pytest.mark.asyncio

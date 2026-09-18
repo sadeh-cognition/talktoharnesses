@@ -20,9 +20,8 @@ from tth_types.adapter import (
 )
 from tth_types.enums import ApprovalDecision, ErrorCode, HarnessKind
 from tth_types.errors import DomainError
-from tth_types.events import HarnessEvent, InteractionRequestedPayload
+from tth_types.events import HarnessEvent
 from tth_types.harness import (
-    CanonicalQuestion,
     HarnessCapabilities,
     HarnessConfiguration,
     InteractionAnswer,
@@ -36,11 +35,10 @@ from tth_codex.harness.compatibility import (
 from tth_codex.harness.normalizer import CodexNormalizer
 from tth_codex.harness.probe import probe_codex
 from tth_codex.harness.schemas import (
-    CodexUserInputParams,
+    mcp_tool_name,
     parse_codex_notification,
     parse_codex_server_request_params,
 )
-from tth_codex.shared.questions import canonical_answer_values, canonical_questions
 
 logger = logging.getLogger(__name__)
 
@@ -485,39 +483,20 @@ class CodexAdapter:
             interaction_id = uuid4()
             future: asyncio.Future[InteractionAnswer] = asyncio.get_running_loop().create_future()
             self._pending_interactions[interaction_id] = future
-            questions: tuple[CanonicalQuestion, ...] | None = None
-            if isinstance(parsed, CodexUserInputParams):
-                questions = canonical_questions(
-                    [item.model_dump(by_alias=True, exclude_none=True) for item in parsed.questions]
+            correlation: dict[str, str] = {"method": method}
+            item_id = getattr(parsed, "item_id", None)
+            if item_id is not None:
+                correlation["item_id"] = str(item_id)
+            await self._event_q.put(
+                HarnessInteractionRequest(
+                    payload=self._normalizer.on_server_request(
+                        parsed, interaction_id=interaction_id
+                    ),
+                    provider_correlation=correlation,
                 )
-                events = self._normalizer.on_user_input_request(
-                    questions=questions,
-                    interaction_id=interaction_id,
-                )
-            else:
-                events = self._normalizer.on_approval_request(
-                    method=method,
-                    params=parsed,
-                    interaction_id=interaction_id,
-                )
-            for event in events:
-                if isinstance(event, InteractionRequestedPayload):
-                    item_id = getattr(parsed, "item_id", None)
-                    correlation: dict[str, str] = {"method": method}
-                    if item_id is not None:
-                        correlation["item_id"] = str(item_id)
-                    await self._event_q.put(
-                        HarnessInteractionRequest(
-                            payload=event,
-                            provider_correlation=correlation,
-                        )
-                    )
-                else:
-                    await self._event_q.put(event)
+            )
             answer = await future
-            if questions is not None:
-                return self._to_user_input_result(answer, questions)
-            return self._to_approval_result(method, answer.decision)
+            return parsed.to_native_result(answer)
 
         def _done(task: concurrent.futures.Future[dict[str, Any]]) -> None:
             if bridge.done():
@@ -529,32 +508,6 @@ class CodexAdapter:
 
         asyncio.run_coroutine_threadsafe(_emit_and_wait(), loop).add_done_callback(_done)
         return bridge.result()
-
-    def _to_user_input_result(
-        self,
-        answer: InteractionAnswer,
-        questions: tuple[CanonicalQuestion, ...],
-    ) -> dict[str, Any]:
-        values = canonical_answer_values(answer, questions)
-        return {
-            "answers": {
-                question_id: {"answers": selected} for question_id, selected in values.items()
-            }
-        }
-
-    def _to_approval_result(
-        self,
-        method: str,
-        decision: ApprovalDecision | None,
-    ) -> dict[str, Any]:
-        del method
-        if decision is ApprovalDecision.ALLOW_ONCE:
-            return {"decision": "accept"}
-        if decision is ApprovalDecision.ALLOW_SESSION:
-            return {"decision": "acceptForSession"}
-        if decision is ApprovalDecision.CANCEL:
-            return {"decision": "cancel"}
-        return {"decision": "decline"}
 
     async def _consume_stream(self, handle: Any) -> None:
         try:
@@ -606,6 +559,15 @@ class CodexAdapter:
         payload_dump: dict[str, Any] | None = None
         if payload is not None and hasattr(payload, "model_dump"):
             payload_dump = _str_keyed(payload.model_dump(mode="json"))
+        if method == "error" and payload_dump is not None:
+            error = _str_keyed(payload_dump.get("error")) or {}
+            return {
+                "method": "error",
+                "thread_id": str(payload_dump.get("thread_id") or ""),
+                "turn_id": str(payload_dump.get("turn_id") or ""),
+                "message": str(error.get("message") or ""),
+                "will_retry": bool(payload_dump.get("will_retry")),
+            }
         if method in {"turn/started", "turn/completed"} and payload_dump is not None:
             turn = _str_keyed(payload_dump.get("turn")) or {}
             if method == "turn/started":
@@ -676,7 +638,12 @@ class CodexAdapter:
                 "item_type": item_type,
             }
             if method == "item/started":
-                raw["title"] = item.get("tool")
+                tool = item.get("tool")
+                if native_type == "mcpToolCall" and tool:
+                    # Name the call as its approval is named, so consumers
+                    # can pair the two and apply one MCP policy.
+                    tool = mcp_tool_name(str(item.get("server") or ""), str(tool))
+                raw["title"] = tool
                 raw["command"] = item.get("command")
             else:
                 raw["status"] = item.get("status")
