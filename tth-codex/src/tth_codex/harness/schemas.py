@@ -81,6 +81,9 @@ class CodexItemStarted(BaseModel):
     item_id: str
     item_type: str
     title: str | None = None
+    # The shell command line of a commandExecution item. Kept apart from
+    # ``title`` so the tool name stays a name rather than a whole command.
+    command: str | None = None
 
 
 class CodexItemCompleted(BaseModel):
@@ -105,6 +108,7 @@ class CodexCommandApprovalParams(BaseModel):
 
     model_config = _STRICT_ALIASED
 
+    kind: Literal["command"] = "command"
     thread_id: str | None = Field(default=None, alias="threadId")
     turn_id: str | None = Field(default=None, alias="turnId")
     item_id: str | None = Field(default=None, alias="itemId")

@@ -132,10 +132,10 @@ def _config() -> HarnessConfiguration:
 
 def _launch() -> LaunchSnapshot:
     return LaunchSnapshot(
-        harness_version="0.144.4",
+        harness_version="0.154.0",
         working_directory="/tmp",
         adapter_version="2026.8.1",
-        capabilities=HarnessCapabilities(kind=HarnessKind.CODEX, version="0.144.4"),
+        capabilities=HarnessCapabilities(kind=HarnessKind.CODEX, version="0.154.0"),
     )
 
 
@@ -149,7 +149,7 @@ async def test_start_submit_terminal_without_final_and_steer(
     async def fake_probe(config: HarnessConfiguration):
         from tth_codex.harness.compatibility import match_release
 
-        release = match_release(sdk_version="0.144.4", runtime_version="0.144.4", platform="linux")
+        release = match_release(sdk_version="0.154.0", runtime_version="0.154.0", platform="linux")
         return release.to_harness_capabilities(), release
 
     monkeypatch.setattr("tth_codex.harness.adapter.probe_codex", fake_probe)
@@ -196,7 +196,7 @@ async def test_two_conversations_isolated(monkeypatch: pytest.MonkeyPatch) -> No
     async def fake_probe(config: HarnessConfiguration):
         from tth_codex.harness.compatibility import match_release
 
-        release = match_release(sdk_version="0.144.4", runtime_version="0.144.4", platform="linux")
+        release = match_release(sdk_version="0.154.0", runtime_version="0.154.0", platform="linux")
         return release.to_harness_capabilities(), release
 
     monkeypatch.setattr("tth_codex.harness.adapter.probe_codex", fake_probe)
@@ -231,7 +231,7 @@ async def test_stream_approval_notification_fails_closed(monkeypatch: pytest.Mon
     async def fake_probe(config: HarnessConfiguration):
         from tth_codex.harness.compatibility import match_release
 
-        release = match_release(sdk_version="0.144.4", runtime_version="0.144.4", platform="linux")
+        release = match_release(sdk_version="0.154.0", runtime_version="0.154.0", platform="linux")
         return release.to_harness_capabilities(), release
 
     monkeypatch.setattr("tth_codex.harness.adapter.probe_codex", fake_probe)
@@ -284,7 +284,7 @@ async def test_brokered_approval_handler_awaits_answer(
     async def fake_probe(config: HarnessConfiguration):
         from tth_codex.harness.compatibility import match_release
 
-        release = match_release(sdk_version="0.144.4", runtime_version="0.144.4", platform="linux")
+        release = match_release(sdk_version="0.154.0", runtime_version="0.154.0", platform="linux")
         return release.to_harness_capabilities(), release
 
     monkeypatch.setattr("tth_codex.harness.adapter.probe_codex", fake_probe)
@@ -318,6 +318,7 @@ async def test_brokered_approval_handler_awaits_answer(
         adapter._approval_handler,  # pyright: ignore[reportPrivateUsage]
         "item/commandExecution/requestApproval",
         {
+            "kind": "command",
             "threadId": session.native_session_id,
             "turnId": "turn-1",
             "itemId": "cmd-1",
@@ -338,7 +339,7 @@ async def test_brokered_user_input_handler_awaits_structured_answers(
     async def fake_probe(config: HarnessConfiguration):
         from tth_codex.harness.compatibility import match_release
 
-        release = match_release(sdk_version="0.144.4", runtime_version="0.144.4", platform="linux")
+        release = match_release(sdk_version="0.154.0", runtime_version="0.154.0", platform="linux")
         return release.to_harness_capabilities(), release
 
     monkeypatch.setattr("tth_codex.harness.adapter.probe_codex", fake_probe)
@@ -553,6 +554,68 @@ def test_coerce_public_slotted_notifications() -> None:
         "total_tokens": 13,
         "cached_input_tokens": 4,
     }
+
+
+def test_command_item_is_named_as_a_tool_and_carries_its_command_as_an_argument() -> None:
+    from openai_codex.generated.v2_all import (
+        CommandExecutionThreadItem,
+        ItemStartedNotification,
+        ThreadItem,
+    )
+    from openai_codex.models import Notification
+    from tth_types.events import ToolCompletedPayload, ToolRequestedPayload, ToolStartedPayload
+
+    command = "/bin/bash -lc 'rg -n secret-token agentbahn/workflows'"
+    item = ThreadItem(
+        root=CommandExecutionThreadItem.model_validate(
+            {
+                "id": "cmd-1",
+                "type": "commandExecution",
+                "command": command,
+                "commandActions": [],
+                "cwd": "/work",
+                "status": "inProgress",
+            }
+        )
+    )
+    adapter = CodexAdapter(client_factory=FakeCodex)
+    coerced = adapter._coerce_notification(  # pyright: ignore[reportPrivateUsage]
+        Notification(
+            method="item/started",
+            payload=ItemStartedNotification(
+                item=item, started_at_ms=1, thread_id="thread-1", turn_id="turn-1"
+            ),
+        )
+    )
+    assert coerced is not None
+    assert coerced["title"] is None
+    assert coerced["command"] == command
+
+    normalizer = CodexNormalizer()
+    normalizer.set_redaction_patterns(["secret-token"])
+    normalizer.set_session("thread-1")
+    normalizer.begin_turn(uuid4())
+    started = normalizer.on_notification(coerced)
+    requested = next(e for e in started if isinstance(e, ToolRequestedPayload))
+    assert requested.tool_name == "commandExecution"
+    assert requested.arguments == {"command": "/bin/bash -lc 'rg -n *** agentbahn/workflows'"}
+    assert [e.tool_name for e in started if isinstance(e, ToolStartedPayload)] == [
+        "commandExecution"
+    ]
+
+    completed = normalizer.on_notification(
+        {
+            "method": "itemCompleted",
+            "thread_id": "thread-1",
+            "turn_id": "turn-1",
+            "item_id": "cmd-1",
+            "item_type": "command",
+            "status": "completed",
+        }
+    )
+    assert [e.tool_name for e in completed if isinstance(e, ToolCompletedPayload)] == [
+        "commandExecution"
+    ]
 
 
 def test_normalizer_accumulates_per_request_usage_into_the_turn_total() -> None:
@@ -1062,7 +1125,7 @@ async def test_approval_handler_file_deny_and_cancel_paths(
     async def fake_probe(config: HarnessConfiguration):
         from tth_codex.harness.compatibility import match_release
 
-        release = match_release(sdk_version="0.144.4", runtime_version="0.144.4", platform="linux")
+        release = match_release(sdk_version="0.154.0", runtime_version="0.154.0", platform="linux")
         return release.to_harness_capabilities(), release
 
     monkeypatch.setattr("tth_codex.harness.adapter.probe_codex", fake_probe)

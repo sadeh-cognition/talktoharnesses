@@ -15,9 +15,9 @@ from tth_codex.harness.compatibility import (
 def test_load_and_match_release() -> None:
     doc = load_codex_compatibility()
     assert doc.adapter_version == "2026.8.5"
-    assert doc.floor.version == "0.144.4"
-    release = match_release(sdk_version="0.144.4", runtime_version="0.144.4", platform="linux")
-    assert release.id == "codex-openai-codex-0.144.4"
+    assert doc.floor.version == "0.154.0"
+    release = match_release(sdk_version="0.154.0", runtime_version="0.154.0", platform="linux")
+    assert release.id == "codex-openai-codex-0.154.0"
     assert release.capabilities.supports_steer is True
 
 

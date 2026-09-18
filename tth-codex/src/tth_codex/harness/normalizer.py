@@ -54,6 +54,8 @@ from tth_codex.harness.schemas import (
 
 _NS = UUID("b8d4f0a2-3c5e-4f7a-9b1d-2e3f4a5b6c7d")
 
+_ITEM_TOOL_NAMES = {"command": "commandExecution", "file": "fileChange"}
+
 
 def _difference(totals: dict[str, Any], baseline: dict[str, Any]) -> dict[str, int | None]:
     """``totals`` less ``baseline``, dropping any category either one omits."""
@@ -302,13 +304,17 @@ class CodexNormalizer:
             return []
         tool_id = _stable_uuid(f"tool:{note.item_id}")
         self._tools[note.item_id] = tool_id
-        name = note.title or note.item_type
+        # Items without a tool of their own are named as their approvals are,
+        # never after the command line: consumers group and count by name.
+        name = note.title or _ITEM_TOOL_NAMES.get(note.item_type, note.item_type)
         self._tool_names[note.item_id] = name
+        command = self._redact(note.command) if note.command else ""
         return [
             ToolRequestedPayload(
                 turn_id=self._active_turn_id,
                 tool_id=tool_id,
                 tool_name=name,
+                arguments={"command": command} if command else {},
             ),
             ToolStartedPayload(
                 turn_id=self._active_turn_id,

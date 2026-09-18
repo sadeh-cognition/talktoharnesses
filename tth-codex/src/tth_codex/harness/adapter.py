@@ -676,7 +676,8 @@ class CodexAdapter:
                 "item_type": item_type,
             }
             if method == "item/started":
-                raw["title"] = item.get("tool") or item.get("command")
+                raw["title"] = item.get("tool")
+                raw["command"] = item.get("command")
             else:
                 raw["status"] = item.get("status")
             return raw

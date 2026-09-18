@@ -69,7 +69,7 @@ async def test_interrupt_and_close_cancel_pending(
     FakeCodex.instances.clear()
 
     async def fake_probe(config: HarnessConfiguration):
-        release = match_release(sdk_version="0.144.4", runtime_version="0.144.4", platform="linux")
+        release = match_release(sdk_version="0.154.0", runtime_version="0.154.0", platform="linux")
         return release.to_harness_capabilities(), release
 
     monkeypatch.setattr(adapter_mod, "probe_codex", fake_probe)

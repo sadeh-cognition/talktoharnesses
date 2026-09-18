@@ -14,7 +14,7 @@ dependencies = [
     "opentelemetry-sdk>=1,<2",
     "opentelemetry-exporter-otlp-proto-http>=1,<2",
     "opentelemetry-instrumentation-django",
-    "openai-codex==0.144.4",
+    "openai-codex==0.154.0",
     "pywin32==312; sys_platform == 'win32'",
 ]
 
