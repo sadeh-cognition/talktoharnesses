@@ -52,7 +52,9 @@ and `corepack` (so `pnpm` and `yarn` resolve on first use). See
 Pre-building is an optimization, not a requirement: the proxy builds a missing
 `tth-<kind>` image itself on the first request for that kind (editable/repo
 installs only — a wheel install has no build contexts on disk and fails with
-`sandbox_unavailable` until the image is pre-built).
+`sandbox_unavailable` until the image is pre-built). To try an image without
+touching a running sandbox, build it under a custom tag: the proxy replaces a
+kind's container on its next preparation once a new image carries `latest`.
 
 ## Running the proxy
 
@@ -241,30 +243,37 @@ Tuning:
 [RTK](https://github.com/rtk-ai/rtk) rewrites shell commands to `rtk <cmd>`
 so the harness reads a token-trimmed version of the output. The pinned
 release binary (`RTK_VERSION` build arg) is installed in the claude, codex,
-cursor and opencode images. grok and muse are not supported by RTK, and
-prime_agent runs shell commands through its `ipython` tool (`%%bash` cells)
-rather than Pi's `bash` tool, so RTK's Pi extension never sees them; those
-three images are untouched. Integration differs per kind:
+cursor, opencode, grok, and muse images. prime_agent runs shell commands
+through its `ipython` tool (`%%bash` cells) rather than Pi's `bash` tool, so
+RTK's Pi extension never sees them; that image is untouched. Integration
+differs per kind:
 
 | Kind | Mechanism | Where it lives |
 |------|-----------|----------------|
 | claude | in-process SDK `PreToolUse` hook calling `rtk hook claude` | `tth_claude.harness.rtk_hook` (the split runs with `setting_sources=[]`, so no settings.json) |
 | cursor | `preToolUse` hook (`rtk hook cursor`) | `/home/agent/.cursor/hooks.json`, seeded |
 | opencode | plugin calling `rtk rewrite` | `/home/agent/.config/opencode/plugins/rtk.ts`, seeded |
-| codex | rules file (prompt-level; the model follows it) | `/home/agent/.codex/AGENTS.md`, seeded with the `RTK.md` rules inlined (Codex does not expand the `@file` reference `rtk init` writes) |
+| codex, muse | RTK's Codex rules file (prompt-level; the model follows it) | `/home/agent/.codex/AGENTS.md`, seeded with the `RTK.md` rules inlined (Codex does not expand the `@file` reference `rtk init` writes; Muse loads the file as compatible personal rules) |
+| grok | the same rules file, in Grok's global rules location | `/home/agent/.grok/AGENTS.md`, seeded with the same inlined rules |
+
+RTK has no hook for Codex, Grok, or Muse, so those kinds get RTK's own Codex
+rules text in a file their system prompt already includes; the split adapters
+and the canonical TTH prompt are untouched. Muse reads `~/.codex/AGENTS.md`
+unless its `context.foreign_personal_rules` setting is off.
 
 "Seeded" files are written by `rtk init --global …` in a one-shot container
 against the kind's home volume (no network, all capabilities dropped) every
-time the sandbox is prepared, right after credential seeding;
-`rtk init` is idempotent and this also upgrades existing homes after an image
-bump. Seeding and the Claude hook fail open: when `rtk` is missing or errors
-the command runs unmodified.
+time the sandbox is prepared, right after credential seeding; seeding is
+idempotent and this also upgrades existing homes after an image bump. Seeding
+and the Claude hook fail open: when `rtk` is missing or errors the command
+runs unmodified.
 
 Confirm inside a prepared sandbox:
 
 ```sh
 docker exec tth-codex rtk --version
 docker exec tth-codex cat /home/agent/.codex/AGENTS.md
+docker exec tth-grok cat /home/agent/.grok/AGENTS.md
 docker exec tth-cursor cat /home/agent/.cursor/hooks.json
 docker exec tth-claude rtk gain --history   # rewrites recorded so far
 ```

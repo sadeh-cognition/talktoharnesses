@@ -107,7 +107,7 @@ class Split:
 SPLITS: dict[str, Split] = {
     split.kind: split
     for split in (
-        Split("grok", root_installs=(GROK_INSTALL,)),
+        Split("grok", root_installs=(GROK_INSTALL, RTK_INSTALL)),
         Split(
             "cursor",
             # Pyright's nodeenv Node needs libatomic.so.1 (not in slim).
@@ -118,7 +118,7 @@ SPLITS: dict[str, Split] = {
         Split("claude", root_installs=(RTK_INSTALL,)),
         Split("opencode", root_installs=(OPENCODE_INSTALL, RTK_INSTALL)),
         Split("prime-agent", root_installs=(PRIME_AGENT_INSTALL,)),
-        Split("muse", agent_installs=(MUSE_INSTALL,)),
+        Split("muse", root_installs=(RTK_INSTALL,), agent_installs=(MUSE_INSTALL,)),
     )
 }
 assert tuple(SPLITS) == KINDS

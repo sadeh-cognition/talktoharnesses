@@ -32,7 +32,7 @@ Use this catalog to route into the maintained knowledge graph. Obsidian users sh
 - [Django HTTP and SSE surface](capabilities/django-http-sse.md)
 - [Floor-and-probe compatibility](capabilities/floor-and-probe-compatibility.md)
 - [Search, retention, and transcripts](capabilities/search-retention-transcripts.md)
-- [Isolated harness runtimes](capabilities/isolated-harness-runtimes.md)
+- [Isolated harness runtimes](capabilities/isolated-harness-runtimes.md), including seeded RTK rules for Codex, Grok, and Muse.
 - [Official HTTP client](capabilities/official-http-client.md)
 
 ## Requirements and journeys

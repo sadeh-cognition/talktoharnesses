@@ -339,6 +339,22 @@ error message. Regression cases use the pinned SDK notification models for
 retry recovery, capacity failures, and duplicate completion delivery. See
 [Provider Adapters](architecture/provider-adapters.md).
 
+## [2026-09-19] implementation | Seed RTK rules for Grok and Muse
+
+- Added the existing pinned RTK installer to both generated images.
+- Grok and Muse join Codex in the proxy's `RTK_INIT_SPECS`: sandbox
+  preparation seeds RTK's Codex rules text into `~/.grok/AGENTS.md` (Grok's
+  global rules) and `~/.codex/AGENTS.md` (Muse's compatible personal rules).
+  Split adapters, canonical prompts, and approval policies stay unchanged.
+  Verified with headless runs of the installed grok and muse 1.3.0 CLIs that
+  each file reaches the model. Prime Agent remains unchanged.
+- Rules inlining is now idempotent across re-seeding: `rtk init --codex`
+  re-appends its `@RTK.md` reference whenever it is missing, so the previous
+  Codex inlining added a copy of the rules on every preparation.
+- Inspected baseline: `95f006ecec870bd6b22549fd96755f723776970e`.
+- Updated [Isolated Harness Runtimes](capabilities/isolated-harness-runtimes.md)
+  and the deployment guide.
+
 ## Related
 
 - [Wiki index](index.md)

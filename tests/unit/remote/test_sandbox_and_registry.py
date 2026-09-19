@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import shutil
 import threading
 import time
@@ -30,7 +31,11 @@ from talktoharnesses.remote.sandbox import (
     ensure_docker_cli_available,
 )
 from talktoharnesses.remote.sandbox_auth import AUTH_FILE_DEFAULTS
-from talktoharnesses.remote.sandbox_rtk import RTK_INIT_SPECS, seed_rtk_config
+from talktoharnesses.remote.sandbox_rtk import (
+    RTK_INIT_SPECS,
+    rtk_init_command,
+    seed_rtk_config,
+)
 
 
 class FakeStore:
@@ -814,15 +819,22 @@ def test_seed_provider_auth_rejects_missing_configured_file(
 
 
 @pytest.mark.parametrize(
-    ("kind", "directories", "init_args"),
+    ("kind", "directories", "init_args", "rules_file"),
     [
-        (HarnessKind.CODEX, [".codex"], ["--codex"]),
-        (HarnessKind.CURSOR, [".claude", ".cursor"], ["--agent", "cursor", "--auto-patch"]),
-        (HarnessKind.OPENCODE, [".config/opencode/plugins"], ["--opencode", "--auto-patch"]),
+        (HarnessKind.CODEX, [".codex"], ["--codex"], ".codex/AGENTS.md"),
+        (HarnessKind.GROK, [".codex", ".grok"], ["--codex"], ".grok/AGENTS.md"),
+        (HarnessKind.MUSE, [".codex"], ["--codex"], ".codex/AGENTS.md"),
+        (HarnessKind.CURSOR, [".claude", ".cursor"], ["--agent", "cursor", "--auto-patch"], None),
+        (
+            HarnessKind.OPENCODE,
+            [".config/opencode/plugins"],
+            ["--opencode", "--auto-patch"],
+            None,
+        ),
     ],
 )
 def test_seed_rtk_config_runs_rtk_init_against_home_volume(
-    kind: HarnessKind, directories: list[str], init_args: list[str]
+    kind: HarnessKind, directories: list[str], init_args: list[str], rules_file: str | None
 ) -> None:
     calls: list[dict[str, Any]] = []
 
@@ -850,8 +862,11 @@ def test_seed_rtk_config_runs_rtk_init_against_home_volume(
     for directory in directories:
         assert f"(Path.home() / {directory!r}).mkdir(parents=True, exist_ok=True)" in script
     assert f"subprocess.run({['rtk', 'init', '--global', *init_args]!r}, check=True)" in script
-    # Codex ignores ``@file`` references in AGENTS.md; the rules get inlined.
-    assert ("AGENTS.md" in script) is (kind is HarnessKind.CODEX)
+    # Rules-file kinds get the Codex rules text inlined into their own file.
+    if rules_file is None:
+        assert "AGENTS.md" not in script
+    else:
+        assert f"target = Path.home() / {rules_file!r}" in script
     assert calls[0]["environment"] == {"HOME": "/home/agent"}
     assert calls[0]["mounts"] == [
         {"target": "/home/agent", "source": f"tth-{kind.value}-home", "type": "volume"}
@@ -859,6 +874,50 @@ def test_seed_rtk_config_runs_rtk_init_against_home_volume(
     assert calls[0]["network_disabled"] is True
     assert calls[0]["cap_drop"] == ["ALL"]
     assert calls[0]["remove"] is True
+
+
+@pytest.mark.parametrize(
+    ("kind", "rules_file"),
+    [
+        (HarnessKind.CODEX, ".codex/AGENTS.md"),
+        (HarnessKind.GROK, ".grok/AGENTS.md"),
+        (HarnessKind.MUSE, ".codex/AGENTS.md"),
+    ],
+)
+def test_rtk_init_script_inlines_codex_rules_once(
+    kind: HarnessKind, rules_file: str, tmp_path: Path
+) -> None:
+    """Seeding runs on every preparation; the rules must not accumulate.
+
+    ``rtk init --codex`` re-appends its ``@RTK.md`` reference whenever the
+    reference is missing, so a naive inline would add a copy each time.
+    """
+    import subprocess
+    import sys
+
+    home = tmp_path / "home"
+    (home / ".codex").mkdir(parents=True)
+    (home / ".grok").mkdir()
+    (home / rules_file).write_text("# Mine\n\nKeep it.\n")
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_rtk = fake_bin / "rtk"
+    fake_rtk.write_text(
+        "#!/bin/sh\nset -e\n"
+        "printf '# RTK\\n\\nAlways prefix shell commands with `rtk`.\\n'"
+        ' > "$HOME/.codex/RTK.md"\n'
+        'printf \'@%s/.codex/RTK.md\\n\' "$HOME" >> "$HOME/.codex/AGENTS.md"\n'
+    )
+    fake_rtk.chmod(0o755)
+    command = rtk_init_command(kind)
+    assert command is not None
+    env = {"HOME": str(home), "PATH": f"{fake_bin}:{os.environ['PATH']}"}
+    for _ in range(2):
+        subprocess.run([sys.executable, *command[1:]], check=True, env=env)
+
+    assert (home / rules_file).read_text() == (
+        "# Mine\n\nKeep it.\n\n# RTK\n\nAlways prefix shell commands with `rtk`.\n"
+    )
 
 
 @pytest.mark.parametrize("kind", [kind for kind in HarnessKind if kind not in RTK_INIT_SPECS])
@@ -936,10 +995,18 @@ def test_ensure_container_seeds_rtk_after_auth(monkeypatch: pytest.MonkeyPatch) 
     assert order == ["auth", "rtk:cursor:tth-cursor:latest:tth-cursor-home", "reconcile"]
 
 
+def _skip_rtk_seeding(monkeypatch: pytest.MonkeyPatch) -> None:
+    """For container tests whose bare fake client cannot run the RTK seeder."""
+    monkeypatch.setattr(
+        "talktoharnesses.remote.sandbox_rtk.seed_rtk_config", lambda *args, **kwargs: True
+    )
+
+
 def test_ensure_container_refreshes_auth_for_matching_container(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    _skip_rtk_seeding(monkeypatch)
     auth_file = tmp_path / "auth.json"
     auth_file.write_text("rotated", encoding="utf-8")
     manager = SandboxManager(SandboxConfig(auth_files={HarnessKind.GROK: str(auth_file)}))
@@ -1069,6 +1136,7 @@ def test_ensure_container_maps_run_failures_to_reasons(
         raise APIError(error_message)
 
     monkeypatch.setattr(manager, "_reconcile_container", failing_reconcile)
+    _skip_rtk_seeding(monkeypatch)
 
     with pytest.raises(DomainError) as excinfo:
         manager._ensure_container(  # pyright: ignore[reportPrivateUsage]

@@ -52,6 +52,19 @@ RUN mkdir -p /opt/harness \
     && chmod -R a+rX /opt/harness
 ENV TALKTOHARNESSES_GROK_EXECUTABLE=/opt/harness/.grok/bin/grok
 
+# RTK (https://github.com/rtk-ai/rtk) rewrites shell commands to `rtk <cmd>` so
+# the harness sees a token-trimmed version of the output. Pinned release binary.
+ARG RTK_VERSION=0.49.0
+RUN set -eu; case "$(uname -m)" in \
+      x86_64)  rtk_target=x86_64-unknown-linux-musl ;; \
+      aarch64) rtk_target=aarch64-unknown-linux-gnu ;; \
+      *) echo "unsupported architecture for rtk: $(uname -m)" >&2; exit 1 ;; \
+    esac; \
+    rtk_url="https://github.com/rtk-ai/rtk/releases/download/v${RTK_VERSION}"; \
+    curl -fsSL "${rtk_url}/rtk-${rtk_target}.tar.gz" | tar -xz -C /usr/local/bin rtk \
+    && chmod 0755 /usr/local/bin/rtk \
+    && rtk --version
+
 USER agent
 ENV HOME=/home/agent
 
