@@ -7,6 +7,7 @@ from typing import Any
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
+from tth_types.sandbox import SandboxPolicyRef
 
 from talktoharnesses.domain.enums import ApprovalDecision, HarnessKind
 from talktoharnesses.domain.models import (
@@ -51,6 +52,7 @@ class HarnessConfigurationBody(BaseModel):
     model_config = _REQUEST
 
     kind: HarnessKind
+    sandbox_policy: SandboxPolicyRef | None = None
     model: str | None = Field(
         default=None,
         description=(
@@ -95,6 +97,7 @@ class HarnessConfigurationBody(BaseModel):
     def to_domain(self) -> HarnessConfiguration:
         return HarnessConfiguration(
             kind=self.kind,
+            sandbox_policy=self.sandbox_policy,
             model=self.model,
             mode=self.mode,
             effort=self.effort,

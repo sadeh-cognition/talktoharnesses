@@ -101,3 +101,5 @@ Use this catalog to route into the maintained knowledge graph. Obsidian users sh
 
 - [TalkToHarnesses Knowledge Base](../Home.md)
 - [Wiki log](log.md)
+
+- [Project sandbox policies](requirements/project-sandbox-policies.md): egress, credentials, publication, and tool command checks.

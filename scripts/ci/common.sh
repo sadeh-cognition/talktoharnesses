@@ -3,7 +3,7 @@
 set -euo pipefail
 
 UV_VERSION="${UV_VERSION:-0.12.3}"
-PYTHON_VERSION="${PYTHON_VERSION:-3.11}"
+PYTHON_VERSION="${PYTHON_VERSION:-3.12}"
 
 ci_setup() {
   local extras="${1:-django}"

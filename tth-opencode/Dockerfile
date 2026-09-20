@@ -45,6 +45,11 @@ COPY --from=uv /uv /bin/uv
 ARG OPENCODE_VERSION=1.18.19
 RUN npm install -g opencode-ai@${OPENCODE_VERSION} \
     && chown -R ${UID}:${GID} /usr/lib/node_modules/opencode-ai
+# OpenCode installs its plugin API on first launch. Seed it in the home image
+# so a fresh policy scope can probe without a cold dependency installation.
+RUN npm install --prefix /home/agent/.config/opencode --ignore-scripts --no-audit --no-fund \
+      @opencode-ai/plugin@${OPENCODE_VERSION} \
+    && chown -R ${UID}:${GID} /home/agent/.config
 
 # RTK (https://github.com/rtk-ai/rtk) rewrites shell commands to `rtk <cmd>` so
 # the harness sees a token-trimmed version of the output. Pinned release binary.

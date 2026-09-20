@@ -1,20 +1,20 @@
 # Deploying talktoharnesses (tth-proxy) with split services
 
 The `talktoharnesses` package is now **tth-proxy**: it owns the client-facing
-API, persistence, auth, and orchestration. Its adapter path is generic; sandbox
-lifecycle seeds each kind's host credential file into the managed home volume
-when the container is created. Each harness kind runs as its own split service
-from a top-level project directory:
+API, persistence, auth, and orchestration. Each immutable project policy revision,
+provider, and writable mount set gets an internal Docker network, a split
+container, separate home/data volumes, and a credential gateway. Host provider
+credentials stay in the gateway; the split receives scoped handles.
 
-| Kind | Directory | Image | Default port |
-|---|---|---|---|
-| grok | `tth-grok` | `tth-grok` | 8111 |
-| cursor | `tth-cursor` | `tth-cursor` | 8112 |
-| codex | `tth-codex` | `tth-codex` | 8113 |
-| claude | `tth-claude` | `tth-claude` | 8114 |
-| opencode | `tth-opencode` | `tth-opencode` | 8115 |
-| prime_agent | `tth-prime-agent` | `tth-prime-agent` | 8116 |
-| muse | `tth-muse` | `tth-muse` | 8117 |
+| Kind | Directory / image |
+|---|---|
+| grok | `tth-grok` |
+| cursor | `tth-cursor` |
+| codex | `tth-codex` |
+| claude | `tth-claude` |
+| opencode | `tth-opencode` |
+| prime_agent | `tth-prime-agent` |
+| muse | `tth-muse` |
 
 All seven expose the identical HTTP+SSE API defined by the shared
 [`tth-types`](../tth-types) package (`tth_types.split_api`).
@@ -27,7 +27,9 @@ deploy/build-splits.sh v1 claude muse  # some kinds, custom tag
 ```
 
 The script wraps `docker buildx bake` (`docker-bake.hcl` at the repo root, one
-matrix target per kind), which builds the requested kinds concurrently. Every
+matrix target per kind), which builds the requested kinds concurrently and
+always builds `tth-policy-gateway` with the same tag. The gateway requires
+Python 3.12 or newer; the proxy package still supports Python 3.11. Every
 `tth-<kind>/Dockerfile` and `.dockerignore` is rendered from one template by
 `scripts/render_dockerfiles.py` (the static gate runs it with `--check`), so
 edit the template, not the generated files. The shared instructions come first
@@ -58,60 +60,62 @@ kind's container on its next preparation once a new image carries `latest`.
 
 ## Running the proxy
 
-The proxy's `SandboxManager` spawns each kind's container on demand the first
-time its endpoint is resolved, reuses it afterwards, and records it in the
-`talktoharnesses_sandbox` table together with the generated split token, so a
-restarted proxy reattaches to running containers instead of recreating them.
-While an image build or container boot is still in progress, requests for that
-kind fail with `sandbox_preparing` — retry shortly. No per-kind enablement
-configuration exists.
+Managed project isolation requires a Linux Docker host.
 
-The configured mount roots (`TTH_SANDBOX_MOUNT_ROOTS`, default `$HOME/dev`)
-are bind-mounted into each container **at the same path**; harness configs and
-git worktrees embed absolute paths, so working directories and workspace roots
-must live under one of them. Paths outside them are rejected with
-`sandbox_path_not_mounted` (HTTP 400) before the split is contacted. Changing
-the roots recreates each kind's container on its next request.
+Before upgrading, apply the proxy migrations and rebuild all split images plus
+the gateway. Agentbahn must use the matching TTH and `tth-types` changes and run
+its migrations as well. Existing conversations without a policy fail closed;
+create a new harness/conversation bound to a project policy. Existing bound
+conversations retain their original revision, while new ones use the latest.
+Publication is disabled until an Agentbahn project administrator saves its
+remote in the Sandbox settings.
 
-Tuning environment (all optional):
+Save a policy with `PUT /api/v1/sandbox-policies/{uuid}` using `policy` and
+`expected_revision` (zero for creation). Read it with `GET` at the same route.
+The authenticated owner controls revisions. Set the returned `ref` on the
+harness configuration's `sandbox_policy` field. Concurrent stale saves fail.
+Agentbahn's project Sandbox settings handle this lifecycle.
 
-- `TTH_SANDBOX_MOUNT_ROOTS` — colon-separated absolute host paths bind-mounted
-  into every sandbox (default: `$HOME/dev`). Keep this as narrow as your
-  projects allow; an empty value mounts nothing.
-- `TTH_SANDBOX_IMAGE_TAG`, `TTH_SPLIT_PORT_<KIND>` — image tag / host port.
-- `TTH_SANDBOX_ENV_<KIND>` — comma-separated env vars forwarded into that
-  kind's container (defaults: `XAI_API_KEY`, `CURSOR_API_KEY`,
-  `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `OPENCODE_API_KEY` for their kinds;
-  Muse forwards `META_API_KEY`; prime_agent forwards none).
-- `TTH_SANDBOX_<KIND>_AUTH_FILE` — optional credential file source, seeded
-  into the managed `tth-<kind>-home` volume when that kind's container is
-  created. By default TTH uses the kind's conventional host file when present;
-  the forwarded env var remains the fallback when no file is available:
+`ScopedSandboxManager` records scope identities in `talktoharnesses_sandbox`
+and reuses compatible containers across proxy restarts. The gateway exposes an
+ephemeral loopback port for host control; the split exposes no host port.
+Startup/builds can return `sandbox_preparing`; retry shortly.
 
-  | Kind | Host default | Container target |
-  |---|---|---|
-  | grok | `$HOME/.grok/auth.json` | `/home/agent/.grok/auth.json` |
-  | cursor | `$HOME/.config/cursor/auth.json` | `/home/agent/.config/cursor/auth.json` |
-  | codex | `$HOME/.codex/auth.json` | `/home/agent/.codex/auth.json` |
-  | claude | `$HOME/.claude/.credentials.json` | `/home/agent/.claude/.credentials.json` |
-  | opencode | `$HOME/.local/share/opencode/auth.json` | `/home/agent/.local/share/opencode/auth.json` |
-  | prime_agent | `$HOME/.prime/config.json` | `/home/agent/.prime/config.json` |
-  | muse | `$HOME/.config/muse/auth.json` | `/home/agent/.config/muse/auth.json` |
+`TTH_SANDBOX_MOUNT_ROOTS` (default `$HOME/dev`) limits which host paths policies
+may mount. Each scope mounts only its project, admitted linked worktrees and
+Git common directory, plus explicitly declared read-only dependencies. Paths
+keep their host locations. Gateway state and host credential paths cannot be
+mounted into agents.
 
-Diagnostics (all optional):
+Tuning environment:
 
-- `TTH_LOG_LEVEL` — level for the proxy's stderr and `talktoharnesses.log`
-  sinks; default `DEBUG`. It covers both the HTTP request/response lines
-  and the proxy's own modules (runtime manager, command processor, remote
-  adapter, sandbox), which log stream open/close, interrupt delivery and
-  stdout-silence warnings per conversation at INFO. Third-party loggers
-  (httpx, httpcore, urllib3, docker, uvicorn.access) are always held at
-  WARNING.
-- `TTH_SPLIT_LOG_LEVEL` — inside a split container, the `tth_<kind>` logger
-  level written to the container's stdout (`docker logs tth-<kind>`); default
-  `INFO`, `DEBUG` adds one line per protocol frame (muse).
+- `TTH_SANDBOX_MOUNT_ROOTS`: colon-separated operator-approved mount roots.
+- `TTH_SANDBOX_IMAGE_TAG`: tag shared by split and gateway images.
+- `TTH_SANDBOX_STATE_DIR`: private gateway state, default
+  `$HOME/.local/state/talktoharnesses/sandboxes`; keep it outside project mounts.
+- `TTH_SANDBOX_ENV_<KIND>`: host credential environment variable names. Values
+  become provider-scoped handles in the agent. This is not arbitrary environment
+  passthrough. The existing operator-only `TTH_SPLIT_ADAPTER_FACTORY` test hook
+  remains available.
+- `TTH_SANDBOX_<KIND>_AUTH_FILE`: host native credential file. Conventional
+  defaults are `.grok/auth.json`, `.config/cursor/auth.json`,
+  `.codex/auth.json`, `.claude/.credentials.json`,
+  `.local/share/opencode/auth.json`, `.prime/config.json`, and `.config/muse/auth.json`.
+  Log in on the host; do not log in inside agent containers. Unsupported native
+  secret formats fail with `credential_proxy_unsupported`.
 
-Forward any container variable with `TTH_SANDBOX_ENV_<KIND>`.
+The gateway substitutes credentials only on admitted provider authentication
+fields, rotates host refresh tokens under a file lock, verifies upstream TLS,
+and denies private DNS results, arbitrary tunnels and Git receive-pack. The
+sandbox cannot bypass it with direct network access. Muse uses its configurable
+API URL to reach a fixed private reverse proxy because its native inference
+transport does not trust the interception CA; the upstream origin remains fixed
+and verified.
+
+Defaults allow provider operations and read-only PyPI/npm downloads. Additional
+HTTPS access requires exact host/path/method rules in the policy. Interpreter
+downloads from GitHub need explicit rules for the release and asset hosts.
+Private registries and secret-bearing MCP servers are not supported.
 
 Runtime tuning (all optional):
 
@@ -130,38 +134,22 @@ Runtime tuning (all optional):
   runtime_owned_by_other_worker`) when it lands on a worker that does not
   hold the conversation; retry, or let the idle reap release it.
 
-The split token sent as `X-TTH-Split-Token` is generated per sandbox and
-persisted (in the clear) in the proxy database; it guards loopback-only
-traffic between the proxy and its containers, which share a trust domain.
+The host control token is stored in the proxy database and differs from the
+split token inside the scope. Gateway control authenticates the host token and
+forwards only to that scope's split. Agents cannot use the host control route.
 
-Containers are created with `restart: unless-stopped`, `cap_drop: ALL`,
-`no-new-privileges`, `pids_limit 512` (2048 for grok, whose multi-threaded CLI
-exhausts 512 at around ten concurrent sessions), `mem_limit 4g`, a per-kind
-`tth-<kind>-home` volume for CLI credentials, and are **left running** when
-the proxy stops so later requests reuse them.
-
-A container is recreated on first use when its settings no longer match the
-proxy's, including the pids limit. Upgrading from a build that used 512 for
-grok therefore replaces the existing `tth-grok` container the next time a
-grok harness is prepared, which drops any grok sessions still running in it;
-schedule that upgrade when grok conversations are idle.
-
-Upgrading from a build that exported `UV_PROJECT_ENVIRONMENT=/opt/venv` in the
-image likewise recreates every kind's container on its next request, because
-the toolchain cache variables below are now part of the managed environment.
-
-Interactive CLI logins persist in the per-kind home volume, e.g.:
-
-```sh
-docker exec -it tth-claude claude login
-```
+Containers drop all capabilities, disable privilege escalation, and run with
+resource limits. The internal network has no host bridge address; direct
+external traffic is blocked. Containers and their scope-specific volumes remain
+available for resume until an operator removes them. Image/config drift
+recreates containers on next use; schedule upgrades while conversations are idle.
 
 ## Toolchains and caches
 
 Agents (and workspace setup scripts, below) work in bind-mounted projects with
 plain `uv`, `node`, `npm`, `pnpm` and `yarn`. The proxy injects these variables
 into every sandbox container so interpreter downloads and package caches land
-on the persistent per-kind `tth-<kind>-data` volume instead of the container's
+on the persistent scope-specific `tth-scope-<id>-data` volume instead of the container's
 writable layer or the project tree:
 
 | Variable | Value |
@@ -178,8 +166,8 @@ writable layer or the project tree:
 
 They are managed like the split token: `TTH_SANDBOX_ENV_<KIND>` cannot override
 them, and a container whose environment lacks them is recreated. Inspect what a
-kind has cached with `docker exec tth-<kind> ls /data/uv/python /data/npm/cache`;
-remove the `tth-<kind>-data` volume to start over.
+scope has cached with `docker exec tth-scope-<id> ls /data/uv/python /data/npm/cache`;
+remove its data volume to start over.
 
 The harness process itself never sees the split's own configuration: the split
 moves `TTH_SPLIT_TOKEN` and `DJANGO_SETTINGS_MODULE` out of its environment once
@@ -207,7 +195,7 @@ Contract:
   script sees the same mounts, resource limits and network as the harness.
 - Environment: `PATH`, `HOME`, `LANG=C.UTF-8`, `TERM=dumb`, `USER=agent`,
   `TTH_WORKSPACE_SETUP=1`, `TTH_HARNESS_KIND=<kind>` and the toolchain
-  variables above. Provider credentials, the split token and the split's
+  variables above plus the gateway proxy and public CA settings. Provider credentials, the split token and the split's
   Django settings are never passed. stdin is closed; stdout and stderr are
   merged.
 - It must be idempotent. TTH stamps a successful run (a digest of the script,
@@ -265,42 +253,28 @@ unless its `context.foreign_personal_rules` setting is off.
 against the kind's home volume (no network, all capabilities dropped) every
 time the sandbox is prepared, right after credential seeding; seeding is
 idempotent and this also upgrades existing homes after an image bump. Seeding
-and the Claude hook fail open: when `rtk` is missing or errors the command
-runs unmodified.
+fails open when `rtk` is missing or errors. Claude's separate command guard
+checks the final rewritten Bash command through the gateway and fails closed,
+even with yolo enabled. Other providers are checked only when they emit command
+approval requests. The UI reports this coverage: the blocklist cannot prevent
+execution through unobserved tools or arbitrary scripts.
 
 Confirm inside a prepared sandbox:
 
 ```sh
-docker exec tth-codex rtk --version
-docker exec tth-codex cat /home/agent/.codex/AGENTS.md
-docker exec tth-grok cat /home/agent/.grok/AGENTS.md
-docker exec tth-cursor cat /home/agent/.cursor/hooks.json
-docker exec tth-claude rtk gain --history   # rewrites recorded so far
+docker exec <codex-scope-container> rtk --version
+docker exec <codex-scope-container> cat /home/agent/.codex/AGENTS.md
+docker exec <grok-scope-container> cat /home/agent/.grok/AGENTS.md
+docker exec <cursor-scope-container> cat /home/agent/.cursor/hooks.json
+docker exec <claude-scope-container> rtk gain --history   # rewrites recorded so far
 ```
 
 ## OpenTelemetry
 
-The proxy and all seven splits export traces, metrics, and logs by default via
-OTLP/HTTP:
-
-- `OTEL_EXPORTER_OTLP_ENDPOINT=false` (or `0`, case-insensitive) disables all
-  signals; any other value is the collector endpoint; unset uses the SDK
-  default `http://localhost:4318`. Missing SDK/exporter packages with export
-  enabled fail startup — opt out or install them.
-- Each split bakes its own `service.name` (`tth-grok` … `tth-muse`,
-  overridable per process via `OTEL_SERVICE_NAME`); the proxy reports
-  `talktoharnesses`.
-- The proxy always injects the endpoint into sandbox containers (independent
-  of `TTH_SANDBOX_ENV_<KIND>`), rewriting unset/localhost values to
-  `http://host.docker.internal:4318` and adding the
-  `host.docker.internal:host-gateway` extra-hosts mapping so containers reach
-  a collector on the host. The `false`/`0` sentinel passes through verbatim so
-  opted-out proxies get opted-out splits. Collector headers can contain
-  credentials, so `OTEL_EXPORTER_OTLP_HEADERS` is forwarded only when
-  `TTH_SANDBOX_FORWARD_OTEL_HEADERS=1`; `OTEL_SERVICE_NAME` is never forwarded.
-- Upgrading to this behavior recreates each kind's container once (env/
-  extra-hosts drift; the home/data volumes survive). Rebuild the split images
-  first — containers running old images ignore the telemetry env.
+The proxy retains its existing OTLP configuration. Managed agent containers
+set `OTEL_SDK_DISABLED=true`; host collector endpoints and secret headers are
+not forwarded into the sandbox. The shared split telemetry implementation honors
+this flag. Directly deployed splits retain their existing telemetry configuration.
 
 ## Live gates
 
@@ -319,10 +293,10 @@ package, so it needs network access.
 
 Every kind has a sandbox live gate: `tests/live/test_<kind>_sandbox_live.py`,
 enabled with `TALKTOHARNESSES_LIVE_<KIND>_SANDBOX=1`. The fixture selects the
-sandbox kind, assigns an isolated container and port, and cleans them up
+sandbox policy/provider, assigns an isolated scope, and cleans them up
 afterward. The full create/resume journey uses the official TTH HTTP client
-while TTH handles workspace mounting, localhost routing, split-token setup,
-managed container startup, and credential seeding:
+while TTH handles workspace mounting, gateway control, managed container startup, and
+credential proxying:
 
 ```sh
 TALKTOHARNESSES_LIVE_GROK_SANDBOX=1 \
@@ -334,7 +308,14 @@ the auth-file table above) and removes the kind's API-key env var, proving
 that seeded host-file authentication works on its own. A missing
 `tth-<kind>:latest` image is built on demand; pre-build it to keep the gate
 fast. OpenCode's
-host file is created by `opencode auth login`. Credential files are copied
-only when a managed container is created, so recreate the `tth-<kind>`
-container after changing the host auth file (the live fixtures sidestep this
-by using a fresh container per run).
+host file is created by `opencode auth login`. Native host logins are virtualized
+on every scope preparation, and the gateway reloads credentials for requests.
+
+A focused login compatibility gate creates and resumes a conversation for each
+provider without requiring unrelated tool features:
+
+```sh
+TTH_SANDBOX_IMAGE_TAG=latest TALKTOHARNESSES_POLICY_PROVIDERS=1 \
+  uv run --extra django --extra client --extra gateway pytest \
+  tests/live/test_policy_provider_sessions.py -q
+```

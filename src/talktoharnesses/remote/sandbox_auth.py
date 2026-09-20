@@ -1,10 +1,7 @@
-"""Per-kind host credential files and how they are seeded into a sandbox.
+"""Native authentication file locations and seeding of virtual credentials.
 
-Sandbox lifecycle may contain narrowly scoped credential setup: each kind's
-host credential file is copied into the managed home volume at container
-creation (and re-seeded when the host file changes). This module owns the
-per-kind file locations and the one-shot seeding container; it knows nothing
-about the split process or protocol.
+Only gateway-created handles belong in a managed sandbox home. The gateway
+reads and refreshes the original host file outside that sandbox.
 """
 
 from __future__ import annotations
@@ -115,7 +112,7 @@ def seed_auth_file(
     image: str,
     home_volume: str,
 ) -> None:
-    """Copy the host auth file into the sandbox home volume via a one-shot container.
+    """Copy a virtual authentication document into the sandbox home volume.
 
     The seeding container runs the split image with networking disabled and
     every capability dropped; the host file is bind-mounted read-only and

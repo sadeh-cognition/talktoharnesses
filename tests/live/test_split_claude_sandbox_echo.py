@@ -15,7 +15,12 @@ from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
-from tests.live.helpers import TERMINAL_TYPES, LiveHttp, isolated_sandbox_environment
+from tests.live.helpers import (
+    TERMINAL_TYPES,
+    LiveHttp,
+    isolated_sandbox_environment,
+    scoped_configuration,
+)
 
 from talktoharnesses.client import APIError, AsyncTalkToHarnessesClient
 from talktoharnesses.domain.enums import HarnessKind
@@ -57,7 +62,7 @@ def claude_echo_sandbox(
     # Synthetic credential file: the echo adapter needs none, but sandbox
     # creation seeds whatever auth file is configured for the kind.
     auth_file = tmp_path_factory.mktemp("claude-echo-auth") / ".credentials.json"
-    auth_file.write_text("{}", encoding="utf-8")
+    auth_file.write_text('{"access_token":"test-only"}', encoding="utf-8")
     monkeypatch.setenv("TTH_SANDBOX_CLAUDE_AUTH_FILE", str(auth_file))
     # Forward the factory override into the container instead of a credential.
     monkeypatch.setenv("TTH_SANDBOX_ENV_CLAUDE", "TTH_SPLIT_ADAPTER_FACTORY")
@@ -78,9 +83,12 @@ async def test_proxy_journey_through_sandboxed_split(live_http: LiveHttp) -> Non
 
     harness = await client.create_harness(
         name="split-claude",
-        configuration=HarnessConfiguration(
-            kind=HarnessKind.CLAUDE,
-            working_directory=str(live_http.workspace),
+        configuration=await scoped_configuration(
+            client,
+            HarnessConfiguration(
+                kind=HarnessKind.CLAUDE,
+                working_directory=str(live_http.workspace),
+            ),
         ),
     )
     probe = await probe_until_ready(client, harness.id)

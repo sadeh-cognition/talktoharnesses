@@ -8,6 +8,7 @@ from uuid import UUID
 from django.db import connection
 from django.http import HttpRequest, StreamingHttpResponse
 from ninja import Router
+from tth_types.sandbox import SandboxPolicyRevision, SaveSandboxPolicy
 
 from talktoharnesses.application.observability import get_observability
 from talktoharnesses.django.api.schemas import (
@@ -56,6 +57,20 @@ from talktoharnesses.domain.models import (
 from talktoharnesses.domain.transcripts import TranscriptDocument
 
 router = Router()
+
+
+@router.get("/sandbox-policies/{policy_id}", response=SandboxPolicyRevision)
+async def get_sandbox_policy(
+    request: HttpRequest, policy_id: UUID, revision: int | None = None
+) -> SandboxPolicyRevision:
+    return await get_service().get_sandbox_policy(_owner(request), policy_id, revision)
+
+
+@router.put("/sandbox-policies/{policy_id}", response=SandboxPolicyRevision)
+async def save_sandbox_policy(
+    request: HttpRequest, policy_id: UUID, body: SaveSandboxPolicy
+) -> SandboxPolicyRevision:
+    return await get_service().save_sandbox_policy(_owner(request), policy_id, body)
 
 
 def _owner(request: HttpRequest) -> str:

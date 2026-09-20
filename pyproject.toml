@@ -12,6 +12,7 @@ dependencies = [
     "pydantic>=2",
     "httpx>=0.28,<0.29",
     "tth-types",
+    "bashlex>=0.18,<0.19",
 ]
 
 [project.optional-dependencies]
@@ -32,6 +33,9 @@ client = [
 ]
 all = [
     "talktoharnesses[django,postgres,client]",
+]
+gateway = [
+    "mitmproxy>=12,<13 ; python_full_version >= '3.12'",
 ]
 
 [dependency-groups]

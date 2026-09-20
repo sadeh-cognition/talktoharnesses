@@ -175,6 +175,9 @@ class ToolOutcome(StrEnum):
 
 
 class ErrorCode(StrEnum):
+    SANDBOX_POLICY_REQUIRED = "sandbox_policy_required"
+    SANDBOX_POLICY_DENIED = "sandbox_policy_denied"
+    CREDENTIAL_PROXY_UNSUPPORTED = "credential_proxy_unsupported"
     PERSISTENCE_REQUIRED = "persistence_required"
     CONVERSATION_BUSY = "conversation_busy"
     MODE_CHANGE_WHILE_ACTIVE = "mode_change_while_active"

@@ -1,41 +1,109 @@
-"""Opt-in Docker sandbox gate: SandboxManager boots a real split container.
+"""Opt-in policy gateway gate using real Docker networking and synthetic credentials.
 
-Requires Docker; the tth-claude image is built on demand if absent
-(pre-build with deploy/build-splits.sh claude to skip the build wait).
-Enable with TALKTOHARNESSES_SANDBOX_DOCKER=1.
+TALKTOHARNESSES_SANDBOX_DOCKER=1 enables the test. Images are selected by
+TTH_SANDBOX_IMAGE_TAG. No provider inference request is made.
 """
 
 from __future__ import annotations
 
+import json
 import os
+from contextlib import suppress
+from pathlib import Path
+from uuid import uuid4
 
 import httpx
 import pytest
+from tth_types.sandbox import SandboxPolicy, SandboxPolicyRef, SandboxPolicyRevision
 
 from talktoharnesses.domain.enums import HarnessKind
-from talktoharnesses.remote.sandbox import SandboxConfig, SandboxManager
+from talktoharnesses.remote.isolated_sandbox import IsolatedSandbox
+from talktoharnesses.remote.sandbox import SandboxConfig
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("TALKTOHARNESSES_SANDBOX_DOCKER") != "1",
-    reason="set TALKTOHARNESSES_SANDBOX_DOCKER=1 (requires Docker + built tth-claude image)",
+    reason="set TALKTOHARNESSES_SANDBOX_DOCKER=1 (requires Docker and built images)",
 )
 
 
-async def test_sandbox_boot_health_and_reuse() -> None:
-    # A generous prepare grace keeps a cold image build inside the first call.
-    config = SandboxConfig.from_env({}).model_copy(update={"prepare_grace": 1800.0})
-    manager = SandboxManager(config)
+async def test_gateway_boot_reuse_network_denials_and_command_guard(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import docker
+    from docker.errors import NotFound
 
-    endpoint = await manager.endpoint(HarnessKind.CLAUDE)
-    assert endpoint.base_url == f"http://127.0.0.1:{config.ports[HarnessKind.CLAUDE]}"
-    assert endpoint.token, "sandbox boot must inject a split token"
-
-    async with httpx.AsyncClient(base_url=endpoint.base_url, timeout=5.0) as client:
-        health = await client.get("/v1/health")
-        assert health.status_code == 200
-        assert health.json()["kind"] == "claude"
-
-    # Second call reuses the running container without re-checking Docker.
-    again = await manager.endpoint(HarnessKind.CLAUDE)
-    assert again.base_url == endpoint.base_url
-    assert again.token == endpoint.token
+    root = tmp_path / "workspace"
+    root.mkdir()
+    revision = SandboxPolicyRevision(
+        ref=SandboxPolicyRef(id=uuid4(), revision=1),
+        policy=SandboxPolicy(project_root=str(root)),
+    )
+    monkeypatch.setenv("OPENAI_API_KEY", "test-only-provider-key")
+    config = SandboxConfig.from_env({}).model_copy(
+        update={
+            "image_tag": os.environ.get("TTH_SANDBOX_IMAGE_TAG", "latest"),
+            "mount_roots": (str(root),),
+            "workspace_setup_enabled": False,
+        }
+    )
+    name = "tth-policy-test-" + uuid4().hex[:12]
+    manager = IsolatedSandbox(
+        config,
+        store=None,
+        revision=revision,
+        name=name,
+        roots=(str(root),),
+        state_root=tmp_path / "private",
+    )
+    client = docker.from_env()
+    try:
+        endpoint = await manager.endpoint(HarnessKind.CODEX, (str(root),))
+        assert await manager.endpoint(HarnessKind.CODEX) == endpoint
+        async with httpx.AsyncClient(base_url=endpoint.base_url, timeout=10) as http:
+            health = await http.get("/v1/health")
+            assert health.status_code == 200 and health.json()["kind"] == "codex"
+            denied_control = await http.post(
+                "/v1/sessions", headers={"X-TTH-Split-Token": "wrong"}, json={}
+            )
+            assert denied_control.status_code == 403
+        container = client.containers.get(name)
+        assert "test-only-provider-key" not in json.dumps(container.attrs)
+        allowed = container.exec_run(
+            ["curl", "-fsS", "--max-time", "20", "-o", "/dev/null", "https://pypi.org/simple/pip/"]
+        )
+        assert allowed.exit_code == 0, allowed.output
+        denied = container.exec_run(
+            ["curl", "-sS", "--max-time", "5", "https://unapproved.example/"]
+        )
+        assert denied.exit_code != 0 and b"403" in denied.output
+        direct = container.exec_run(
+            ["curl", "-sS", "--noproxy", "*", "--max-time", "3", "https://1.1.1.1/"]
+        )
+        assert direct.exit_code != 0
+        command = container.exec_run(
+            [
+                "curl",
+                "-fsS",
+                "--max-time",
+                "5",
+                "-H",
+                "Content-Type: application/json",
+                "-d",
+                json.dumps({"command": "git push", "cwd": str(root)}),
+                "http://tth-gateway.invalid:8080/__tth/command-check",
+            ]
+        )
+        assert command.exit_code == 0
+        assert isinstance(command.output, bytes)
+        assert json.loads(command.output)["allowed"] is False
+    finally:
+        for suffix in ("-gateway", ""):
+            with suppress(NotFound):
+                client.containers.get(name + suffix).remove(force=True)
+        with suppress(NotFound):
+            client.networks.get(name + "-network").remove()
+        for suffix in ("-home", "-data"):
+            with suppress(NotFound):
+                client.volumes.get(name + suffix).remove()
+        client.close()

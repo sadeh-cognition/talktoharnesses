@@ -13,7 +13,7 @@ variable "HOST_UID" { default = "1000" }
 variable "HOST_GID" { default = "1000" }
 
 group "default" {
-  targets = ["split"]
+  targets = ["split", "gateway"]
 }
 
 target "split" {
@@ -23,4 +23,12 @@ target "split" {
   tags     = ["tth-${kind}:${TAG}"]
   args     = { UID = HOST_UID, GID = HOST_GID }
   contexts = { tth_types = "tth-types" }
+}
+
+
+target "gateway" {
+  context = "."
+  dockerfile = "deploy/gateway.Dockerfile"
+  tags = ["tth-policy-gateway:${TAG}"]
+  args = { UID = HOST_UID, GID = HOST_GID }
 }

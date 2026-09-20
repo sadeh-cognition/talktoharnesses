@@ -431,12 +431,42 @@ class RetentionPolicyRecord(models.Model):
         ]
 
 
+class SandboxPolicyRecord(models.Model):
+    id: models.UUIDField[UUID, UUID] = models.UUIDField(primary_key=True)
+    owner_id: models.CharField[str, str] = models.CharField(max_length=255)
+    latest_revision: models.PositiveIntegerField[int, int] = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        db_table = "talktoharnesses_sandbox_policy"
+
+
+class SandboxPolicyRevisionRecord(models.Model):
+    policy: models.ForeignKey[SandboxPolicyRecord, SandboxPolicyRecord] = models.ForeignKey(
+        SandboxPolicyRecord, on_delete=models.PROTECT
+    )
+    revision: models.PositiveIntegerField[int, int] = models.PositiveIntegerField()
+    rules = models.JSONField()
+    repository_directory: models.CharField[str | None, str | None] = models.CharField(
+        max_length=4096, null=True
+    )
+    created_at: models.DateTimeField[datetime, datetime] = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "talktoharnesses_sandbox_policy_revision"
+        constraints = [
+            models.UniqueConstraint(
+                fields=("policy", "revision"), name="tth_policy_revision_unique"
+            )
+        ]
+
+
 class SandboxRecord(models.Model):
     """One Docker split sandbox the proxy has spawned and tracks."""
 
-    kind: models.CharField[str, str] = models.CharField(
-        max_length=32, primary_key=True, editable=False
+    scope: models.CharField[str, str] = models.CharField(
+        max_length=128, primary_key=True, editable=False
     )
+    kind: models.CharField[str, str] = models.CharField(max_length=32)
     container_name: models.CharField[str, str] = models.CharField(max_length=128)
     image: models.CharField[str, str] = models.CharField(max_length=255)
     host_port: models.PositiveIntegerField[int, int] = models.PositiveIntegerField()

@@ -3,7 +3,8 @@
 RTK (https://github.com/rtk-ai/rtk) rewrites Bash commands to ``rtk <cmd>``
 so the model reads trimmed output. The split runs with ``setting_sources=[]``
 so the usual settings.json hook never loads; shell out to the same hook
-processor in-process instead. Everything fails open: no rtk, no rewrite.
+processor in-process instead. Missing RTK leaves commands unchanged. The
+project command guard fails closed when the gateway is unavailable.
 """
 
 from __future__ import annotations
@@ -12,6 +13,8 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
+import urllib.request
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -61,7 +64,26 @@ async def rtk_updated_input(tool_input: dict[str, Any]) -> dict[str, Any] | None
     return updated if isinstance(updated, dict) else None
 
 
-def build_pre_tool_use_hook(*, yolo: bool) -> Callable[..., Awaitable[dict[str, Any]]]:
+def _command_allowed(command: str, cwd: str) -> bool:
+    url = os.environ.get("TTH_COMMAND_CHECK_URL")
+    if not url:
+        return False
+    try:
+        request = urllib.request.Request(
+            url,
+            data=json.dumps({"command": command, "cwd": cwd}).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(request, timeout=10) as response:
+            decision = json.load(response)
+            return isinstance(decision, dict) and decision.get("allowed") is True
+    except (OSError, ValueError):
+        return False
+
+
+def build_pre_tool_use_hook(
+    *, yolo: bool, sandbox_policy: bool = False, cwd: str = "/"
+) -> Callable[..., Awaitable[dict[str, Any]]]:
     """SDK ``PreToolUse`` hook: RTK-rewrite Bash and, unless yolo, force the broker ask."""
 
     async def _pre_tool_use(
@@ -80,6 +102,16 @@ def build_pre_tool_use_hook(*, yolo: bool) -> Callable[..., Awaitable[dict[str, 
                 updated = await rtk_updated_input(tool_input)
                 if updated is not None:
                     output["updatedInput"] = updated
+                effective = updated if updated is not None else tool_input
+                command = effective.get("command")
+                if sandbox_policy and (
+                    not isinstance(command, str)
+                    or not await asyncio.to_thread(_command_allowed, command, cwd)
+                ):
+                    output["permissionDecision"] = "deny"
+                    output["permissionDecisionReason"] = (
+                        "The project command guard denied this command."
+                    )
         return {"hookSpecificOutput": output}
 
     return _pre_tool_use

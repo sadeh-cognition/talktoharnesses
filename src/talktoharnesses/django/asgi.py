@@ -33,15 +33,16 @@ from talktoharnesses.application.service import TalkToHarnessesService
 from talktoharnesses.django.auth import validate_jwt_settings
 from talktoharnesses.django.broker import DjangoCommittedEventBroker
 from talktoharnesses.django.persistence import DjangoPersistence
+from talktoharnesses.django.sandbox_policies import DjangoSandboxPolicyStore
 from talktoharnesses.django.sandbox_store import DjangoSandboxStore
 from talktoharnesses.domain.enums import ErrorCode
 from talktoharnesses.domain.errors import DomainError
 from talktoharnesses.remote.registry import build_remote_adapter_registry
 from talktoharnesses.remote.sandbox import (
     SandboxConfig,
-    SandboxManager,
     ensure_docker_cli_available,
 )
+from talktoharnesses.remote.scoped_sandboxes import ScopedSandboxManager
 from talktoharnesses.runtime.manager import RuntimeManager
 from talktoharnesses.runtime.policy import RuntimePolicy
 
@@ -93,7 +94,10 @@ def _build_service() -> TalkToHarnessesService:
     persistence = DjangoPersistence()
     # Every kind is remote: its Docker sandbox is spawned on demand and
     # tracked in the sandbox store so restarts reattach to it.
-    sandboxes = SandboxManager(SandboxConfig.from_env(), store=DjangoSandboxStore())
+    policies = DjangoSandboxPolicyStore()
+    sandboxes = ScopedSandboxManager(
+        SandboxConfig.from_env(), store=DjangoSandboxStore(), policies=policies
+    )
     registry = build_remote_adapter_registry(sandboxes)
     broker = DjangoCommittedEventBroker()
     runtime = RuntimeManager(
@@ -106,6 +110,7 @@ def _build_service() -> TalkToHarnessesService:
         _utc_clock,
         runtime,
         readiness_spawn_gate=sandboxes.is_running,
+        sandbox_policies=policies,
     )
 
 

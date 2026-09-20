@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import socket
 from collections.abc import AsyncIterator, Awaitable, Callable, Generator, Sequence
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
@@ -12,6 +11,7 @@ from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
+from tth_types.sandbox import SandboxPolicy, SaveSandboxPolicy
 
 from talktoharnesses.client import AsyncTalkToHarnessesClient, ConversationStreamItem
 from talktoharnesses.domain.enums import ApprovalDecision, HarnessKind
@@ -28,7 +28,8 @@ from talktoharnesses.domain.models import (
     HarnessConfiguration,
     HarnessProjection,
 )
-from talktoharnesses.remote.sandbox import SandboxManager
+from talktoharnesses.remote.isolated_sandbox import IsolatedSandbox
+from talktoharnesses.remote.scoped_sandboxes import ScopedSandboxManager
 
 TERMINAL_TYPES = frozenset(
     {"turn_completed", "turn_failed", "turn_interrupted", "turn_outcome_unknown"}
@@ -40,15 +41,6 @@ class LiveHttp:
     client: AsyncTalkToHarnessesClient
     workspace: Path
     close_runtime: Callable[[UUID], Awaitable[None]]
-
-
-def _available_port() -> int:
-    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    try:
-        listener.bind(("127.0.0.1", 0))
-        return int(listener.getsockname()[1])
-    finally:
-        listener.close()
 
 
 @contextmanager
@@ -72,32 +64,23 @@ def isolated_sandbox_environment(
     if not Path(auth_file).is_file():
         pytest.fail(f"{kind.value} sandbox auth file was not found: {auth_file}")
 
-    kind_name = kind.value.upper()
-    # Image names use dashes (mirror SandboxManager._container_name):
-    # prime_agent builds as tth-prime-agent, never tth-prime_agent.
-    kind_slug = kind.value.replace("_", "-")
-    image_name = f"tth-{kind_slug}:latest"
-    container_name = f"tth-live-{kind_slug}-{uuid4().hex[:12]}"
+    scopes: set[str] = set()
+    resolve = ScopedSandboxManager.for_configuration
 
-    def test_container_name(_manager: SandboxManager, _kind: HarnessKind) -> str:
-        return container_name
-
-    def test_image(_manager: SandboxManager, _kind: HarnessKind) -> str:
-        return image_name
-
-    mount_root = str(tmp_path_factory.getbasetemp())
-
-    def test_mount_roots(_manager: SandboxManager) -> tuple[str, ...]:
-        return (mount_root,)
+    async def track_scope(
+        manager: ScopedSandboxManager, configuration: HarnessConfiguration
+    ) -> IsolatedSandbox:
+        sandbox = await resolve(manager, configuration)
+        scopes.add(sandbox.name)
+        monkeypatch.setenv(LIVE_CONTAINER_ENV, sandbox.name)
+        return sandbox
 
     if credential_environment_variable is not None:
         monkeypatch.delenv(credential_environment_variable, raising=False)
     monkeypatch.setenv(auth_environment_variable, auth_file)
-    monkeypatch.setenv(f"TTH_SPLIT_PORT_{kind_name}", str(_available_port()))
-    monkeypatch.setenv(LIVE_CONTAINER_ENV, container_name)
-    monkeypatch.setattr(SandboxManager, "_container_name", test_container_name)
-    monkeypatch.setattr(SandboxManager, "_image", test_image)
-    monkeypatch.setattr(SandboxManager, "_mount_roots", test_mount_roots)
+    monkeypatch.setenv("TTH_SANDBOX_MOUNT_ROOTS", str(tmp_path_factory.getbasetemp()))
+    monkeypatch.setenv("TTH_SANDBOX_STATE_DIR", str(tmp_path_factory.mktemp("gateway-state")))
+    monkeypatch.setattr(ScopedSandboxManager, "for_configuration", track_scope)
     try:
         yield
     finally:
@@ -106,11 +89,15 @@ def isolated_sandbox_environment(
 
         client = docker.from_env()
         try:
-            with suppress(NotFound):
-                client.containers.get(container_name).remove(force=True)
-            for suffix in ("home", "data"):
+            for container_name in scopes:
+                for suffix in ("-gateway", ""):
+                    with suppress(NotFound):
+                        client.containers.get(container_name + suffix).remove(force=True)
                 with suppress(NotFound):
-                    client.volumes.get(f"{container_name}-{suffix}").remove()
+                    client.networks.get(container_name + "-network").remove()
+                for suffix in ("home", "data"):
+                    with suppress(NotFound):
+                        client.volumes.get(f"{container_name}-{suffix}").remove()
         finally:
             client.close()
 
@@ -243,7 +230,7 @@ async def assert_rtk_rewrite(
         if event.type.startswith(("tool_", "interaction_"))
     ]
     assert tool_events, (
-        f"the harness ran no tool for the rtk prompt; assistant text: {_assistant_text(events)!r}"
+        f"the harness ran no tool for the rtk prompt; assistant text: {assistant_text(events)!r}"
     )
     history = await asyncio.to_thread(_sandbox_rtk_history)
     assert "rtk git status" in history, (
@@ -367,14 +354,14 @@ def _assert_turn(
         assert len(interactions) >= min_interactions, (
             f"live turn completed with {len(interactions)} interactions; "
             f"expected >= {min_interactions}; events: {[event.type for event in matching]}; "
-            f"assistant text: {_assistant_text(matching)!r}"
+            f"assistant text: {assistant_text(matching)!r}"
         )
     if require_usage:
         _assert_token_usage(matching, terminals[0])
     return matching
 
 
-def _assistant_text(events: Sequence[ConversationEvent]) -> str:
+def assistant_text(events: Sequence[ConversationEvent]) -> str:
     parts: list[str] = []
     for event in events:
         payload = event.payload
@@ -410,7 +397,7 @@ def _assert_token_usage(
     assert any(value > 0 for value in reported), "live usage_updated reported only zero tokens"
 
 
-async def _resolve_interaction(
+async def resolve_interaction(
     client: AsyncTalkToHarnessesClient,
     conversation_id: UUID,
     event: ConversationEvent,
@@ -531,6 +518,7 @@ async def run_live_gate(
 ) -> HarnessProjection:
     """Create, probe, turn, close runtime, resume, and exercise advertised features."""
     client = live.client
+    configuration = await scoped_configuration(client, configuration)
     harness = await client.create_harness(
         name=f"live-{configuration.kind.value}",
         configuration=configuration,
@@ -547,7 +535,7 @@ async def run_live_gate(
     items = client.stream_conversation_events(conversation_id)
 
     async def on_event(event: ConversationEvent) -> None:
-        await _resolve_interaction(client, conversation_id, event)
+        await resolve_interaction(client, conversation_id, event)
 
     stream = LiveStream(items, on_event)
     try:
@@ -617,3 +605,16 @@ async def run_live_gate(
 
     print(f"live_gate_passed probed_version={caps.version}")
     return harness
+
+
+async def scoped_configuration(
+    client: AsyncTalkToHarnessesClient, configuration: HarnessConfiguration
+) -> HarnessConfiguration:
+    revision = await client.save_sandbox_policy(
+        uuid4(),
+        SaveSandboxPolicy(
+            policy=SandboxPolicy(project_root=configuration.working_directory),
+            expected_revision=0,
+        ),
+    )
+    return configuration.model_copy(update={"sandbox_policy": revision.ref})

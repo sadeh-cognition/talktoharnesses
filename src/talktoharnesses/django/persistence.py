@@ -952,6 +952,22 @@ class DjangoPersistence:
         if interaction_row is None:
             raise not_found("interaction")
 
+        from talktoharnesses.django.sandbox_policies import approval_is_blocked
+
+        blocked = approval_is_blocked(current_state, iid)
+        if (
+            blocked
+            and not automatic
+            and answer.decision
+            not in {
+                None,
+                ApprovalDecision.DENY,
+                ApprovalDecision.CANCEL,
+            }
+        ):
+            raise DomainError(
+                ErrorCode.SANDBOX_POLICY_DENIED, "The project command guard denied this command."
+            )
         if automatic:
             interaction = current_state.interactions.get(iid)
             action = _request_action(interaction)
@@ -978,7 +994,9 @@ class DjangoPersistence:
                 ),
             )
             immediate = None
-            if match.decision is ApprovalRuleDecision.ALLOW:
+            if blocked:
+                immediate = ApprovalDecision.DENY
+            elif match.decision is ApprovalRuleDecision.ALLOW:
                 immediate = ApprovalDecision.ALLOW_ONCE
             elif match.decision is ApprovalRuleDecision.DENY:
                 immediate = ApprovalDecision.DENY
@@ -988,7 +1006,11 @@ class DjangoPersistence:
                 and isinstance(interaction.request, ApprovalRequestPayload)
                 else ()
             )
-            if immediate is None or immediate not in available or match.rule is None:
+            if (
+                immediate is None
+                or immediate not in available
+                or (match.rule is None and not blocked)
+            ):
                 interaction_row.policy_evaluated_at = current_state.conversation.updated_at
                 interaction_row.save(update_fields=("policy_evaluated_at",))
                 return InteractionResolutionResult(
@@ -1007,7 +1029,7 @@ class DjangoPersistence:
             events = automatic_result.events
             answer = state.answers[iid]
             resolution_event_sequence = events[-1].sequence
-            deciding_rule = match.rule
+            deciding_rule = None if blocked else match.rule
             expected_version = current_state.conversation.version
 
         if row.version != expected_version:

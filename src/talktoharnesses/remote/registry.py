@@ -14,9 +14,12 @@ from tth_types.enums import HarnessKind
 from talktoharnesses.providers.registry import AdapterRegistry
 from talktoharnesses.remote.adapter import RemoteHarnessAdapter
 from talktoharnesses.remote.sandbox import SandboxManager
+from talktoharnesses.remote.scoped_sandboxes import ScopedSandboxManager
 
 
-def build_remote_adapter_registry(sandboxes: SandboxManager) -> AdapterRegistry:
+def build_remote_adapter_registry(
+    sandboxes: SandboxManager | ScopedSandboxManager,
+) -> AdapterRegistry:
     """Registry with a remote adapter factory for every harness kind."""
     adapter_version = package_version("talktoharnesses")
     registry = AdapterRegistry()

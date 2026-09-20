@@ -52,7 +52,12 @@ ENV TALKTOHARNESSES_CURSOR_EXECUTABLE=/opt/harness/cursor-agent/cursor-agent"""
 OPENCODE_INSTALL = """\
 ARG OPENCODE_VERSION=1.18.19
 RUN npm install -g opencode-ai@${OPENCODE_VERSION} \\
-    && chown -R ${UID}:${GID} /usr/lib/node_modules/opencode-ai"""
+    && chown -R ${UID}:${GID} /usr/lib/node_modules/opencode-ai
+# OpenCode installs its plugin API on first launch. Seed it in the home image
+# so a fresh policy scope can probe without a cold dependency installation.
+RUN npm install --prefix /home/agent/.config/opencode --ignore-scripts --no-audit --no-fund \\
+      @opencode-ai/plugin@${OPENCODE_VERSION} \\
+    && chown -R ${UID}:${GID} /home/agent/.config"""
 
 GROK_INSTALL = """\
 # Installer writes under $HOME; runtime $HOME is the credentials volume, so

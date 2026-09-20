@@ -27,7 +27,6 @@ from tth_types.enums import ErrorCode, HarnessKind
 from tth_types.errors import DomainError
 
 from talktoharnesses.remote import docker_ops, sandbox_auth, sandbox_rtk, sandbox_workspace
-from talktoharnesses.remote.docker_ops import HOST_GATEWAY_ALIAS as _HOST_GATEWAY_ALIAS
 from talktoharnesses.remote.docker_ops import container_otlp_endpoint as _container_otlp_endpoint
 from talktoharnesses.remote.docker_ops import (
     ensure_docker_cli_available as ensure_docker_cli_available,
@@ -52,7 +51,7 @@ DEFAULT_PORTS: dict[HarnessKind, int] = {
     HarnessKind.MUSE: 8117,
 }
 
-# Provider credential env vars forwarded into each kind's container when set.
+# Host credential sources. Scoped sandboxes receive opaque handles, never these values.
 DEFAULT_ENV_PASSTHROUGH: dict[HarnessKind, tuple[str, ...]] = {
     HarnessKind.GROK: ("XAI_API_KEY",),
     HarnessKind.CURSOR: ("CURSOR_API_KEY",),
@@ -81,7 +80,7 @@ def _split_port_env(kind: HarnessKind) -> str:
     return f"TTH_SPLIT_PORT_{kind.value.upper()}"
 
 
-def _security_options(kind: HarnessKind) -> list[str]:
+def security_options(kind: HarnessKind) -> list[str]:
     options = ["no-new-privileges:true"]
     if kind is HarnessKind.CODEX:
         # Codex runs its own nested sandbox (Landlock + seccomp), and
@@ -93,7 +92,7 @@ def _security_options(kind: HarnessKind) -> list[str]:
     return options
 
 
-def _pids_limit(kind: HarnessKind) -> int:
+def pids_limit(kind: HarnessKind) -> int:
     if kind is HarnessKind.GROK:
         # grok is a multi-threaded Rust binary; around ten concurrent sessions
         # exhaust 512 pids and panic with "OS can't spawn worker thread".
@@ -172,6 +171,7 @@ class SandboxRecordData(BaseModel):
     """One sandbox the proxy has spawned, as persisted in the sandbox store."""
 
     kind: HarnessKind
+    scope: str = ""
     container_name: str
     image: str
     host_port: int
@@ -186,7 +186,7 @@ class SandboxRecordData(BaseModel):
 class SandboxStore(Protocol):
     """Persistence for sandbox records; implemented by the Django layer."""
 
-    async def get(self, kind: HarnessKind) -> SandboxRecordData | None: ...
+    async def get(self, scope: str) -> SandboxRecordData | None: ...
 
     async def upsert(self, record: SandboxRecordData) -> None: ...
 
@@ -213,9 +213,6 @@ class SandboxManager:
     )
     _prepare_tasks: dict[HarnessKind, asyncio.Task[SplitEndpoint]] = field(
         default_factory=dict[HarnessKind, asyncio.Task[SplitEndpoint]]
-    )
-    _auth_signatures: dict[HarnessKind, sandbox_auth.AuthSignature | None] = field(
-        default_factory=dict[HarnessKind, sandbox_auth.AuthSignature | None]
     )
     _workspace_locks: dict[tuple[HarnessKind, str], asyncio.Lock] = field(
         default_factory=dict[tuple[HarnessKind, str], asyncio.Lock]
@@ -270,8 +267,7 @@ class SandboxManager:
         async with self._lock_for(kind):
             cached = self._endpoints.get(kind)
             if cached is not None:
-                auth_changed = self._auth_signatures.get(kind) != self._auth_signature(kind)
-                if not auth_changed and await self._endpoint_healthy(kind, cached):
+                if await self._endpoint_healthy(kind, cached):
                     return cached
                 self._endpoints.pop(kind, None)
             task = self._prepare_tasks.get(kind)
@@ -374,6 +370,7 @@ class SandboxManager:
         now = datetime.now(UTC)
         record = SandboxRecordData(
             kind=kind,
+            scope=name,
             container_name=name,
             image=image,
             host_port=port,
@@ -400,16 +397,22 @@ class SandboxManager:
         try:
             await asyncio.to_thread(self._ensure_image, kind)
             await asyncio.to_thread(self._ensure_container, kind, token)
+            base_url = self._base_url(kind)
+            record = record.model_copy(
+                update={"base_url": base_url, "host_port": self._port_for(kind)}
+            )
             await self._wait_healthy(kind, base_url)
         except BaseException:
             await self._save(record.model_copy(update={"status": "failed"}))
             raise
         ready_at = datetime.now(UTC)
         await self._save(record.model_copy(update={"status": "ready", "last_ready_at": ready_at}))
-        endpoint = SplitEndpoint(base_url=base_url, token=token, loopback_alias=_HOST_GATEWAY_ALIAS)
+        endpoint = SplitEndpoint(base_url=base_url, token=token, loopback_alias=None)
         self._endpoints[kind] = endpoint
-        self._auth_signatures[kind] = self._auth_signature(kind)
         return endpoint
+
+    def _base_url(self, kind: HarnessKind) -> str:
+        return f"http://127.0.0.1:{self._port_for(kind)}"
 
     @staticmethod
     def _health_kind(response: httpx.Response) -> object:
@@ -442,7 +445,9 @@ class SandboxManager:
         reattach to a container that is already running, but must never create
         containers or build images.
         """
-        record = await self.store.get(kind) if self.store is not None else None
+        record = (
+            await self.store.get(self._container_name(kind)) if self.store is not None else None
+        )
         if record is None and kind not in self._endpoints:
             return False
         name = record.container_name if record is not None else self._container_name(kind)
@@ -467,18 +472,6 @@ class SandboxManager:
             "TTH_SPLIT_TOKEN": token,
             _OTEL_ENDPOINT_ENV: _container_otlp_endpoint(os.environ.get(_OTEL_ENDPOINT_ENV)),
         }
-        headers = os.environ.get(_OTEL_HEADERS_ENV)
-        if headers and self.config.forward_otel_headers:
-            environment[_OTEL_HEADERS_ENV] = headers
-        for env_name in self.config.env_passthrough.get(kind, ()):
-            # Managed keys are never passthrough: a host TTH_SPLIT_TOKEN
-            # forwarded here would make the container disagree with the
-            # stored record and 401 every proxy call.
-            if env_name in _MANAGED_ENV_KEYS:
-                continue
-            value = os.environ.get(env_name)
-            if value:
-                environment[env_name] = value
         return environment
 
     def _container_matches(
@@ -525,14 +518,14 @@ class SandboxManager:
         ):
             return False
 
-        security_options = attrs.get("HostConfig", {}).get("SecurityOpt", [])
-        if set(security_options) != set(_security_options(kind)):
+        actual_security_options = attrs.get("HostConfig", {}).get("SecurityOpt", [])
+        if set(actual_security_options) != set(security_options(kind)):
             return False
-        if attrs.get("HostConfig", {}).get("PidsLimit") != _pids_limit(kind):
+        if attrs.get("HostConfig", {}).get("PidsLimit") != pids_limit(kind):
             return False
 
         extra_hosts = cast("list[str]", attrs.get("HostConfig", {}).get("ExtraHosts") or [])
-        if f"{_HOST_GATEWAY_ALIAS}:host-gateway" not in extra_hosts:
+        if extra_hosts or attrs.get("HostConfig", {}).get("NetworkMode") != "none":
             return False
 
         actual_mounts = {mount.get("Destination"): mount for mount in attrs.get("Mounts", [])}
@@ -549,33 +542,6 @@ class SandboxManager:
             if mount is None or mount.get("Type") != "bind":
                 return False
         return True
-
-    def _auth_file(self, kind: HarnessKind) -> str | None:
-        return self.config.auth_files.get(kind)
-
-    def _auth_signature(self, kind: HarnessKind) -> sandbox_auth.AuthSignature | None:
-        return sandbox_auth.auth_signature(self._auth_file(kind))
-
-    def _seed_auth_file(
-        self,
-        client: Any,
-        mount_type: Any,
-        *,
-        kind: HarnessKind,
-        image: str,
-        name: str,
-    ) -> None:
-        auth_file = self._auth_file(kind)
-        if auth_file is None:
-            return
-        sandbox_auth.seed_auth_file(
-            client,
-            mount_type,
-            kind=kind,
-            auth_file=auth_file,
-            image=image,
-            home_volume=f"{name}-home",
-        )
 
     def _docker_client(self, kind: HarnessKind) -> Any:
         return docker_ops.docker_client(kind)
@@ -619,9 +585,6 @@ class SandboxManager:
         image = self._image(kind)
         environment = self._environment(kind, token)
         try:
-            # Refresh the managed volume even when the running container still
-            # matches; host logins can rotate while the sandbox stays alive.
-            self._seed_auth_file(client, Mount, kind=kind, image=image, name=name)
             # Idempotent; re-running also upgrades homes after an image bump.
             sandbox_rtk.seed_rtk_config(
                 client, Mount, kind=kind, image=image, home_volume=f"{name}-home"
@@ -754,10 +717,10 @@ class SandboxManager:
             environment=environment,
             # Lets containers reach a collector on the host at the
             # host.docker.internal endpoint _environment injects.
-            extra_hosts={_HOST_GATEWAY_ALIAS: "host-gateway"},
+            network_disabled=True,
             cap_drop=["ALL"],
-            security_opt=_security_options(kind),
-            pids_limit=_pids_limit(kind),
+            security_opt=security_options(kind),
+            pids_limit=pids_limit(kind),
             mem_limit="4g",
         )
 

@@ -21,6 +21,8 @@ _telemetry_enabled = False
 
 
 def telemetry_opted_out() -> bool:
+    if os.environ.get("OTEL_SDK_DISABLED", "").lower() == "true":
+        return True
     raw = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT")
     return raw is not None and raw.strip().lower() in _OTEL_OPT_OUT_VALUES
 

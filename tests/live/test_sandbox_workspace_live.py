@@ -9,13 +9,12 @@ and npm downloads; no provider credentials.
 Enable with TALKTOHARNESSES_SANDBOX_WORKSPACE=1. The kind defaults to
 ``claude`` (override with TALKTOHARNESSES_SANDBOX_WORKSPACE_KIND); the image is
 ``tth-<kind>:$TTH_SANDBOX_IMAGE_TAG`` and must be built beforehand
-(deploy/build-splits.sh <kind>).
+(deploy/build-splits.sh <tag> <kind>).
 """
 
 from __future__ import annotations
 
 import os
-import socket
 from collections.abc import Generator
 from contextlib import suppress
 from pathlib import Path
@@ -26,8 +25,10 @@ import httpx
 import pytest
 from tth_types.enums import ErrorCode, HarnessKind
 from tth_types.errors import DomainError
+from tth_types.sandbox import EgressRule, SandboxPolicy, SandboxPolicyRef, SandboxPolicyRevision
 
-from talktoharnesses.remote.sandbox import SandboxConfig, SandboxManager
+from talktoharnesses.remote.isolated_sandbox import IsolatedSandbox
+from talktoharnesses.remote.sandbox import DEFAULT_ENV_PASSTHROUGH, SandboxConfig, SandboxManager
 from talktoharnesses.remote.sandbox_workspace import (
     TOOLCHAIN_ENV,
     WorkspaceSetupStarted,
@@ -48,55 +49,64 @@ cd frontend && npm install --no-audit --no-fund
 """
 
 
-def _available_port() -> int:
-    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    try:
-        listener.bind(("127.0.0.1", 0))
-        return int(listener.getsockname()[1])
-    finally:
-        listener.close()
-
-
 @pytest.fixture
 def sandbox(
-    monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    tmp_path_factory: pytest.TempPathFactory,
 ) -> Generator[tuple[SandboxManager, str], None, None]:
-    """A manager bound to a throwaway container/volumes and the pytest temp root."""
+    """An isolated policy scope with explicit interpreter-download egress."""
     import docker
     from docker.errors import NotFound
 
-    slug = _KIND.value.replace("_", "-")
-    container_name = f"tth-live-workspace-{slug}-{uuid4().hex[:12]}"
-    mount_root = str(tmp_path_factory.getbasetemp())
-    monkeypatch.setenv(f"TTH_SPLIT_PORT_{_KIND.value.upper()}", str(_available_port()))
-
-    def test_container_name(_manager: SandboxManager, _kind: HarnessKind) -> str:
-        return container_name
-
-    def test_image(manager: SandboxManager, _kind: HarnessKind) -> str:
-        # The manager derives the image from the container name; keep the
-        # kind's real image or a missing one is built under the test name.
-        return f"tth-{slug}:{manager.config.image_tag}"
-
-    def test_mount_roots(_manager: SandboxManager) -> tuple[str, ...]:
-        return (mount_root,)
-
-    monkeypatch.setattr(SandboxManager, "_container_name", test_container_name)
-    monkeypatch.setattr(SandboxManager, "_image", test_image)
-    monkeypatch.setattr(SandboxManager, "_mount_roots", test_mount_roots)
-    config = SandboxConfig.from_env().model_copy(
-        update={"prepare_grace": 1800.0, "workspace_setup_timeout": 600.0}
+    name = f"tth-live-workspace-{uuid4().hex[:12]}"
+    credential = next(iter(DEFAULT_ENV_PASSTHROUGH[_KIND]), "PRIME_API_KEY")
+    monkeypatch.setenv(credential, "test-only-provider-key")
+    config = SandboxConfig.from_env({}).model_copy(
+        update={
+            "image_tag": os.environ.get("TTH_SANDBOX_IMAGE_TAG", "latest"),
+            "mount_roots": (str(tmp_path),),
+            "env_passthrough": {_KIND: (credential,)},
+            "prepare_grace": 1800.0,
+            "workspace_setup_timeout": 600.0,
+        }
+    )
+    policy = SandboxPolicy(project_root=str(tmp_path))
+    policy = policy.model_copy(
+        update={
+            "egress": (
+                *policy.egress,
+                EgressRule(
+                    host="github.com", path="/astral-sh/python-build-standalone/releases/download"
+                ),
+                EgressRule(host="release-assets.githubusercontent.com"),
+            )
+        }
+    )
+    manager = IsolatedSandbox(
+        config,
+        store=None,
+        revision=SandboxPolicyRevision(
+            ref=SandboxPolicyRef(id=uuid4(), revision=1),
+            policy=policy,
+        ),
+        name=name,
+        roots=(str(tmp_path),),
+        state_root=tmp_path_factory.mktemp("workspace-gateway-private"),
     )
     try:
-        yield SandboxManager(config), container_name
+        yield manager, name
     finally:
         client = docker.from_env()
         try:
-            with suppress(NotFound):
-                client.containers.get(container_name).remove(force=True)
-            for suffix in ("home", "data"):
+            for suffix in ("-gateway", ""):
                 with suppress(NotFound):
-                    client.volumes.get(f"{container_name}-{suffix}").remove()
+                    client.containers.get(name + suffix).remove(force=True)
+            with suppress(NotFound):
+                client.networks.get(name + "-network").remove()
+            for suffix in ("-home", "-data"):
+                with suppress(NotFound):
+                    client.volumes.get(name + suffix).remove()
         finally:
             client.close()
 

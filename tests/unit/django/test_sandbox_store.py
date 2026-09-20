@@ -15,6 +15,7 @@ def _record(*, token: str = "token-1", status: str = "preparing") -> SandboxReco
     now = datetime(2026, 8, 30, 12, 0, 0, tzinfo=UTC)
     return SandboxRecordData(
         kind=HarnessKind.GROK,
+        scope="tth-grok",
         container_name="tth-grok",
         image="tth-grok:latest",
         host_port=8111,
@@ -31,7 +32,7 @@ def _record(*, token: str = "token-1", status: str = "preparing") -> SandboxReco
 @pytest.mark.asyncio
 async def test_get_returns_none_for_unknown_kind() -> None:
     store = DjangoSandboxStore()
-    assert await store.get(HarnessKind.GROK) is None
+    assert await store.get("tth-grok") is None
 
 
 @pytest.mark.django_db(transaction=True)
@@ -40,7 +41,7 @@ async def test_upsert_then_get_round_trips() -> None:
     store = DjangoSandboxStore()
     record = _record()
     await store.upsert(record)
-    loaded = await store.get(HarnessKind.GROK)
+    loaded = await store.get("tth-grok")
     assert loaded == record
 
 
@@ -52,7 +53,7 @@ async def test_upsert_updates_existing_row() -> None:
     ready_at = datetime(2026, 8, 30, 12, 5, 0, tzinfo=UTC)
     updated = _record(status="ready").model_copy(update={"last_ready_at": ready_at})
     await store.upsert(updated)
-    loaded = await store.get(HarnessKind.GROK)
+    loaded = await store.get("tth-grok")
     assert loaded is not None
     assert loaded.status == "ready"
     assert loaded.last_ready_at == ready_at
@@ -66,7 +67,7 @@ async def test_reserve_inserts_when_kind_is_new() -> None:
     record = _record()
     stored = await store.reserve(record)
     assert stored == record
-    assert await store.get(HarnessKind.GROK) == record
+    assert await store.get("tth-grok") == record
 
 
 @pytest.mark.django_db(transaction=True)
@@ -78,6 +79,6 @@ async def test_reserve_returns_existing_row_and_keeps_its_token() -> None:
     second = await store.reserve(_record(token="token-second"))
     assert first.split_token == "token-first"
     assert second.split_token == "token-first"
-    loaded = await store.get(HarnessKind.GROK)
+    loaded = await store.get("tth-grok")
     assert loaded is not None
     assert loaded.split_token == "token-first"

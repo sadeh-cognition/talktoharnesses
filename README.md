@@ -63,11 +63,12 @@ compatibility floor for the current platform. Models, modes, and efforts come
 from the live CLI.
 
 OpenTelemetry's API is a core dependency of the library and is a no-op without
-an SDK; there is no package-owned `otel` extra. The host process and the split
-services, by contrast, export traces, metrics, and logs by default — set
+an SDK; there is no package-owned `otel` extra. The host process and directly deployed split
+services export traces, metrics, and logs by default — set
 `OTEL_EXPORTER_OTLP_ENDPOINT=false` (or `0`) to opt out, any other value to
 choose the OTLP/HTTP collector endpoint (unset means
-`http://localhost:4318`).
+`http://localhost:4318`). Managed project sandboxes disable split telemetry
+with `OTEL_SDK_DISABLED=true` and do not receive host collector credentials.
 
 The host process (`host/settings.py`) loads an env file with python-dotenv
 before reading any setting: `TTH_ENV_FILE` if set, else
@@ -196,8 +197,9 @@ the immediate success page; copy it into the client's secret configuration
 before leaving the page.
 
 Client authentication does not choose the split deployment boundary. Every
-kind's managed Docker sandbox is spawned on demand — no per-kind enablement
-configuration exists; see [`deploy/README.md`](deploy/README.md).
+immutable project policy revision, provider, and mount set gets an isolated
+Docker sandbox on demand. Harness configurations must reference a saved
+`sandbox_policy` (`id` and `revision`); see [`deploy/README.md`](deploy/README.md).
 
 ## Cursor model selectors
 
@@ -259,15 +261,15 @@ Code support the field (see `supports_mcp_servers` in
 resume with `provider_incompatible` when servers are configured. Muse Code
 reads servers from its settings file, so its split renders a private
 `XDG_CONFIG_HOME` per host with the servers merged over the saved settings and
-links to the host's credential and trust files. For proxy-managed
-sandboxes, loopback URLs such as `http://127.0.0.1:8001/...` are rewritten to
-the sandbox host gateway on the way to the split; the stored configuration is
-unchanged.
+links to the sandbox's virtual credential and trust files. Managed sandboxes
+admit only HTTPS destinations allowed by the project policy. Loopback and
+private-network MCP endpoints are inaccessible; MCP headers and credentials
+in URLs are rejected until credential proxying supports them.
 
 ## Development
 
 ```bash
-uv sync --extra django --extra client
+uv sync --extra django --extra client --extra gateway
 uv run ruff check .
 uv run ruff format --check .
 uv run pyright

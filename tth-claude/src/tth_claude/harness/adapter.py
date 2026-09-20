@@ -331,7 +331,11 @@ class ClaudeAdapter:
             return options
         # Non-yolo matches every tool so the hook can force the broker ask;
         # yolo only needs the Bash rewrite.
-        hook = build_pre_tool_use_hook(yolo=config.yolo)
+        hook = build_pre_tool_use_hook(
+            yolo=config.yolo,
+            sandbox_policy=config.sandbox_policy is not None,
+            cwd=config.working_directory,
+        )
         return ClaudeAgentOptions(
             cwd=cwd,
             model=config.model,

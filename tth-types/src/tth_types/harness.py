@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from tth_types.base import FROZEN, UtcDateTime
 from tth_types.enums import ApprovalDecision, FileOperation, HarnessKind, ToolOutcome
+from tth_types.sandbox import CommandGuardCoverage, SandboxPolicyRef
 
 # ---------------------------------------------------------------------------
 # Harness configuration / capabilities
@@ -79,6 +80,7 @@ class HarnessConfiguration(BaseModel):
     mode: str | None = None
     effort: str | None = None
     yolo: bool = False
+    sandbox_policy: SandboxPolicyRef | None = None
     working_directory: str
     workspace_roots: tuple[str, ...] = ()
     mcp_servers: tuple[HarnessMcpServer, ...] = ()
@@ -99,6 +101,7 @@ class HarnessCapabilities(BaseModel):
     model_config = FROZEN
 
     kind: HarnessKind
+    command_guard: CommandGuardCoverage = "unavailable"
     version: str
     supports_steer: bool = False
     supports_resume: bool = False
@@ -126,6 +129,7 @@ class LaunchSnapshot(BaseModel):
     model_config = FROZEN
 
     resolved_executable: str | None = None
+    sandbox_policy: SandboxPolicyRef | None = None
     harness_version: str
     working_directory: str
     workspace_roots: tuple[str, ...] = ()

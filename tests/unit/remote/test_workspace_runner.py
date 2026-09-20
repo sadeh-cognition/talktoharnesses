@@ -250,6 +250,8 @@ def test_script_environment_is_a_whitelist(repo: Path, state: Path) -> None:
             "UV_CACHE_DIR": "/data/uv/cache",
             "npm_config_cache": "/data/npm/cache",
             "COREPACK_HOME": "/data/corepack",
+            "HTTPS_PROXY": "http://tth-gateway.invalid:8080",
+            "SSL_CERT_FILE": "/etc/tth/ca.pem",
         },
     )
 
@@ -257,6 +259,8 @@ def test_script_environment_is_a_whitelist(repo: Path, state: Path) -> None:
     assert "UV_CACHE_DIR=/data/uv/cache" in lines
     assert "npm_config_cache=/data/npm/cache" in lines
     assert "COREPACK_HOME=/data/corepack" in lines
+    assert "HTTPS_PROXY=http://tth-gateway.invalid:8080" in lines
+    assert "SSL_CERT_FILE=/etc/tth/ca.pem" in lines
     assert "TTH_WORKSPACE_SETUP=1" in lines
     assert "TTH_HARNESS_KIND=codex" in lines
     assert "USER=agent" in lines

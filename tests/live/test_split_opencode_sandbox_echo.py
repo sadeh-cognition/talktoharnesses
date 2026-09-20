@@ -16,7 +16,12 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
-from tests.live.helpers import TERMINAL_TYPES, LiveHttp, isolated_sandbox_environment
+from tests.live.helpers import (
+    TERMINAL_TYPES,
+    LiveHttp,
+    isolated_sandbox_environment,
+    scoped_configuration,
+)
 from tests.live.test_split_claude_sandbox_echo import probe_until_ready
 
 from talktoharnesses.django.asgi import get_service
@@ -40,7 +45,7 @@ def opencode_echo_sandbox(
     # Synthetic credential file: the echo adapter needs none, but sandbox
     # creation seeds whatever auth file is configured for the kind.
     auth_file = tmp_path_factory.mktemp("opencode-echo-auth") / "auth.json"
-    auth_file.write_text("{}", encoding="utf-8")
+    auth_file.write_text('{"opencode":{"type":"api","key":"test-only"}}', encoding="utf-8")
     monkeypatch.setenv("TTH_SANDBOX_OPENCODE_AUTH_FILE", str(auth_file))
     # Forward the factory override into the container instead of a credential.
     monkeypatch.setenv("TTH_SANDBOX_ENV_OPENCODE", "TTH_SPLIT_ADAPTER_FACTORY")
@@ -63,9 +68,12 @@ async def test_process_bound_journey_through_sandboxed_split(live_http: LiveHttp
 
     harness = await client.create_harness(
         name="split-opencode",
-        configuration=HarnessConfiguration(
-            kind=HarnessKind.OPENCODE,
-            working_directory=str(live_http.workspace),
+        configuration=await scoped_configuration(
+            client,
+            HarnessConfiguration(
+                kind=HarnessKind.OPENCODE,
+                working_directory=str(live_http.workspace),
+            ),
         ),
     )
     probe = await probe_until_ready(client, harness.id)

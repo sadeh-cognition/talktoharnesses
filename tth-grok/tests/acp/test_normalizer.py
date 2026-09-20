@@ -47,6 +47,30 @@ def _n() -> AcpSessionNormalizer:
     return n
 
 
+def test_resume_keeps_fresh_chunks_after_coalesced_history_replay() -> None:
+    normalizer = AcpSessionNormalizer()
+    normalizer.import_seen([], [f"sess-1:{index}" for index in range(1, 6)])
+    normalizer.set_session("sess-1", resync=True)
+
+    def message(text: str):
+        return normalizer.on_session_update(
+            {
+                "sessionId": "sess-1",
+                "update": {"sessionUpdate": "agent_message_chunk", "content": text},
+            }
+        )
+
+    assert message("previous reply in one chunk") == []
+    normalizer.set_session("sess-1", resync=False)
+    normalizer.begin_turn(uuid4())
+    deltas = [
+        event.text
+        for event in message("fresh reply")
+        if isinstance(event, AssistantMessageDeltaPayload)
+    ]
+    assert deltas == ["fresh reply"]
+
+
 def test_nested_content_shapes_and_thought_chunks() -> None:
     n = _n()
     nested = n.on_session_update(

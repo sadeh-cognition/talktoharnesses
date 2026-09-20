@@ -30,7 +30,7 @@ from talktoharnesses.remote.sandbox import (
     WorkspaceSetupStarted,
     ensure_docker_cli_available,
 )
-from talktoharnesses.remote.sandbox_auth import AUTH_FILE_DEFAULTS
+from talktoharnesses.remote.sandbox_auth import AUTH_FILE_DEFAULTS, seed_auth_file
 from talktoharnesses.remote.sandbox_rtk import (
     RTK_INIT_SPECS,
     rtk_init_command,
@@ -45,8 +45,8 @@ class FakeStore:
         self.records: dict[HarnessKind, SandboxRecordData] = {}
         self.upserts: list[SandboxRecordData] = []
 
-    async def get(self, kind: HarnessKind) -> SandboxRecordData | None:
-        return self.records.get(kind)
+    async def get(self, scope: str) -> SandboxRecordData | None:
+        return next((row for row in self.records.values() if row.container_name == scope), None)
 
     async def upsert(self, record: SandboxRecordData) -> None:
         self.records[record.kind] = record
@@ -163,7 +163,7 @@ async def test_cached_endpoint_is_reprepared_when_health_fails(
     assert [name for name, _ in calls] == ["ensure_image", "ensure_container", "wait_healthy"]
 
 
-async def test_cached_endpoint_refreshes_changed_auth_file(
+async def test_cached_endpoint_does_not_copy_rotated_host_credentials(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -177,8 +177,8 @@ async def test_cached_endpoint_refreshes_changed_auth_file(
     auth_file.write_text("rotated-credentials", encoding="utf-8")
     second = await manager.endpoint(HarnessKind.GROK)
 
-    assert second is not first
-    assert [name for name, _ in calls] == ["ensure_image", "ensure_container", "wait_healthy"]
+    assert second is first
+    assert calls == []
 
 
 async def test_prepare_failure_marks_record_failed(
@@ -400,7 +400,7 @@ def test_environment_passthrough_cannot_override_managed_keys(
     )
 
     assert environment["TTH_SPLIT_TOKEN"] == "minted-token"
-    assert environment["XAI_API_KEY"] == "provider"
+    assert "XAI_API_KEY" not in environment
 
 
 async def test_concurrent_endpoint_calls_share_one_prepare(
@@ -603,7 +603,7 @@ def test_environment_always_manages_otel_vars(monkeypatch: pytest.MonkeyPatch) -
     environment = opted_in._environment(  # pyright: ignore[reportPrivateUsage]
         HarnessKind.CLAUDE, "tok"
     )
-    assert environment["OTEL_EXPORTER_OTLP_HEADERS"] == "authorization=Bearer x"
+    assert "OTEL_EXPORTER_OTLP_HEADERS" not in environment
 
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "0")
     environment = manager._environment(  # pyright: ignore[reportPrivateUsage]
@@ -612,7 +612,7 @@ def test_environment_always_manages_otel_vars(monkeypatch: pytest.MonkeyPatch) -
     assert environment["OTEL_EXPORTER_OTLP_ENDPOINT"] == "0"
 
 
-def test_create_container_adds_host_gateway_mapping(tmp_path: Path) -> None:
+def test_unscoped_container_has_no_network(tmp_path: Path) -> None:
     runs: list[dict[str, Any]] = []
 
     class Containers:
@@ -633,7 +633,8 @@ def test_create_container_adds_host_gateway_mapping(tmp_path: Path) -> None:
         environment={"TTH_SPLIT_TOKEN": "tok"},
     )
 
-    assert runs[0]["extra_hosts"] == {"host.docker.internal": "host-gateway"}
+    assert runs[0]["network_disabled"] is True
+    assert "extra_hosts" not in runs[0]
 
 
 def test_container_match_checks_managed_runtime_configuration(tmp_path: Path) -> None:
@@ -658,7 +659,8 @@ def test_container_match_checks_managed_runtime_configuration(tmp_path: Path) ->
                 "PortBindings": {"8010/tcp": [{"HostIp": "127.0.0.1", "HostPort": "9111"}]},
                 "SecurityOpt": ["no-new-privileges:true"],
                 "PidsLimit": 2048,
-                "ExtraHosts": ["host.docker.internal:host-gateway"],
+                "ExtraHosts": [],
+                "NetworkMode": "none",
             },
             "Mounts": [
                 {
@@ -728,9 +730,9 @@ def test_container_match_checks_managed_runtime_configuration(tmp_path: Path) ->
 
     # OTel endpoint drift or a missing host-gateway mapping forces recreation.
     assert not matches(otlp_endpoint="http://host.docker.internal:9999")
-    container.attrs["HostConfig"]["ExtraHosts"] = None
-    assert not matches()
     container.attrs["HostConfig"]["ExtraHosts"] = ["host.docker.internal:host-gateway"]
+    assert not matches()
+    container.attrs["HostConfig"]["ExtraHosts"] = []
     assert matches()
 
 
@@ -763,15 +765,14 @@ def test_seed_provider_auth_copies_only_auth_file(
     def mount_type(**kwargs: Any) -> dict[str, Any]:
         return kwargs
 
-    config = SandboxConfig(auth_files={kind: str(auth_file)})
-    manager = SandboxManager(config)
     client: Any = SimpleNamespace(containers=Containers())
-    manager._seed_auth_file(  # pyright: ignore[reportPrivateUsage]
+    seed_auth_file(
         client,
         mount_type,
         kind=kind,
         image=f"tth-{kind.value}:latest",
-        name=f"tth-{kind.value}",
+        auth_file=str(auth_file),
+        home_volume=f"tth-{kind.value}-home",
     )
 
     assert len(calls) == 1
@@ -802,16 +803,15 @@ def test_seed_provider_auth_rejects_missing_configured_file(
     kind: HarnessKind,
 ) -> None:
     missing = str(tmp_path / "missing.json")
-    config = SandboxConfig(auth_files={kind: missing})
-    manager = SandboxManager(config)
 
     with pytest.raises(DomainError) as excinfo:
-        manager._seed_auth_file(  # pyright: ignore[reportPrivateUsage]
+        seed_auth_file(
             SimpleNamespace(),
             SimpleNamespace(),
             kind=kind,
             image=f"tth-{kind.value}:latest",
-            name=f"tth-{kind.value}",
+            auth_file=missing,
+            home_volume=f"tth-{kind.value}-home",
         )
 
     assert excinfo.value.code is ErrorCode.SANDBOX_UNAVAILABLE
@@ -965,7 +965,7 @@ def test_seed_rtk_config_fails_open_on_docker_errors(
     assert "rtk seeding for codex failed" in caplog.text
 
 
-def test_ensure_container_seeds_rtk_after_auth(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_unscoped_container_seeds_rtk_without_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
     manager = SandboxManager(SandboxConfig())
     client = SimpleNamespace()
     order: list[str] = []
@@ -986,23 +986,25 @@ def test_ensure_container_seeds_rtk_after_auth(monkeypatch: pytest.MonkeyPatch) 
         order.append("reconcile")
 
     monkeypatch.setattr(manager, "_docker_client", docker_client)
-    monkeypatch.setattr(manager, "_seed_auth_file", seed_auth_file)
+    monkeypatch.setattr("talktoharnesses.remote.sandbox_auth.seed_auth_file", seed_auth_file)
     monkeypatch.setattr("talktoharnesses.remote.sandbox_rtk.seed_rtk_config", seed_rtk)
     monkeypatch.setattr(manager, "_reconcile_container", reconcile_container)
 
     manager._ensure_container(HarnessKind.CURSOR, "token")  # pyright: ignore[reportPrivateUsage]
 
-    assert order == ["auth", "rtk:cursor:tth-cursor:latest:tth-cursor-home", "reconcile"]
+    assert order == ["rtk:cursor:tth-cursor:latest:tth-cursor-home", "reconcile"]
 
 
 def _skip_rtk_seeding(monkeypatch: pytest.MonkeyPatch) -> None:
     """For container tests whose bare fake client cannot run the RTK seeder."""
-    monkeypatch.setattr(
-        "talktoharnesses.remote.sandbox_rtk.seed_rtk_config", lambda *args, **kwargs: True
-    )
+
+    def skip(*args: Any, **kwargs: Any) -> bool:
+        return True
+
+    monkeypatch.setattr("talktoharnesses.remote.sandbox_rtk.seed_rtk_config", skip)
 
 
-def test_ensure_container_refreshes_auth_for_matching_container(
+def test_unscoped_container_never_seeds_host_auth(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -1030,12 +1032,12 @@ def test_ensure_container_refreshes_auth_for_matching_container(
         return None
 
     monkeypatch.setattr(manager, "_docker_client", docker_client)
-    monkeypatch.setattr(manager, "_seed_auth_file", seed_auth_file)
+    monkeypatch.setattr("talktoharnesses.remote.sandbox_auth.seed_auth_file", seed_auth_file)
     monkeypatch.setattr(manager, "_reconcile_container", reconcile_container)
 
     manager._ensure_container(HarnessKind.GROK, "token")  # pyright: ignore[reportPrivateUsage]
 
-    assert seeded == [HarnessKind.GROK]
+    assert seeded == []
 
 
 def test_registry_is_remote_for_every_kind() -> None:
@@ -1244,7 +1246,8 @@ def test_container_without_toolchain_env_is_recreated(tmp_path: Path) -> None:
                 "PortBindings": {"8010/tcp": [{"HostIp": "127.0.0.1", "HostPort": "8113"}]},
                 "SecurityOpt": ["no-new-privileges:true", "seccomp=unconfined"],
                 "PidsLimit": 512,
-                "ExtraHosts": ["host.docker.internal:host-gateway"],
+                "ExtraHosts": [],
+                "NetworkMode": "none",
             },
             "Mounts": [
                 {"Destination": "/home/agent", "Name": "tth-codex-home", "Type": "volume"},

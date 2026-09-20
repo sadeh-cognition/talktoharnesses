@@ -30,6 +30,7 @@ from tth_types.harness import (
     LaunchSnapshot,
     VersionAdvisory,
 )
+from tth_types.sandbox import command_guard_coverage
 from tth_types.split_api import (
     FRAME_END,
     FRAME_HARNESS_EVENT,
@@ -55,6 +56,7 @@ from talktoharnesses.remote.sandbox_workspace import (
     WorkspaceSetupOutcome,
     WorkspaceSetupStarted,
 )
+from talktoharnesses.remote.scoped_sandboxes import ScopedSandboxManager
 
 logger = logging.getLogger(__name__)
 
@@ -153,7 +155,7 @@ class RemoteHarnessAdapter:
     def __init__(
         self,
         kind: HarnessKind,
-        endpoints: SplitEndpointProvider,
+        endpoints: SplitEndpointProvider | ScopedSandboxManager,
         *,
         adapter_version: str = "0",
         client_factory: type[httpx.AsyncClient] | None = None,
@@ -173,6 +175,10 @@ class RemoteHarnessAdapter:
         self._handle: RemoteProcessHandle | None = None
         self._endpoint: ResolvedEndpoint | None = None
         self._closed = False
+
+    async def _bind_policy(self, configuration: HarnessConfiguration) -> None:
+        if isinstance(self._endpoints, ScopedSandboxManager):
+            self._endpoints = await self._endpoints.for_configuration(configuration)
 
     # ------------------------------------------------------------------
     # Duck-typed hooks used by RuntimeManager / CommandProcessor
@@ -208,6 +214,8 @@ class RemoteHarnessAdapter:
 
     async def _resolved_endpoint(self) -> ResolvedEndpoint:
         if self._endpoint is None:
+            if isinstance(self._endpoints, ScopedSandboxManager):
+                raise DomainError(ErrorCode.SANDBOX_POLICY_REQUIRED, "Sandbox policy is not bound.")
             self._endpoint = await self._endpoints.endpoint(self.kind, self._required_paths)
         return self._endpoint
 
@@ -266,6 +274,7 @@ class RemoteHarnessAdapter:
         endpoint provider has no sandbox to run setup in; raises
         ``DomainError(WORKSPACE_SETUP_FAILED)`` when the script fails.
         """
+        await self._bind_policy(configuration)
         provider = self._endpoints
         if not isinstance(provider, WorkspaceSetupProvider):
             return None
@@ -286,6 +295,7 @@ class RemoteHarnessAdapter:
     async def _split_configuration(
         self, configuration: HarnessConfiguration
     ) -> HarnessConfiguration:
+        await self._bind_policy(configuration)
         return configuration_for_split(configuration, await self._resolved_endpoint())
 
     async def probe(self, config: HarnessConfiguration) -> HarnessCapabilities:
@@ -297,9 +307,21 @@ class RemoteHarnessAdapter:
         )
         response = await self._post("/v1/probe", request.model_dump_json())
         probe = ProbeResponse.model_validate_json(response.content)
-        self._probe_launch = probe.launch
+        self._probe_launch = (
+            probe.launch.model_copy(update={"sandbox_policy": config.sandbox_policy})
+            if probe.launch
+            else None
+        )
         self._probe_advisory = probe.advisory
-        return probe.capabilities
+        return probe.capabilities.model_copy(
+            update={
+                "command_guard": command_guard_coverage(
+                    config.kind,
+                    yolo=config.yolo,
+                    policy=config.sandbox_policy,
+                )
+            }
+        )
 
     async def start(self, request: StartSessionRequest) -> HarnessSession:
         return await self._create_session(
@@ -362,7 +384,11 @@ class RemoteHarnessAdapter:
                 details={"kind": self.kind.value},
             )
         self._session_id = created.session_id
-        self._probe_launch = created.launch
+        self._probe_launch = (
+            created.launch.model_copy(update={"sandbox_policy": configuration.sandbox_policy})
+            if created.launch
+            else None
+        )
         if created.pid is not None:
             self._handle = RemoteProcessHandle(
                 pid=created.pid,

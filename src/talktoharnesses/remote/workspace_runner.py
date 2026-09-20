@@ -81,7 +81,20 @@ _SKIPPED_DIRECTORIES = frozenset({"node_modules", ".venv"})
 # with one of these prefixes (the toolchain caches the sandbox manager injects).
 # Provider credentials, the split token and the split's Django settings never
 # reach it.
-_INHERITED_ENV_NAMES: tuple[str, ...] = ("PATH", "HOME", "LANG", "TERM")
+_INHERITED_ENV_NAMES: tuple[str, ...] = (
+    "PATH",
+    "HOME",
+    "LANG",
+    "TERM",
+    "HTTPS_PROXY",
+    "https_proxy",
+    "NO_PROXY",
+    "no_proxy",
+    "SSL_CERT_FILE",
+    "REQUESTS_CA_BUNDLE",
+    "NODE_EXTRA_CA_CERTS",
+    "NODE_USE_ENV_PROXY",
+)
 _INHERITED_ENV_PREFIXES: tuple[str, ...] = (
     "UV_",
     "npm_config_",

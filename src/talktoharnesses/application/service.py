@@ -9,9 +9,11 @@ import time
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime
 from typing import Any, cast
+from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
 from pydantic import ValidationError
+from tth_types.sandbox import SandboxPolicyRevision, SaveSandboxPolicy
 
 from talktoharnesses.application.command_processor import CommandProcessor
 from talktoharnesses.application.faults import FaultCallback
@@ -100,6 +102,7 @@ from talktoharnesses.domain.transitions import (
 from talktoharnesses.providers.effort import validate_effort
 from talktoharnesses.providers.registry import AdapterRegistry, release_probe_adapter
 from talktoharnesses.runtime.manager import RuntimeManager
+from talktoharnesses.sandbox_policies import SandboxPolicyStore
 
 logger = logging.getLogger(__name__)
 
@@ -145,7 +148,9 @@ class TalkToHarnessesService:
         *,
         fault_callback: FaultCallback = None,
         readiness_spawn_gate: Callable[[HarnessKind], Awaitable[bool]] | None = None,
+        sandbox_policies: SandboxPolicyStore | None = None,
     ) -> None:
+        self._sandbox_policies = sandbox_policies
         self._persistence = persistence
         self._registry = registry
         self._publisher = publisher
@@ -290,6 +295,46 @@ class TalkToHarnessesService:
     # Harnesses
     # ------------------------------------------------------------------
 
+    def _policy_store(self) -> SandboxPolicyStore:
+        if self._sandbox_policies is None:
+            raise DomainError(ErrorCode.INVALID_STATE, "Sandbox policy storage is not configured.")
+        return self._sandbox_policies
+
+    async def get_sandbox_policy(
+        self, owner_id: str, policy_id: UUID, revision: int | None = None
+    ) -> SandboxPolicyRevision:
+        return await self._policy_store().get(owner_id, policy_id, revision)
+
+    async def save_sandbox_policy(
+        self, owner_id: str, policy_id: UUID, request: SaveSandboxPolicy
+    ) -> SandboxPolicyRevision:
+        return await self._policy_store().save(owner_id, policy_id, request)
+
+    async def _sandbox_configuration(
+        self, owner_id: str, configuration: HarnessConfiguration, *, latest: bool = False
+    ) -> HarnessConfiguration:
+        # Library embeddings without managed Docker sandboxes retain their own
+        # adapter contract. The production composition always supplies a store.
+        if self._sandbox_policies is None:
+            return configuration
+        ref = configuration.sandbox_policy
+        if ref is None:
+            raise DomainError(ErrorCode.SANDBOX_POLICY_REQUIRED, "Select a sandbox policy.")
+        revision = await self._sandbox_policies.get(
+            owner_id, ref.id, None if latest else ref.revision
+        )
+        if configuration.kind not in revision.policy.providers:
+            raise DomainError(ErrorCode.SANDBOX_POLICY_DENIED, "Provider is not permitted.")
+        if any(
+            server.headers or urlsplit(server.url).username or urlsplit(server.url).query
+            for server in configuration.mcp_servers
+        ):
+            raise DomainError(
+                ErrorCode.SANDBOX_POLICY_DENIED,
+                "MCP credentials in headers or URLs are not supported.",
+            )
+        return configuration.model_copy(update={"sandbox_policy": revision.ref})
+
     async def create_harness(
         self,
         owner_id: str,
@@ -298,6 +343,7 @@ class TalkToHarnessesService:
         configuration: HarnessConfiguration,
         harness_id: UUID | None = None,
     ) -> HarnessProjection:
+        configuration = await self._sandbox_configuration(owner_id, configuration)
         now = self._clock()
         instance = HarnessInstance(
             id=harness_id or uuid4(),
@@ -326,9 +372,10 @@ class TalkToHarnessesService:
 
     async def probe_harness(self, owner_id: str, harness_id: UUID) -> HarnessProbeProjection:
         harness = await self._persistence.get_harness(harness_id, owner_id)
+        configuration = await self._sandbox_configuration(owner_id, harness.configuration)
         adapter = self._registry.create(harness.kind)
         try:
-            capabilities = await adapter.probe(harness.configuration)
+            capabilities = await adapter.probe(configuration)
         except DomainError:
             raise
         except Exception as exc:
@@ -390,12 +437,15 @@ class TalkToHarnessesService:
         title: str | None = None,
     ) -> ConversationSnapshot:
         harness = await self._persistence.get_harness(harness_id, owner_id)
+        configuration = await self._sandbox_configuration(
+            owner_id, harness.configuration, latest=True
+        )
         now = self._clock()
         cid = conversation_id or uuid4()
         binding = ConversationHarnessBinding(
             conversation_id=cid,
             kind=harness.kind,
-            configuration=harness.configuration,
+            configuration=configuration,
             harness_instance_id=harness.id,
             created_at=now,
         )
@@ -571,6 +621,9 @@ class TalkToHarnessesService:
         validated = redact_transcript(validated, patterns)
         handoff = transcript_to_handoff(validated)
         harness = await self._persistence.get_harness(harness_id, owner_id)
+        configuration = await self._sandbox_configuration(
+            owner_id, harness.configuration, latest=True
+        )
         now = self._clock()
         conversation_id = uuid4()
         binding_id = uuid4()
@@ -578,7 +631,7 @@ class TalkToHarnessesService:
             id=binding_id,
             conversation_id=conversation_id,
             kind=harness.kind,
-            configuration=harness.configuration,
+            configuration=configuration,
             harness_instance_id=harness.id,
             created_at=now,
         )
@@ -587,7 +640,7 @@ class TalkToHarnessesService:
                 conversation_id=conversation_id,
                 owner_id=owner_id,
                 binding_id=binding_id,
-                configuration=harness.configuration,
+                configuration=configuration,
             )
             await self._runtime.seed_candidate(candidate, render_handoff(handoff))
             active = binding.model_copy(
@@ -994,6 +1047,9 @@ class TalkToHarnessesService:
                 details={"conversation_id": str(conversation_id)},
             )
         await self._validate_switch_target(owner_id, harness)
+        configuration = await self._sandbox_configuration(
+            owner_id, harness.configuration, latest=True
+        )
 
         now = self._clock()
         command = Command(
@@ -1002,7 +1058,7 @@ class TalkToHarnessesService:
             status=CommandStatus.ACCEPTED,
             idempotency_key=idempotency_key,
             payload=SwitchHarnessPayload(
-                configuration=harness.configuration,
+                configuration=configuration,
                 harness_instance_id=harness.id,
             ),
             created_at=now,

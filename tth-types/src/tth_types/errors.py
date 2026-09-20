@@ -11,6 +11,12 @@ from tth_types.enums import ErrorCode
 # Short generic messages for diagnostic/HTTP sinks. Never echo provider- or
 # request-controlled DomainError.message text through these surfaces.
 _PUBLIC_MESSAGES: Final[dict[ErrorCode, str]] = {
+    ErrorCode.SANDBOX_POLICY_REQUIRED: "Select a project sandbox policy before starting a harness.",
+    ErrorCode.SANDBOX_POLICY_DENIED: "The project sandbox policy does not permit this operation.",
+    ErrorCode.CREDENTIAL_PROXY_UNSUPPORTED: (
+        "This provider login cannot be proxied safely. Configure a supported host login; "
+        "credentials will not be copied into the sandbox."
+    ),
     ErrorCode.PERSISTENCE_REQUIRED: "persistence required",
     ErrorCode.CONVERSATION_BUSY: "conversation busy",
     ErrorCode.MODE_CHANGE_WHILE_ACTIVE: "mode change while active",

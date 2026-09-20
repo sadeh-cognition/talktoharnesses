@@ -12,6 +12,7 @@ from talktoharnesses.remote.sandbox import SandboxRecordData
 def _to_data(row: SandboxRecord) -> SandboxRecordData:
     return SandboxRecordData(
         kind=HarnessKind(row.kind),
+        scope=row.scope,
         container_name=row.container_name,
         image=row.image,
         host_port=row.host_port,
@@ -27,11 +28,11 @@ def _to_data(row: SandboxRecord) -> SandboxRecordData:
 class DjangoSandboxStore:
     """Implements the ``SandboxStore`` protocol over ``SandboxRecord`` rows."""
 
-    async def get(self, kind: HarnessKind) -> SandboxRecordData | None:
-        return await sync_to_async(self._get, thread_sensitive=True)(kind)
+    async def get(self, scope: str) -> SandboxRecordData | None:
+        return await sync_to_async(self._get, thread_sensitive=True)(scope)
 
-    def _get(self, kind: HarnessKind) -> SandboxRecordData | None:
-        row = SandboxRecord.objects.filter(kind=kind.value).first()
+    def _get(self, scope: str) -> SandboxRecordData | None:
+        row = SandboxRecord.objects.filter(scope=scope).first()
         if row is None:
             return None
         return _to_data(row)
@@ -41,8 +42,9 @@ class DjangoSandboxStore:
 
     def _upsert(self, record: SandboxRecordData) -> None:
         SandboxRecord.objects.update_or_create(
-            kind=record.kind.value,
+            scope=record.scope or record.container_name,
             defaults={
+                "kind": record.kind.value,
                 "container_name": record.container_name,
                 "image": record.image,
                 "host_port": record.host_port,
@@ -63,8 +65,9 @@ class DjangoSandboxStore:
         # row resolve inside get_or_create: exactly one insert wins and the
         # loser fetches it, which is what keeps the split token single-minted.
         row, _created = SandboxRecord.objects.get_or_create(
-            kind=record.kind.value,
+            scope=record.scope or record.container_name,
             defaults={
+                "kind": record.kind.value,
                 "container_name": record.container_name,
                 "image": record.image,
                 "host_port": record.host_port,

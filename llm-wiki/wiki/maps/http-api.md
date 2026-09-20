@@ -26,6 +26,8 @@ The Django Ninja API is mounted at `/api/v1`. Health, readiness, and OpenAPI doc
 - Search and retention.
 - SSE event stream with `Last-Event-ID` replay, including the `workspace_setup_started` / `workspace_setup_completed` events that bracket a sandbox's repo-declared setup; a failing setup ends the turn with `workspace_setup_failed` (409 on direct HTTP surfaces).
 
+- [Project sandbox policies](../requirements/project-sandbox-policies.md)
+
 ## Related
 
 - [HTTP and SSE API](../interfaces/http-and-sse-api.md)

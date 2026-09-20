@@ -31,6 +31,7 @@ from tth_types.harness import PlanItem as PlanItem
 from tth_types.harness import StructuredQuestionPayload as StructuredQuestionPayload
 from tth_types.harness import VersionAdvisory as VersionAdvisory
 from tth_types.harness import limit_tool_output_tail as limit_tool_output_tail
+from tth_types.sandbox import CommandGuardCoverage, SandboxPolicyRef, command_guard_coverage
 
 from talktoharnesses.domain._base import FROZEN, UtcDateTime
 from talktoharnesses.domain.enums import (
@@ -719,6 +720,8 @@ class BindingProjection(TypedDict, total=False):
     mode: str | None
     effort: str | None
     yolo: bool | None
+    sandbox_policy: SandboxPolicyRef | None
+    command_guard: CommandGuardCoverage
 
 
 class ConversationDetail(BaseModel):
@@ -737,6 +740,8 @@ class ConversationDetail(BaseModel):
     # turn under the policy the conversation was created with rather than one it
     # has to supply itself.
     yolo: bool | None = None
+    sandbox_policy: SandboxPolicyRef | None = None
+    command_guard: CommandGuardCoverage = "unavailable"
     turns: tuple[TurnProjection, ...] = ()
     messages: tuple[MessageProjection, ...] = ()
     tools: tuple[ToolProjection, ...] = ()
@@ -763,6 +768,12 @@ class ConversationDetail(BaseModel):
             "mode": binding.configuration.mode,
             "effort": binding.configuration.effort,
             "yolo": binding.configuration.yolo,
+            "sandbox_policy": binding.configuration.sandbox_policy,
+            "command_guard": command_guard_coverage(
+                binding.kind,
+                yolo=binding.configuration.yolo,
+                policy=binding.configuration.sandbox_policy,
+            ),
         }
 
 

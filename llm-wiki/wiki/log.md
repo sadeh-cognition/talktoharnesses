@@ -359,3 +359,8 @@ retry recovery, capacity failures, and duplicate completion delivery. See
 
 - [Wiki index](index.md)
 - [Wiki maintenance](operations/wiki-maintenance.md)
+
+## [2026-09-20] implementation | Project sandbox policies
+
+Record the requested policy boundaries, worktree implementation, tests, and
+passing create/resume compatibility checks for all seven installed providers. See [Project sandbox policies](requirements/project-sandbox-policies.md).

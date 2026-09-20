@@ -107,6 +107,19 @@ class AcpSessionNormalizer:
     def set_session(self, native_session_id: str, *, resync: bool = False) -> None:
         self._native_session_id = native_session_id
         self._resync_mode = resync
+        if resync:
+            # These offsets count received frames, not native history entries.
+            # Replay can coalesce old deltas, so counting again from zero would
+            # mistake the first fresh reply chunks for already-seen frames.
+            prefix = f"{native_session_id}:"
+            self._stream_offset = max(
+                [self._stream_offset]
+                + [
+                    int(offset[len(prefix) :])
+                    for offset in self._seen_offsets
+                    if offset.startswith(prefix) and offset[len(prefix) :].isdigit()
+                ]
+            )
 
     def begin_turn(self, turn_id: UUID) -> None:
         self._active_turn_id = turn_id

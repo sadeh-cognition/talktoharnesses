@@ -17,4 +17,4 @@ shift || true
 # --allow flags, so run it from the repo root whatever directory invoked us.
 cd "${REPO_ROOT}"
 TAG="${TAG}" HOST_UID="$(id -u)" HOST_GID="$(id -g)" \
-    docker buildx bake -f docker-bake.hcl "$@"
+    docker buildx bake -f docker-bake.hcl "${@:-split}" gateway

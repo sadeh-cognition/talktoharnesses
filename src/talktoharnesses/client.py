@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 from uuid import UUID
 
 from pydantic import BaseModel, TypeAdapter
+from tth_types.sandbox import SandboxPolicyRevision, SaveSandboxPolicy
 
 from talktoharnesses import __version__
 from talktoharnesses._sse import SseDecoder
@@ -214,6 +215,25 @@ class AsyncTalkToHarnessesClient:
     # ------------------------------------------------------------------
     # System and authentication
     # ------------------------------------------------------------------
+
+    async def get_sandbox_policy(
+        self, policy_id: UUID, *, revision: int | None = None
+    ) -> SandboxPolicyRevision:
+        response = await self._request(
+            "GET", f"sandbox-policies/{policy_id}", accepted=200, params={"revision": revision}
+        )
+        return self._parse_model(SandboxPolicyRevision, response)
+
+    async def save_sandbox_policy(
+        self, policy_id: UUID, request: SaveSandboxPolicy
+    ) -> SandboxPolicyRevision:
+        response = await self._request(
+            "PUT",
+            f"sandbox-policies/{policy_id}",
+            accepted=200,
+            json=request.model_dump(mode="json"),
+        )
+        return self._parse_model(SandboxPolicyRevision, response)
 
     async def health(self, *, timeout: _Timeout = _UNSET) -> dict[str, str]:
         response = await self._request("GET", "health", accepted=200, timeout=timeout)
