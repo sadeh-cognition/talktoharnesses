@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncGenerator, AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from datetime import datetime
 from typing import Any, TypeAlias, TypeVar
 from urllib.parse import urlparse
@@ -139,10 +139,14 @@ class AsyncTalkToHarnessesClient:
         base_url: str,
         *,
         token: str | None = None,
+        token_provider: Callable[[], Awaitable[str]] | None = None,
         timeout: float | None = 30.0,
     ) -> None:
+        if token is not None and token_provider is not None:
+            raise ValueError("token and token_provider are mutually exclusive")
         self._base_url = _normalize_base_url(base_url)
         self._token = token
+        self._token_provider = token_provider
         self._timeout = timeout
         self._client = httpx.AsyncClient(
             base_url=self._base_url,
@@ -163,17 +167,26 @@ class AsyncTalkToHarnessesClient:
     async def aclose(self) -> None:
         await self._client.aclose()
 
-    def _request_headers(
+    async def _request_headers(
         self,
         *,
         extra: Mapping[str, str] | None = None,
     ) -> dict[str, str]:
         headers: dict[str, str] = {}
-        if self._token is not None:
-            headers["Authorization"] = f"Bearer {self._token}"
+        token = await self._token_provider() if self._token_provider else self._token
+        if token is not None:
+            headers["Authorization"] = f"Bearer {token}"
         if extra:
             headers.update(extra)
         return headers
+
+    async def _refreshed_headers(self, previous: dict[str, str]) -> dict[str, str] | None:
+        if self._token_provider is None:
+            return None
+        headers = await self._request_headers()
+        if headers.get("Authorization") == previous.get("Authorization"):
+            return None
+        return {**previous, **headers}
 
     def _resolved_timeout(self, timeout: _Timeout) -> float | None:
         if isinstance(timeout, _UnsetType):
@@ -196,14 +209,24 @@ class AsyncTalkToHarnessesClient:
         if params is not None:
             filtered = {key: value for key, value in params.items() if value is not None}
             query = filtered or None
-        response = await self._client.request(
-            method,
-            path,
-            params=query,
-            json=json,
-            headers=self._request_headers(extra=headers),
-            timeout=self._resolved_timeout(timeout),
-        )
+        request_headers = await self._request_headers(extra=headers)
+        auth_retried = False
+        while True:
+            response = await self._client.request(
+                method,
+                path,
+                params=query,
+                json=json,
+                headers=request_headers,
+                timeout=self._resolved_timeout(timeout),
+            )
+            if response.status_code == 401 and not auth_retried:
+                refreshed = await self._refreshed_headers(request_headers)
+                if refreshed is not None:
+                    request_headers = refreshed
+                    auth_retried = True
+                    continue
+            break
         if response.status_code not in accepted_set:
             raise APIError.from_response(response)
         return response
@@ -244,12 +267,16 @@ class AsyncTalkToHarnessesClient:
         return self._parse_model(ReadinessProjection, response)
 
     async def rotate_token(self, *, timeout: _Timeout = _UNSET) -> TokenProjection:
+        if self._token_provider is not None:
+            raise ValueError("Rotate tokens through the token_provider's credential store")
         response = await self._request("POST", "auth/token/rotate", accepted=200, timeout=timeout)
         projection = self._parse_model(TokenProjection, response)
         self._token = projection.token
         return projection
 
     async def revoke_token(self, *, timeout: _Timeout = _UNSET) -> None:
+        if self._token_provider is not None:
+            raise ValueError("Revoke tokens through the token_provider's credential store")
         await self._request("POST", "auth/token/revoke", accepted=204, timeout=timeout)
         self._token = None
 
@@ -1034,13 +1061,16 @@ class AsyncTalkToHarnessesClient:
         next_delay = _BACKOFF_INITIAL_S
         first_attempt = True
         path = f"conversations/{conversation_id}/events"
+        auth_retry_headers: dict[str, str] | None = None
+        auth_retried = False
 
         while True:
-            if not first_attempt:
+            if not first_attempt and auth_retry_headers is None:
                 await asyncio.sleep(next_delay)
                 next_delay = min(next_delay * 2, _BACKOFF_CAP_S)
 
-            headers = self._request_headers()
+            headers = auth_retry_headers or await self._request_headers()
+            auth_retry_headers = None
             if not first_attempt or cursor != 0:
                 headers["Last-Event-ID"] = str(cursor)
 
@@ -1057,9 +1087,17 @@ class AsyncTalkToHarnessesClient:
                     headers=headers,
                     timeout=stream_timeout,
                 ) as response:
+                    if response.status_code == 401 and not auth_retried:
+                        await response.aread()
+                        auth_retry_headers = await self._refreshed_headers(headers)
+                        if auth_retry_headers is not None:
+                            auth_retried = True
+                            continue
                     if response.status_code != 200:
                         await response.aread()
                         raise APIError.from_response(response)
+
+                    auth_retried = False
 
                     content_type = response.headers.get("content-type", "")
                     if not content_type.startswith("text/event-stream"):

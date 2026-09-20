@@ -35,4 +35,5 @@ The Django Ninja API is mounted at `/api/v1`. Health, readiness, and OpenAPI doc
 - [Authenticate with JWT](../requirements/authenticate-with-jwt.md)
 - [Host Django ASGI with readiness](../requirements/host-django-asgi-with-readiness.md)
 - [Official HTTP client interface](../interfaces/official-http-client.md)
+- The official client supports shared async token providers for HTTP and SSE.
 - [Provision sandbox workspaces](../requirements/provision-sandbox-workspaces.md)

@@ -137,6 +137,24 @@ securely persisting the returned token if it must survive process restart.
 
 `revoke_token()` clears the client's token only after the server returns 204.
 
+For a credential shared by several processes, pass an async `token_provider`
+instead of `token`. The provider returns the current bearer token from your
+credential store. The client calls it before every HTTP request and every SSE
+connection, including reconnections. A 401 triggers one more provider lookup;
+the client retries once only if the token changed. The retry preserves the
+request body, idempotency key, and stream cursor. Other failures do not trigger
+an authentication retry.
+
+```python
+async with AsyncTalkToHarnessesClient(base_url, token_provider=load_current_token) as client:
+    harnesses = await client.list_harnesses()
+```
+
+`token` and `token_provider` are mutually exclusive. Provider-mode clients reject
+`rotate_token()` and `revoke_token()` because the credential store owns those
+operations. Use a separate fixed-token client in the store's rotation service.
+The `token` property reports only the fixed token, or `None` in provider mode.
+
 ## SSE streaming
 
 `stream_conversation_events` reconnects after clean EOF and transport errors

@@ -25,6 +25,10 @@ Remote consumers call TalkToHarnesses without depending on Django internals. The
 
 The client uses httpx, domain Pydantic models, and an SSE decoder. Importing it without the extra raises a documented `ModuleNotFoundError`.
 
+Consumers with shared credentials can supply an async token provider. The
+[client interface](../interfaces/official-http-client.md) documents per-request
+lookup, one retry after a changed-token 401, and SSE reconnection behavior.
+
 ## Requirements
 
 - [Submit turns and stream events](../requirements/submit-turns-and-stream-events.md)

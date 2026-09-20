@@ -8,8 +8,8 @@ tags:
   - type/interface
   - capability/http
   - status/implemented
-last_verified: 2026-08-20
-verified_against_commit: bb3d2b755500fc663816d6cbd1a7cd7947a8920b
+last_verified: 2026-09-20
+verified_against_commit: 5adaa86
 ---
 
 # Official HTTP Client Interface
@@ -19,6 +19,18 @@ verified_against_commit: bb3d2b755500fc663816d6cbd1a7cd7947a8920b
 Public exports are `APIError`, `AsyncTalkToHarnessesClient`, and `ConversationStreamItem`. Stream items are conversation events, snapshots, or sync projections.
 
 The client is the supported remote boundary for HTTP consumers.
+
+An optional async `token_provider` resolves a shared credential before each HTTP
+request and SSE connection. A 401 reloads it and retries once only when it changed,
+preserving bodies, idempotency keys, and stream cursors. Fixed-token behavior is
+unchanged. Provider clients reject direct rotation/revocation, which belongs to
+the caller's credential store. The two constructor options are mutually exclusive.
+
+Implementation: `src/talktoharnesses/client.py`. Evidence:
+`tests/unit/test_client_token_provider.py` uses real HTTP connections to cover
+bounded retries, request preservation, and stream reconnect cursors;
+`tests/unit/test_client.py` covers fixed-token behavior. Operator contract:
+`docs/http-client.md`.
 
 ## Related
 

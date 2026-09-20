@@ -15,6 +15,14 @@ verified_against_commit: 78003994d9fe93108ce5a6bc3591ab2e2ef904d9
 
 Entries are appended using `## [YYYY-MM-DD] operation | Title`.
 
+## [2026-09-20] implement | Resolve shared client credentials per request
+
+- Added async token providers to the official HTTP client. A changed token
+  permits one retry after a 401; HTTP bodies, idempotency keys, and SSE cursors
+  survive that retry. Provider clients leave rotation and revocation to the
+  credential store.
+- Recorded real HTTP test evidence and updated the client interface and docs.
+
 ## [2026-09-18] operation | Harden workspace setup lifecycle
 
 - Review follow-ups on workspace provisioning: setup moved out of the

@@ -33,7 +33,7 @@ Use this catalog to route into the maintained knowledge graph. Obsidian users sh
 - [Floor-and-probe compatibility](capabilities/floor-and-probe-compatibility.md)
 - [Search, retention, and transcripts](capabilities/search-retention-transcripts.md)
 - [Isolated harness runtimes](capabilities/isolated-harness-runtimes.md), including seeded RTK rules for Codex, Grok, and Muse.
-- [Official HTTP client](capabilities/official-http-client.md)
+- [Official HTTP client](capabilities/official-http-client.md), including async token providers for shared credentials.
 
 ## Requirements and journeys
 

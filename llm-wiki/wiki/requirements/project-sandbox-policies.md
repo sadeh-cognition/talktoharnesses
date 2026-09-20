@@ -2,8 +2,12 @@
 type: requirement
 title: Project sandbox policies
 status: implemented
-audiences: [product, developer]
-tags: [type/requirement, status/implemented]
+audiences:
+  - product
+  - developer
+tags:
+  - type/requirement
+  - status/implemented
 last_verified: 2026-09-20
 verified_against_commit: bd5ffc2c6887ee9ef6354d4d8d84254acd1d5be4
 ---
