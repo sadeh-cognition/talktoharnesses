@@ -471,18 +471,18 @@ def test_missing_build_context_raises_actionable_error(tmp_path: Path) -> None:
     assert excinfo.value.details["reason"] == "build_context_missing"
 
 
-async def test_is_running_never_spawns(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_running_endpoint_never_spawns(monkeypatch: pytest.MonkeyPatch) -> None:
     store = FakeStore()
     manager, calls = _spawnable_manager(monkeypatch, store=store)
 
     # No record: not running, and nothing was spawned.
-    assert await manager.is_running(HarnessKind.GROK) is False
+    assert await manager.running_endpoint(HarnessKind.GROK) is None
     assert calls == []
 
     # A cached endpoint still checks Docker but never spawns.
-    await manager.endpoint(HarnessKind.GROK)
+    endpoint = await manager.endpoint(HarnessKind.GROK)
     calls.clear()
-    assert await manager.is_running(HarnessKind.GROK) is True
+    assert await manager.running_endpoint(HarnessKind.GROK) == endpoint
     assert calls == []
 
 

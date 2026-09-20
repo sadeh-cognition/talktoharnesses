@@ -438,20 +438,22 @@ class SandboxManager:
             return
         await self.store.upsert(record.model_copy(update={"updated_at": datetime.now(UTC)}))
 
-    async def is_running(self, kind: HarnessKind) -> bool:
-        """True when the kind's sandbox is up, without spawning or building.
-
-        Used as the readiness monitor's spawn gate: background probing may
-        reattach to a container that is already running, but must never create
-        containers or build images.
-        """
+    async def running_endpoint(self, kind: HarnessKind) -> SplitEndpoint | None:
+        """Read an existing endpoint without preparing, repairing or building."""
         record = (
             await self.store.get(self._container_name(kind)) if self.store is not None else None
         )
-        if record is None and kind not in self._endpoints:
-            return False
-        name = record.container_name if record is not None else self._container_name(kind)
-        return await asyncio.to_thread(self._container_running, name)
+        if record is not None:
+            if record.status != "ready":
+                return None
+            endpoint = SplitEndpoint(base_url=record.base_url, token=record.split_token)
+        else:
+            endpoint = self._endpoints.get(kind)
+        if endpoint is None or not await asyncio.to_thread(
+            self._container_running, self._container_name(kind)
+        ):
+            return None
+        return endpoint
 
     def _container_running(self, container_name: str) -> bool:
         return docker_ops.container_running(container_name)

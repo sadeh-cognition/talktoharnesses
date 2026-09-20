@@ -364,3 +364,24 @@ retry recovery, capacity failures, and duplicate completion delivery. See
 
 Record the requested policy boundaries, worktree implementation, tests, and
 passing create/resume compatibility checks for all seven installed providers. See [Project sandbox policies](requirements/project-sandbox-policies.md).
+
+## [2026-09-20] repair | Sandbox review fixes
+
+Against baseline `bd5ffc2c6887ee9ef6354d4d8d84254acd1d5be4`, separate Cursor
+API-key login from refresh, persist exchanged tokens only in gateway state,
+resolve readiness by the full persisted sandbox identity, and repair partial
+gateway network attachment and replacement. The proxy suite passes 849 tests
+with 91.27% coverage. The real Docker gate also passes after recording daemon
+bind identities so Docker Desktop path translation does not replace the agent
+during gateway recovery. See [Project sandbox policies](requirements/project-sandbox-policies.md).
+
+## [2026-09-20] repair | Read-only readiness and credential mount reconciliation
+
+Against baseline `bd5ffc2c6887ee9ef6354d4d8d84254acd1d5be4`, replace the readiness
+spawn gate with adapters bound to persisted running endpoints. Health failures
+cannot trigger image builds or container preparation. Include the resolved
+host credential source in gateway reconciliation so a directory change cannot
+retain the previous credential mount. Updated
+[Project sandbox policies](requirements/project-sandbox-policies.md),
+[ASGI readiness](requirements/host-django-asgi-with-readiness.md), the index,
+and HTTP map. The proxy suite passes 853 tests with 91.28% coverage.

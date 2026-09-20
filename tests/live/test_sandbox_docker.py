@@ -6,6 +6,7 @@ TTH_SANDBOX_IMAGE_TAG. No provider inference request is made.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from contextlib import suppress
@@ -35,6 +36,9 @@ async def test_gateway_boot_reuse_network_denials_and_command_guard(
 
     root = tmp_path / "workspace"
     root.mkdir()
+    auth = tmp_path / "original-login" / "auth.json"
+    auth.parent.mkdir()
+    auth.write_text('{"tokens":{"access_token":"test-only-original-token"}}')
     revision = SandboxPolicyRevision(
         ref=SandboxPolicyRef(id=uuid4(), revision=1),
         policy=SandboxPolicy(project_root=str(root)),
@@ -44,6 +48,7 @@ async def test_gateway_boot_reuse_network_denials_and_command_guard(
         update={
             "image_tag": os.environ.get("TTH_SANDBOX_IMAGE_TAG", "latest"),
             "mount_roots": (str(root),),
+            "auth_files": {HarnessKind.CODEX: str(auth)},
             "workspace_setup_enabled": False,
         }
     )
@@ -68,6 +73,41 @@ async def test_gateway_boot_reuse_network_denials_and_command_guard(
             )
             assert denied_control.status_code == 403
         container = client.containers.get(name)
+        # Reconcile a gateway left without its private attachment. Retrying
+        # preparation must repair an existing container, not only fresh ones.
+        gateway = client.containers.get(name + "-gateway")
+        gateway.stop()
+        network = client.networks.get(name + "-network")
+        network.disconnect(gateway)
+        assert endpoint.token is not None
+        await asyncio.to_thread(manager._ensure_container, HarnessKind.CODEX, endpoint.token)  # pyright: ignore[reportPrivateUsage]
+        await manager._wait_healthy(HarnessKind.CODEX, manager._base_url(HarnessKind.CODEX))  # pyright: ignore[reportPrivateUsage]
+        gateway.reload()
+        assert name + "-network" in gateway.attrs["NetworkSettings"]["Networks"]
+        assert client.containers.get(name).id == container.id
+        original_gateway_id = gateway.id
+        replacement = tmp_path / "replacement-login" / auth.name
+        replacement.parent.mkdir()
+        replacement.write_text('{"tokens":{"access_token":"test-only-replacement-token"}}')
+        manager.config = manager.config.model_copy(
+            update={"auth_files": {HarnessKind.CODEX: str(replacement)}}
+        )
+        await asyncio.to_thread(manager._ensure_container, HarnessKind.CODEX, endpoint.token)  # pyright: ignore[reportPrivateUsage]
+        await manager._wait_healthy(HarnessKind.CODEX, manager._base_url(HarnessKind.CODEX))  # pyright: ignore[reportPrivateUsage]
+        gateway = client.containers.get(name + "-gateway")
+        assert gateway.id != original_gateway_id
+        assert client.containers.get(name).id == container.id
+        credential = gateway.exec_run(
+            [
+                "python",
+                "-c",
+                "import json; "
+                "print(json.load(open('/credentials/auth.json'))['tokens']['access_token'])",
+            ]
+        )
+        assert credential.exit_code == 0
+        assert isinstance(credential.output, bytes)
+        assert credential.output.strip() == b"test-only-replacement-token"
         assert "test-only-provider-key" not in json.dumps(container.attrs)
         allowed = container.exec_run(
             ["curl", "-fsS", "--max-time", "20", "-o", "/dev/null", "https://pypi.org/simple/pip/"]

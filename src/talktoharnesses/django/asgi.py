@@ -27,6 +27,7 @@ import os
 import socket
 from collections.abc import Awaitable, Callable, MutableMapping
 from datetime import UTC, datetime
+from functools import partial
 from typing import Any
 
 from talktoharnesses.application.service import TalkToHarnessesService
@@ -37,7 +38,7 @@ from talktoharnesses.django.sandbox_policies import DjangoSandboxPolicyStore
 from talktoharnesses.django.sandbox_store import DjangoSandboxStore
 from talktoharnesses.domain.enums import ErrorCode
 from talktoharnesses.domain.errors import DomainError
-from talktoharnesses.remote.registry import build_remote_adapter_registry
+from talktoharnesses.remote.registry import build_remote_adapter_registry, running_sandbox_adapter
 from talktoharnesses.remote.sandbox import (
     SandboxConfig,
     ensure_docker_cli_available,
@@ -109,7 +110,7 @@ def _build_service() -> TalkToHarnessesService:
         broker,
         _utc_clock,
         runtime,
-        readiness_spawn_gate=sandboxes.is_running,
+        readiness_adapter_factory=partial(running_sandbox_adapter, sandboxes),
         sandbox_policies=policies,
     )
 

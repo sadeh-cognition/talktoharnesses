@@ -5,7 +5,7 @@ status: implemented
 audiences: [product, developer]
 tags: [type/requirement, status/implemented]
 last_verified: 2026-09-20
-verified_against_commit: bb531a658b1e9ddbe510b3fe07ab4e7170b03fdb
+verified_against_commit: bd5ffc2c6887ee9ef6354d4d8d84254acd1d5be4
 ---
 
 # Project sandbox policies
@@ -25,6 +25,10 @@ rejects private DNS results, direct tunnels, unapproved redirects, and Git recei
 Native authentication files and environment keys are replaced with scoped handles.
 Only admitted authentication fields receive real credentials. Token refresh is
 serialized against the host file and responses return handles.
+Cursor API-key login is a separate exchange operation. Its access and refresh
+tokens are stored in the gateway's private state with mode 0600, survive gateway
+restart, and reach the agent only as handles. Initial login does not require a
+pre-existing host login file and does not overwrite an existing login.
 
 Each immutable policy revision, provider, and mount set gets separate home/data
 volumes and an internal Docker network. A gateway joins that network and a public
@@ -32,6 +36,21 @@ network. It has no forwarding capability. Only the public interception certifica
 enters the sandbox. Split control uses a separate host token. Existing sessions
 resume with their original policy revision. Secret-bearing MCP headers/URLs are
 rejected. Direct DSPy execution is outside this boundary.
+Background readiness checks resolve the full policy, provider, and mount identity
+and consult persisted sandbox records after a proxy restart. Probes receive
+only an existing endpoint and cannot prepare, repair, or build a sandbox. Both
+the agent and its gateway must be running, and the stored endpoint must be
+ready. An unhealthy or disappearing gateway makes the probe fail without
+entering foreground preparation. Gateway preparation
+reconciles the private-network attachment even on existing containers. A failed
+gateway replacement leaves its previous configuration recorded so retries
+cannot mistake it for a completed replacement. The private gateway configuration
+records the resolved host credential file as well as its container path.
+Changing credential directories, including files with the same basename,
+replaces the gateway and preserves the agent container.
+Private host state records the daemon's effective bind sources and container ID
+at creation. Reuse verifies these exact sources, including Docker Desktop's
+translated VM paths, alongside mount permissions and the configured destinations.
 
 The command blocklist applies to Claude Bash pre-execution callbacks and command
 approval requests from other providers. It cannot prevent arbitrary processes
@@ -40,8 +59,8 @@ launched through unobserved tools. Coverage is exposed with the conversation.
 
 ## Gap
 
-The installed versions of all seven providers pass live create and resume
-checks through the gateway, including verification of the requested reply.
+The initial policy implementation passed live create and resume checks for all
+seven installed providers, including verification of the requested reply.
 Native credential formats and endpoints can change; rerun this gate after provider
 upgrades. Refresh rotation, cross-scope JWT handles, and secret filtering are
 covered by deterministic gateway tests; forced live refresh was not exercised
@@ -77,9 +96,24 @@ workspace setup and split integration. `tests/live/test_policy_provider_sessions
 passes create/resume checks for Grok, Cursor, Codex, Claude, OpenCode, Prime Agent
 and Muse. Grok resume now advances its synthetic frame offset past persisted
 offsets before replay, preventing fresh reply chunks from being discarded.
-The proxy suite passes 845 tests with 91.20% coverage; the changed Claude
+The proxy suite passes 853 tests with 91.28% coverage; the changed Claude
 and Grok split suites pass 106 and 154 tests. Lint, migrations, split drift,
 Dockerfile rendering and wiki checks pass.
+Review regression tests cover Cursor API-key exchanges with and without an
+existing login, token handle reuse after gateway restart and rotation, readiness
+across provider/revision/mount identities, and failed network attachment and
+gateway replacement. The relevant tests are `tests/unit/gateway/test_gateway_http.py`,
+`tests/unit/remote/test_scoped_sandboxes.py`, and
+`tests/unit/remote/test_isolated_sandbox.py`.
+`tests/live/test_sandbox_docker.py` passes with the rebuilt gateway image,
+repairs a deliberately detached gateway network, switches credential directory
+through a gateway replacement, preserves the agent container,
+and verifies permitted package reads, denied direct egress, and command denial.
+`tests/unit/remote/test_readiness_sandbox.py` exercises the production probe
+factory after a restart with a changed image tag. Healthy, unhealthy and
+disappearing gateways never enter preparation, and probe clients are closed.
+The review pass used synthetic Cursor exchange credentials; it did not repeat
+the provider inference gates or the split test suites.
 
 ## Related
 

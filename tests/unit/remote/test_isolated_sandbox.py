@@ -13,8 +13,9 @@ from talktoharnesses.remote.isolated_sandbox import IsolatedSandbox
 from talktoharnesses.remote.sandbox import SandboxConfig
 
 
+@pytest.mark.parametrize("failure", ["none", "attachment", "replacement", "credentials"])
 def test_launch_keeps_secrets_and_public_network_outside_agent(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
 ) -> None:
     root = tmp_path / "project"
     root.mkdir()
@@ -53,7 +54,7 @@ def test_launch_keeps_secrets_and_public_network_outside_agent(
             raise NotFound(name)
         return containers[name]
 
-    def run(image: str, **kwargs: Any) -> bytes:
+    def run(image: str, **kwargs: Any) -> Any:
         runs.append(kwargs)
         if image == manager.gateway_image:
             ca = manager.state / "ca" / "mitmproxy-ca-cert.pem"
@@ -61,6 +62,7 @@ def test_launch_keeps_secrets_and_public_network_outside_agent(
             ca.write_text("public-certificate")
         elif kwargs.get("name") == manager.name:
             container: Any = Mock()
+            container.id = "sandbox-container"
             container.status = "running"
             container.image.tags = [image]
             container.attrs = {
@@ -70,7 +72,9 @@ def test_launch_keeps_secrets_and_public_network_outside_agent(
                 "Mounts": [
                     {
                         "Destination": mount["Target"],
-                        "Source": mount["Source"],
+                        "Source": "/daemon" + mount["Source"]
+                        if mount["Type"] == "bind"
+                        else mount["Source"],
                         "Type": mount["Type"],
                         "RW": not mount.get("ReadOnly", False),
                         "Name": mount["Source"],
@@ -86,6 +90,7 @@ def test_launch_keeps_secrets_and_public_network_outside_agent(
                 },
             }
             containers[manager.name] = container
+            return container
         return b""
 
     def create(image: str, **kwargs: Any) -> Any:
@@ -93,7 +98,9 @@ def test_launch_keeps_secrets_and_public_network_outside_agent(
         container: Any = Mock()
         container.status = "created"
         container.image.id = client.images.get.return_value.id
-        container.attrs = {"NetworkSettings": {"Ports": {"8080/tcp": [{"HostPort": "19234"}]}}}
+        container.attrs = {
+            "NetworkSettings": {"Networks": {}, "Ports": {"8080/tcp": [{"HostPort": "19234"}]}}
+        }
         containers[manager.name + "-gateway"] = container
         return container
 
@@ -101,10 +108,20 @@ def test_launch_keeps_secrets_and_public_network_outside_agent(
     client.containers.run.side_effect = run
     client.containers.create.side_effect = create
 
+    def connect(container: Any, *, aliases: list[str]) -> None:
+        if failure == "attachment" and network.connect.call_count == 1:
+            raise RuntimeError("network attachment failed")
+        container.attrs["NetworkSettings"]["Networks"]["scope-network"] = {"Aliases": aliases}
+
+    network.connect.side_effect = connect
+
     def docker_client(kind: HarnessKind) -> Any:
         return client
 
     monkeypatch.setattr(manager, "_docker_client", docker_client)
+    if failure == "attachment":
+        with pytest.raises(RuntimeError, match="network attachment failed"):
+            manager._ensure_container(HarnessKind.CODEX, "host-only-control")  # pyright: ignore[reportPrivateUsage]
     manager._ensure_container(HarnessKind.CODEX, "host-only-control")  # pyright: ignore[reportPrivateUsage]
     sandbox = next(call for call in runs if call.get("name") == "scope")
     assert "real-secret" not in json.dumps(sandbox)
@@ -125,3 +142,46 @@ def test_launch_keeps_secrets_and_public_network_outside_agent(
     manager._ensure_container(HarnessKind.CODEX, "host-only-control")  # pyright: ignore[reportPrivateUsage]
     assert len(gateways) == 1
     assert len([call for call in runs if call.get("name") == "scope"]) == 1
+    assert network.connect.call_count == (2 if failure == "attachment" else 1)
+    assert "scope-network" in containers["scope-gateway"].attrs["NetworkSettings"]["Networks"]
+    if failure == "replacement":
+        previous = containers["scope-gateway"]
+        previous.remove.side_effect = [RuntimeError("removal failed"), None]
+        with pytest.raises(RuntimeError, match="removal failed"):
+            manager._ensure_container(HarnessKind.CODEX, "new-control")  # pyright: ignore[reportPrivateUsage]
+        assert json.loads((manager.state / "config.json").read_text()) == config
+        manager._ensure_container(HarnessKind.CODEX, "new-control")  # pyright: ignore[reportPrivateUsage]
+        assert previous.remove.call_count == 2
+        assert len(gateways) == 2
+        assert (
+            json.loads((manager.state / "config.json").read_text())["control_token"]
+            == "new-control"
+        )
+    if failure == "credentials":
+        replacement_dir = tmp_path / "replacement-login"
+        replacement_dir.mkdir()
+        replacement_auth = replacement_dir / auth.name
+        replacement_auth.write_text('{"tokens":{"access_token":"replacement-secret"}}')
+        manager.config = manager.config.model_copy(
+            update={"auth_files": {HarnessKind.CODEX: str(replacement_auth)}}
+        )
+        manager._ensure_container(HarnessKind.CODEX, "host-only-control")  # pyright: ignore[reportPrivateUsage]
+        assert len(gateways) == 2
+        assert len([call for call in runs if call.get("name") == "scope"]) == 1
+        credential_mount = next(
+            mount for mount in gateways[-1]["mounts"] if mount["Target"] == "/credentials"
+        )
+        assert credential_mount["Source"] == str(replacement_dir)
+        assert json.loads((manager.state / "config.json").read_text())["auth_source"] == str(
+            replacement_auth
+        )
+    # Recorded VM translations do not excuse a different bind source.
+    bound = next(mount for mount in containers["scope"].attrs["Mounts"] if mount["Type"] == "bind")
+    bound["Source"] = "/different-source"
+    assert not manager._container_matches(  # pyright: ignore[reportPrivateUsage]
+        containers["scope"],
+        HarnessKind.CODEX,
+        image="tth-codex:latest",
+        name="scope",
+        environment=sandbox["environment"],
+    )

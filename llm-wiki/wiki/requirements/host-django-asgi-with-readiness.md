@@ -10,8 +10,8 @@ tags:
   - capability/http
   - capability/runtime
   - status/implemented
-last_verified: 2026-08-30
-verified_against_commit: 2920f5820783245bd5b871e61edd44642ebfe56a
+last_verified: 2026-09-20
+verified_against_commit: bd5ffc2c6887ee9ef6354d4d8d84254acd1d5be4
 sources:
   - raw/engineering/deployment.md
   - raw/product/readme.md
@@ -26,7 +26,11 @@ A host application can compose Django settings, URL includes, and ASGI lifespan 
 
 ## Current behavior
 
-Hosts add `talktoharnesses.django`, set `TALKTOHARNESSES_JWT_SIGNING_KEY`, include `/api/v1/`, and wrap ASGI with `talktoharnesses_lifespan`. Harness kinds need no enablement configuration; the proxy spawns each kind's managed Docker sandbox on demand. `GET /health` returns ok. `GET /ready` checks the database and process-local proxy service. SQLite is single-supervisor. PostgreSQL is the multi-worker profile. Migrations run once via the host.
+Hosts add `talktoharnesses.django`, set `TALKTOHARNESSES_JWT_SIGNING_KEY`, include `/api/v1/`, and wrap ASGI with `talktoharnesses_lifespan`. Harness kinds need no enablement configuration; the proxy spawns each kind's managed Docker sandbox on demand. `GET /health` returns ok. `GET /ready` checks the database and process-local proxy service. SQLite is single-supervisor. PostgreSQL is the multi-worker profile. Migrations run once via the host. The default composition supplies readiness
+with adapters bound to existing persisted sandbox endpoints. Background probes
+do not create containers, reconcile configuration, or build images, including
+after a restart with a changed image tag. An unavailable gateway fails the
+probe; foreground requests own preparation.
 
 ## Gap
 
@@ -47,6 +51,9 @@ No gap remains against the documented host integration. Mixed-version rolling up
 - `src/talktoharnesses/django/api/routes.py`
 
 ## Test evidence
+
+`tests/unit/remote/test_readiness_sandbox.py` covers healthy, unhealthy, and
+disappearing gateways after restart without entering preparation.
 
 - `tests/test_docs_ops.py::test_readme_django_setup_snippet_executes`
 - `tests/unit/django/test_asgi.py`

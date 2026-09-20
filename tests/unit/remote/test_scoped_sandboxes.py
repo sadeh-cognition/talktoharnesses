@@ -1,4 +1,5 @@
 import subprocess
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
@@ -10,12 +11,15 @@ from tth_types.sandbox import SandboxPolicy, SaveSandboxPolicy
 
 from talktoharnesses.django.sandbox_policies import DjangoSandboxPolicyStore
 from talktoharnesses.django.sandbox_store import DjangoSandboxStore
-from talktoharnesses.remote.sandbox import SandboxConfig
+from talktoharnesses.remote.isolated_sandbox import IsolatedSandbox
+from talktoharnesses.remote.sandbox import SandboxConfig, SandboxRecordData
 from talktoharnesses.remote.scoped_sandboxes import ScopedSandboxManager
 
 
 @pytest.mark.django_db(transaction=True)
-async def test_policy_scope_reuses_only_compatible_revisions_and_mounts(tmp_path: Path) -> None:
+async def test_policy_scope_reuses_only_compatible_revisions_and_mounts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     root = tmp_path / "project"
     root.mkdir()
     subprocess.run(["git", "init", str(root)], check=True, capture_output=True)
@@ -77,6 +81,42 @@ async def test_policy_scope_reuses_only_compatible_revisions_and_mounts(tmp_path
         configuration.model_copy(update={"kind": HarnessKind.CLAUDE})
     )
     assert other_provider.name != first.name
+    now = datetime.now(UTC)
+    await manager.store.upsert(
+        SandboxRecordData(
+            kind=HarnessKind.CODEX,
+            scope=first.name,
+            container_name=first.name,
+            image="tth-codex:test",
+            host_port=1234,
+            base_url="http://127.0.0.1:1234/split",
+            split_token="host-token",
+            status="ready",
+            created_at=now,
+            updated_at=now,
+        )
+    )
+
+    running_containers = {first.name, first.name + "-gateway"}
+
+    def running(instance: IsolatedSandbox, name: str) -> bool:
+        return name in running_containers
+
+    monkeypatch.setattr(IsolatedSandbox, "_container_running", running)
+    # A restarted proxy must find the persisted scope without an in-memory cache.
+    manager.instances.clear()
+    endpoint = await manager.running_endpoint(configuration)
+    assert endpoint is not None
+    assert endpoint.base_url == "http://127.0.0.1:1234/split"
+    assert endpoint.token == "host-token"
+    for different in (
+        configuration.model_copy(update={"kind": HarnessKind.CLAUDE}),
+        configuration.model_copy(update={"working_directory": str(worktree)}),
+        configuration.model_copy(update={"sandbox_policy": latest.ref}),
+    ):
+        assert await manager.running_endpoint(different) is None
+    running_containers.remove(first.name + "-gateway")
+    assert await manager.running_endpoint(configuration) is None
 
 
 @pytest.mark.django_db(transaction=True)

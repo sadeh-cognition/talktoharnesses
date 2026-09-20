@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import secrets
@@ -10,6 +11,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from pydantic import BaseModel
 from tth_types.enums import ErrorCode, HarnessKind
 from tth_types.errors import DomainError
 from tth_types.sandbox import SandboxPolicyRevision
@@ -21,6 +23,7 @@ from talktoharnesses.remote.sandbox import (
     SandboxConfig,
     SandboxManager,
     SandboxStore,
+    SplitEndpoint,
     pids_limit,
     security_options,
 )
@@ -28,6 +31,28 @@ from talktoharnesses.remote.sandbox_workspace import TOOLCHAIN_ENV
 
 GATEWAY_IMAGE = "tth-policy-gateway"
 CA_MOUNT_PATHS = ("/etc/tth/ca.pem", "/etc/ssl/certs/ca-certificates.crt")
+
+
+class SandboxMounts(BaseModel):
+    """Daemon bind identities recorded only when we create the container.
+
+    Docker Desktop can replace host paths with opaque VM paths. Keep that
+    translation in private host state so reuse still checks exact sources.
+    """
+
+    container_id: str
+    sources: dict[str, str]
+
+    @classmethod
+    def inspect(cls, container: Any) -> SandboxMounts:
+        return cls(
+            container_id=container.id,
+            sources={
+                mount["Destination"]: mount["Source"]
+                for mount in container.attrs["Mounts"]
+                if mount["Type"] == "bind"
+            },
+        )
 
 
 class IsolatedSandbox(SandboxManager):
@@ -51,6 +76,14 @@ class IsolatedSandbox(SandboxManager):
 
     def _container_name(self, kind: HarnessKind) -> str:
         return self.name
+
+    async def running_endpoint(self, kind: HarnessKind) -> SplitEndpoint | None:
+        endpoint = await super().running_endpoint(kind)
+        if endpoint is not None and await asyncio.to_thread(
+            self._container_running, self.name + "-gateway"
+        ):
+            return endpoint
+        return None
 
     def _image(self, kind: HarnessKind) -> str:
         return f"tth-{kind.value.replace('_', '-')}:{self.config.image_tag}"
@@ -226,6 +259,7 @@ class IsolatedSandbox(SandboxManager):
             address = sandbox.attrs["NetworkSettings"]["Networks"][network_name]["IPAddress"]
             gateway_mounts = [Mount(target="/state", source=str(self.state), type="bind")]
             gateway_auth = None
+            source = None
             if auth_file:
                 source = Path(auth_file).resolve(strict=True)
                 gateway_mounts.append(
@@ -240,13 +274,13 @@ class IsolatedSandbox(SandboxManager):
                 "split_token": identity["split_token"],
                 "split_address": address,
                 "auth_file": gateway_auth,
+                "auth_source": str(source) if source is not None else None,
                 "api_keys": keys,
             }
             config_path = self.state / "config.json"
             config_changed = (
                 not config_path.exists() or json.loads(config_path.read_text()) != gateway_config
             )
-            atomic_json(config_path, gateway_config)
             gateway_name = self.name + "-gateway"
             try:
                 gateway = client.containers.get(gateway_name)
@@ -255,6 +289,9 @@ class IsolatedSandbox(SandboxManager):
                     gateway = None
             except NotFound:
                 gateway = None
+            # Only mark the desired configuration after the old gateway has
+            # been removed. A failed removal must remain retryable.
+            atomic_json(config_path, gateway_config)
             if gateway is None:
                 gateway = client.containers.create(
                     self.gateway_image,
@@ -270,8 +307,9 @@ class IsolatedSandbox(SandboxManager):
                     restart_policy={"Name": "unless-stopped"},
                     labels={"tth.sandbox": self.name},
                 )
-                network.connect(gateway, aliases=[GATEWAY_HOST])
             gateway.reload()
+            if network_name not in gateway.attrs["NetworkSettings"]["Networks"]:
+                network.connect(gateway, aliases=[GATEWAY_HOST])
             if gateway.status != "running":
                 gateway.start()
             gateway.reload()
@@ -298,8 +336,12 @@ class IsolatedSandbox(SandboxManager):
             "/data",
             *CA_MOUNT_PATHS,
         }
+        recorded_mounts = self.state / "mounts.json"
         return (
             image in (container.image.tags or [])
+            and recorded_mounts.exists()
+            and SandboxMounts.model_validate_json(recorded_mounts.read_text())
+            == SandboxMounts.inspect(container)
             and set(mounts) == expected_paths
             and all(actual_env.get(key) == value for key, value in environment.items())
             and set(attrs["NetworkSettings"]["Networks"]) == {name + "-network"}
@@ -309,9 +351,7 @@ class IsolatedSandbox(SandboxManager):
             and attrs["HostConfig"].get("Dns") == ["127.0.0.1"]
             and not attrs["HostConfig"].get("PortBindings")
             and all(
-                mounts[root]["Type"] == "bind"
-                and mounts[root]["Source"] == root
-                and mounts[root]["RW"] == (root in self.roots)
+                mounts[root]["Type"] == "bind" and mounts[root]["RW"] == (root in self.roots)
                 for root in (*self.roots, *self.revision.policy.read_only_roots)
             )
             and all(
@@ -319,8 +359,7 @@ class IsolatedSandbox(SandboxManager):
                 for target, suffix in (("/home/agent", "-home"), ("/data", "-data"))
             )
             and all(
-                mounts[target]["Source"] == str(self.state / "ca-public.pem")
-                and not mounts[target]["RW"]
+                mounts[target]["Type"] == "bind" and not mounts[target]["RW"]
                 for target in CA_MOUNT_PATHS
             )
         )
@@ -353,7 +392,7 @@ class IsolatedSandbox(SandboxManager):
                 for root in self.revision.policy.read_only_roots
             ),
         ]
-        client.containers.run(
+        container = client.containers.run(
             image,
             name=name,
             detach=True,
@@ -369,3 +408,5 @@ class IsolatedSandbox(SandboxManager):
             restart_policy={"Name": "unless-stopped"},
             labels={"tth.sandbox": name},
         )
+        container.reload()
+        atomic_json(self.state / "mounts.json", SandboxMounts.inspect(container).model_dump())

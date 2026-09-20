@@ -51,7 +51,7 @@ from tth_types.split_api import (
 from talktoharnesses._sse import SseDecoder
 from talktoharnesses.domain.events import HarnessEvent
 from talktoharnesses.remote.handle import RemoteProcessHandle
-from talktoharnesses.remote.sandbox import rewrite_loopback_url
+from talktoharnesses.remote.sandbox import SplitEndpoint, rewrite_loopback_url
 from talktoharnesses.remote.sandbox_workspace import (
     WorkspaceSetupOutcome,
     WorkspaceSetupStarted,
@@ -155,7 +155,7 @@ class RemoteHarnessAdapter:
     def __init__(
         self,
         kind: HarnessKind,
-        endpoints: SplitEndpointProvider | ScopedSandboxManager,
+        endpoints: SplitEndpointProvider | ScopedSandboxManager | SplitEndpoint,
         *,
         adapter_version: str = "0",
         client_factory: type[httpx.AsyncClient] | None = None,
@@ -213,6 +213,8 @@ class RemoteHarnessAdapter:
     # ------------------------------------------------------------------
 
     async def _resolved_endpoint(self) -> ResolvedEndpoint:
+        if isinstance(self._endpoints, SplitEndpoint):
+            return self._endpoints
         if self._endpoint is None:
             if isinstance(self._endpoints, ScopedSandboxManager):
                 raise DomainError(ErrorCode.SANDBOX_POLICY_REQUIRED, "Sandbox policy is not bound.")

@@ -21,7 +21,7 @@ from tth_types.enums import HarnessKind
 from tth_types.sandbox import CommandCheck, SandboxPolicyRevision
 
 from talktoharnesses.command_policy import check_command
-from talktoharnesses.gateway.credentials import CredentialVault, UnsupportedCredential
+from talktoharnesses.gateway.credentials import CredentialVault
 from talktoharnesses.gateway.routes import (
     GATEWAY_HOST,
     GATEWAY_PORT,
@@ -29,6 +29,7 @@ from talktoharnesses.gateway.routes import (
     META_API_HOST,
     PROVIDER_ROUTES,
     ProviderRoute,
+    TokenExchange,
     normalized_path,
     permitted_request,
     provider_route,
@@ -49,7 +50,10 @@ class GatewayConfig(BaseModel):
     split_token: str = Field(repr=False)
     split_address: str
     auth_file: str | None = None
+    # Host bind identity used during reconciliation; the gateway opens auth_file.
+    auth_source: str | None = None
     api_keys: dict[str, str] = Field(default_factory=dict, repr=False)
+    cursor_login_file: str = "/state/cursor-login.json"
 
 
 class PolicyGateway:
@@ -60,6 +64,9 @@ class PolicyGateway:
             seed=config.seed,
             auth_file=Path(config.auth_file) if config.auth_file else None,
             api_keys=config.api_keys,
+            cursor_login_file=Path(config.cursor_login_file)
+            if config.kind is HarnessKind.CURSOR
+            else None,
         )
 
     def _deny(self, flow: http.HTTPFlow, reason: str = "egress_denied") -> None:
@@ -94,10 +101,8 @@ class PolicyGateway:
         if flow.request.port != 443 or host not in hosts:
             self._deny(flow)
 
-    async def _refresh_lock(self, flow: http.HTTPFlow) -> None:
-        if self.vault.auth_file is None:
-            raise UnsupportedCredential("A host login file is required for refresh.")
-        stream = self.vault.auth_file.with_suffix(".tth-refresh.lock").open("a")
+    async def _refresh_lock(self, flow: http.HTTPFlow, exchange: TokenExchange) -> None:
+        stream = self.vault.exchange_file(exchange).with_suffix(".tth-refresh.lock").open("a")
         try:
             async with asyncio.timeout(30):
                 while True:
@@ -164,8 +169,8 @@ class PolicyGateway:
         try:
             if route is not None:
                 flow.metadata["provider_route"] = route
-                if route.refresh:
-                    await self._refresh_lock(flow)
+                if route.exchange is not None:
+                    await self._refresh_lock(flow, route.exchange)
                 self.vault.snapshot()
                 for name in ("Authorization", "X-Api-Key", "Api-Key", "X-Goog-Api-Key"):
                     if name in cast(Any, request.headers):
@@ -180,7 +185,7 @@ class PolicyGateway:
                     )
                 # Native RPC transports can send prompts and tool responses on
                 # a bidirectional stream. Only token exchanges need buffering.
-                request.stream = not route.refresh
+                request.stream = route.exchange is None
             else:
                 for name in ("Authorization", "Cookie", "X-Api-Key", "Api-Key"):
                     if name in cast(Any, request.headers):
@@ -210,7 +215,7 @@ class PolicyGateway:
                 self._deny(flow, "invalid_command_check")
             return
         route: ProviderRoute | None = flow.metadata.get("provider_route")
-        if route is None or not route.refresh:
+        if route is None or route.exchange is None:
             return
         try:
             if "application/x-www-form-urlencoded" in cast(Any, request.headers).get(
@@ -265,7 +270,7 @@ class PolicyGateway:
         route: ProviderRoute | None = flow.metadata.get("provider_route")
         # Inference and package downloads stream; token exchanges are buffered
         # so no credential-bearing response byte reaches the sandbox unchecked.
-        if flow.response.status_code < 400 and (route is None or not route.refresh):
+        if flow.response.status_code < 400 and (route is None or route.exchange is None):
             flow.response.stream = True
 
     def response(self, flow: http.HTTPFlow) -> None:
@@ -278,9 +283,11 @@ class PolicyGateway:
                     {"error": "provider_request_failed", "status": flow.response.status_code}
                 ).encode()
                 cast(Any, flow.response.headers)["Content-Type"] = "application/json"
-            elif route is not None and route.refresh:
+            elif route is not None and route.exchange is not None:
                 document = json.loads(flow.response.get_text() or "")
-                flow.response.text = json.dumps(self.vault.refreshed(document, route.provider))
+                flow.response.text = json.dumps(
+                    self.vault.refreshed(document, route.provider, exchange=route.exchange)
+                )
         except (OSError, ValueError):
             self._deny(flow, "credential_proxy_unsupported")
         finally:

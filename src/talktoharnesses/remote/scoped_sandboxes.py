@@ -8,12 +8,12 @@ import json
 import os
 from pathlib import Path
 
-from tth_types.enums import ErrorCode, HarnessKind
+from tth_types.enums import ErrorCode
 from tth_types.errors import DomainError
 from tth_types.harness import HarnessConfiguration
 
 from talktoharnesses.remote.isolated_sandbox import IsolatedSandbox
-from talktoharnesses.remote.sandbox import SandboxConfig, SandboxStore
+from talktoharnesses.remote.sandbox import SandboxConfig, SandboxStore, SplitEndpoint
 from talktoharnesses.remote.sandbox_paths import repository_directory
 from talktoharnesses.sandbox_policies import SandboxPolicyStore
 
@@ -120,6 +120,8 @@ class ScopedSandboxManager:
             )
         return self.instances[name]
 
-    async def is_running(self, kind: HarnessKind) -> bool:
-        # The background monitor must never create a project scope.
-        return any([await instance.is_running(kind) for instance in self.instances.values()])
+    async def running_endpoint(self, configuration: HarnessConfiguration) -> SplitEndpoint | None:
+        # Resolve the same scope as foreground preparation, then return only
+        # its persisted endpoint. Callers cannot enter preparation through it.
+        instance = await self.for_configuration(configuration)
+        return await instance.running_endpoint(configuration.kind)

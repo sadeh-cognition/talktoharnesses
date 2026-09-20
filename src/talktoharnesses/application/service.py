@@ -22,7 +22,7 @@ from talktoharnesses.application.interaction_broker import InteractionBroker
 from talktoharnesses.application.observability import get_observability
 from talktoharnesses.application.persistence import Persistence
 from talktoharnesses.application.publisher import CommittedEventPublisher
-from talktoharnesses.application.readiness import ReadinessProbeMonitor
+from talktoharnesses.application.readiness import ProbeAdapterFactory, ReadinessProbeMonitor
 from talktoharnesses.application.transcripts import (
     handoff_to_transcript,
     redact_transcript,
@@ -35,7 +35,6 @@ from talktoharnesses.domain.enums import (
     CommandKind,
     CommandStatus,
     ErrorCode,
-    HarnessKind,
     InteractionStatus,
 )
 from talktoharnesses.domain.errors import DomainError
@@ -147,7 +146,7 @@ class TalkToHarnessesService:
         runtime_manager: RuntimeManager,
         *,
         fault_callback: FaultCallback = None,
-        readiness_spawn_gate: Callable[[HarnessKind], Awaitable[bool]] | None = None,
+        readiness_adapter_factory: ProbeAdapterFactory | None = None,
         sandbox_policies: SandboxPolicyStore | None = None,
     ) -> None:
         self._sandbox_policies = sandbox_policies
@@ -180,7 +179,7 @@ class TalkToHarnessesService:
             fault_callback=fault_callback,
         )
         self._readiness = ReadinessProbeMonitor(
-            persistence, registry, clock, spawn_gate=readiness_spawn_gate
+            persistence, registry, clock, adapter_factory=readiness_adapter_factory
         )
         self._started = False
         self._worker_id: str | None = None

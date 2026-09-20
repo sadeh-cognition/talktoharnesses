@@ -12,9 +12,23 @@ import time
 from pathlib import Path
 from typing import Any, cast
 
+from pydantic import BaseModel, Field
 from tth_types.enums import HarnessKind
 
-from talktoharnesses.gateway.routes import KIND_PROVIDERS, META_API_HOST, META_GATEWAY_BASE
+from talktoharnesses.gateway.routes import (
+    KIND_PROVIDERS,
+    META_API_HOST,
+    META_GATEWAY_BASE,
+    TokenExchange,
+)
+
+
+class CursorLoginTokens(BaseModel):
+    """Only these fields from Cursor's login response reach the native client."""
+
+    accessToken: str = Field(min_length=1, repr=False)
+    refreshToken: str = Field(min_length=1, repr=False)
+
 
 _SECRET_KEYS = frozenset(
     {
@@ -111,11 +125,13 @@ class CredentialVault:
         seed: str,
         auth_file: Path | None = None,
         api_keys: dict[str, str] | None = None,
+        cursor_login_file: Path | None = None,
     ) -> None:
         self.kind = kind
         self.seed = seed.encode()
         self.auth_file = auth_file
         self.api_keys = api_keys or {}
+        self.cursor_login_file = cursor_login_file
         self._handles: dict[str, tuple[str, str, tuple[str, ...]]] = {}
 
     def _provider(self, path: tuple[str, ...]) -> str:
@@ -188,6 +204,9 @@ class CredentialVault:
         document = None
         if self.auth_file is not None:
             document = self._virtualize(json.loads(self.auth_file.read_text()))
+        if self.cursor_login_file is not None and self.cursor_login_file.exists():
+            login = CursorLoginTokens.model_validate_json(self.cursor_login_file.read_text())
+            self._virtualize(login.model_dump(), ("cursor_login",))
         if self.kind is HarnessKind.MUSE and document is None and "META_API_KEY" in env:
             document = {
                 "schema_version": 1,
@@ -255,12 +274,25 @@ class CredentialVault:
                 result[key] = self.substitute(value, provider)
         return result
 
-    def refreshed(self, document: Any, provider: str) -> Any:
+    def exchange_file(self, exchange: TokenExchange) -> Path:
+        path = self.cursor_login_file if exchange is TokenExchange.CURSOR_LOGIN else self.auth_file
+        if path is None:
+            raise UnsupportedCredential("Host credential storage is required for this exchange.")
+        return path
+
+    def refreshed(
+        self, document: Any, provider: str, *, exchange: TokenExchange = TokenExchange.REFRESH
+    ) -> Any:
         """Persist token rotation and return only handles to the native client.
 
         The caller holds the credential file's cross-process refresh lock across
         both the upstream request and this update.
         """
+        if exchange is TokenExchange.CURSOR_LOGIN:
+            login = CursorLoginTokens.model_validate(document)
+            path = self.exchange_file(exchange)
+            atomic_json(path, login.model_dump())
+            return self._virtualize(login.model_dump(), ("cursor_login",))
         if not isinstance(document, dict) or self.auth_file is None:
             raise UnsupportedCredential("Unsupported token refresh response.")
         native = json.loads(self.auth_file.read_text())

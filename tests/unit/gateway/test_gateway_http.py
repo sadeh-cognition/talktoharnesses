@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -183,6 +184,70 @@ async def test_successful_refresh_returns_handles_and_clears_secret_headers(tmp_
     assert "Set-Cookie" not in request.response.headers
     assert "refresh_lock" not in request.metadata
     assert proxy.vault.substitute(request.response.json()["access_token"], "openai") == "new-secret"
+
+
+@pytest.mark.parametrize("existing_login", [False, True])
+async def test_cursor_api_key_login_persists_only_host_tokens_and_survives_restart(
+    tmp_path: Path, existing_login: bool
+) -> None:
+    config = gateway(tmp_path).config.model_copy(
+        update={
+            "kind": HarnessKind.CURSOR,
+            "api_keys": {"CURSOR_API_KEY": "host-api-key"},
+            "auth_file": str(tmp_path / "auth.json") if existing_login else None,
+            "cursor_login_file": str(tmp_path / "cursor-login.json"),
+        }
+    )
+    original = (tmp_path / "auth.json").read_text()
+    old_handle = ""
+    for rotation in range(2):
+        proxy = PolicyGateway(config)
+        env, _ = proxy.vault.snapshot()
+        request = flow(
+            "https://api2.cursor.sh/auth/exchange_user_api_key",
+            "POST",
+            Authorization="Bearer " + env["CURSOR_API_KEY"],
+        )
+        request.request.text = "{}"
+        await proxy.requestheaders(request)
+        proxy.request(request)
+        assert request.response is None
+        assert request.request.headers["Authorization"] == "Bearer host-api-key"
+        assert request.request.stream is False
+        request.response = http.Response.make(
+            200,
+            json.dumps(
+                {
+                    "accessToken": f"host-access-{rotation}",
+                    "refreshToken": f"host-refresh-{rotation}",
+                    "unknownSecret": "must-not-reach-agent",
+                }
+            ),
+        )
+        proxy.responseheaders(request)
+        proxy.response(request)
+        assert request.response.status_code == 200
+        handles = request.response.json()
+        assert set(handles) == {"accessToken", "refreshToken"}
+        body = request.response.text
+        assert body is not None
+        assert "host-" not in body and "must-not-reach-agent" not in body
+        assert "refresh_lock" not in request.metadata
+        path = Path(config.cursor_login_file)
+        assert path.stat().st_mode & 0o777 == 0o600
+        assert json.loads(path.read_text())["accessToken"] == f"host-access-{rotation}"
+        # A new gateway process must resolve the handles saved by the native CLI.
+        restarted = PolicyGateway(config)
+        inference = flow(
+            "https://api2.cursor.sh/agent.v1.AgentService/Run",
+            "POST",
+            Authorization="Bearer " + (old_handle or handles["accessToken"]),
+        )
+        await restarted.requestheaders(inference)
+        assert inference.response is None
+        assert inference.request.headers["Authorization"] == f"Bearer host-access-{rotation}"
+        old_handle = handles["accessToken"]
+    assert (tmp_path / "auth.json").read_text() == original
 
 
 async def test_muse_reverse_proxy_uses_fixed_tls_origin_and_the_same_route_policy(

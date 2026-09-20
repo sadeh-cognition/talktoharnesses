@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ipaddress
 from dataclasses import dataclass
+from enum import Enum
 from urllib.parse import unquote, urlsplit
 
 from tth_types.enums import HarnessKind
@@ -15,11 +16,16 @@ META_API_HOST = "api.meta.ai"
 META_GATEWAY_BASE = f"http://{GATEWAY_HOST}:{GATEWAY_PORT}/v1"
 
 
+class TokenExchange(Enum):
+    REFRESH = "refresh"
+    CURSOR_LOGIN = "cursor_login"
+
+
 @dataclass(frozen=True)
 class ProviderRoute:
     provider: str
     rule: EgressRule
-    refresh: bool = False
+    exchange: TokenExchange | None = None
 
 
 def _routes(provider: str, host: str, paths: tuple[str, ...]) -> tuple[ProviderRoute, ...]:
@@ -41,7 +47,9 @@ PROVIDER_ROUTES = (
         ),
     ),
     ProviderRoute(
-        "openai", EgressRule(host="auth.openai.com", path="/oauth/token", methods=("POST",)), True
+        "openai",
+        EgressRule(host="auth.openai.com", path="/oauth/token", methods=("POST",)),
+        TokenExchange.REFRESH,
     ),
     *_routes(
         "anthropic",
@@ -49,7 +57,9 @@ PROVIDER_ROUTES = (
         ("/v1/messages", "/v1/models", "/api/oauth/profile", "/api/oauth/usage"),
     ),
     *(
-        ProviderRoute("anthropic", EgressRule(host=host, path=path, methods=("POST",)), True)
+        ProviderRoute(
+            "anthropic", EgressRule(host=host, path=path, methods=("POST",)), TokenExchange.REFRESH
+        )
         for host, path in (
             ("console.anthropic.com", "/v1/oauth/token"),
             ("platform.claude.com", "/v1/oauth/token"),
@@ -68,7 +78,9 @@ PROVIDER_ROUTES = (
         ),
     ),
     ProviderRoute(
-        "xai", EgressRule(host="auth.x.ai", path="/oauth2/token", methods=("POST",)), True
+        "xai",
+        EgressRule(host="auth.x.ai", path="/oauth2/token", methods=("POST",)),
+        TokenExchange.REFRESH,
     ),
     *_routes("xai", "auth.x.ai", ("/.well-known/openid-configuration",)),
     *(
@@ -98,7 +110,7 @@ PROVIDER_ROUTES = (
     ProviderRoute(
         "cursor",
         EgressRule(host="api2.cursor.sh", path="/auth/exchange_user_api_key", methods=("POST",)),
-        True,
+        TokenExchange.CURSOR_LOGIN,
     ),
     *_routes(
         "cursor",

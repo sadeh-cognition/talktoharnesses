@@ -104,39 +104,37 @@ async def test_start_probes_until_one_succeeds_in_harness_id_order() -> None:
 
 
 @pytest.mark.asyncio
-async def test_spawn_gate_false_skips_probing() -> None:
+async def test_unavailable_adapter_skips_probing() -> None:
     clock = _Clock(datetime(2026, 8, 9, 12, 0, 0, tzinfo=UTC))
     persistence = MemoryPersistence()
     await persistence.create_harness(_harness())
     registry = AdapterRegistry()
     registry.register(HarnessKind.GROK, lambda: _OkAdapter())  # type: ignore[arg-type, return-value]
-    gated: list[HarnessKind] = []
+    gated: list[HarnessConfiguration] = []
 
-    async def gate(kind: HarnessKind) -> bool:
-        gated.append(kind)
-        return False
+    async def available_adapter(configuration: HarnessConfiguration) -> None:
+        gated.append(configuration)
 
-    monitor = ReadinessProbeMonitor(persistence, registry, clock, spawn_gate=gate)
+    monitor = ReadinessProbeMonitor(persistence, registry, clock, adapter_factory=available_adapter)
     await monitor.start()
     try:
-        assert gated == [HarnessKind.GROK]
+        assert gated == [_harness().configuration]
         assert monitor.is_fresh(clock()) is False
     finally:
         await monitor.shutdown()
 
 
 @pytest.mark.asyncio
-async def test_spawn_gate_true_probes_normally() -> None:
+async def test_available_adapter_probes_without_using_foreground_registry() -> None:
     clock = _Clock(datetime(2026, 8, 9, 12, 0, 0, tzinfo=UTC))
     persistence = MemoryPersistence()
     await persistence.create_harness(_harness())
     registry = AdapterRegistry()
-    registry.register(HarnessKind.GROK, lambda: _OkAdapter())  # type: ignore[arg-type, return-value]
 
-    async def gate(kind: HarnessKind) -> bool:
-        return True
+    async def available_adapter(configuration: HarnessConfiguration) -> _OkAdapter:
+        return _OkAdapter()
 
-    monitor = ReadinessProbeMonitor(persistence, registry, clock, spawn_gate=gate)
+    monitor = ReadinessProbeMonitor(persistence, registry, clock, adapter_factory=available_adapter)  # type: ignore[arg-type]
     await monitor.start()
     try:
         assert monitor.is_fresh(clock())

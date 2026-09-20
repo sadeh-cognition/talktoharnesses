@@ -10,10 +10,13 @@ from collections.abc import Awaitable, Callable, Sequence
 from datetime import datetime, timedelta
 from uuid import UUID
 
+from tth_types.harness import HarnessConfiguration
+
 from talktoharnesses.application.persistence import Persistence
-from talktoharnesses.domain.enums import ErrorCode, HarnessKind
+from talktoharnesses.domain.enums import ErrorCode
 from talktoharnesses.domain.errors import DomainError
 from talktoharnesses.domain.models import HarnessProjection
+from talktoharnesses.providers.adapter import HarnessAdapter
 from talktoharnesses.providers.registry import AdapterRegistry, release_probe_adapter
 
 logger = logging.getLogger(__name__)
@@ -21,6 +24,8 @@ logger = logging.getLogger(__name__)
 PROBE_FRESHNESS = timedelta(minutes=5)
 _REFRESH_LEAD = timedelta(seconds=30)
 _RETRY_WHEN_STALE = timedelta(seconds=30)
+
+ProbeAdapterFactory = Callable[[HarnessConfiguration], Awaitable[HarnessAdapter | None]]
 
 
 class ReadinessProbeMonitor:
@@ -32,14 +37,13 @@ class ReadinessProbeMonitor:
         registry: AdapterRegistry,
         clock: Callable[[], datetime],
         *,
-        spawn_gate: Callable[[HarnessKind], Awaitable[bool]] | None = None,
+        adapter_factory: ProbeAdapterFactory | None = None,
     ) -> None:
         self._persistence = persistence
         self._registry = registry
         self._clock = clock
-        # Background probing must never create containers or build images;
-        # the gate skips kinds whose sandbox is not already running.
-        self._spawn_gate = spawn_gate
+        # Managed sandboxes supply adapters bound to existing endpoints only.
+        self._adapter_factory = adapter_factory
         self._fresh_until: datetime | None = None
         self._successful_harness_id: UUID | None = None
         self._task: asyncio.Task[None] | None = None
@@ -156,13 +160,17 @@ class ReadinessProbeMonitor:
     async def _probe_one(self, harness: HarnessProjection) -> bool:
         adapter = None
         try:
-            if self._spawn_gate is not None and not await self._spawn_gate(harness.kind):
+            adapter = (
+                await self._adapter_factory(harness.configuration)
+                if self._adapter_factory is not None
+                else self._registry.create(harness.kind)
+            )
+            if adapter is None:
                 logger.debug(
                     "readiness probe skipped kind=%s: sandbox not running",
                     harness.kind.value,
                 )
                 return False
-            adapter = self._registry.create(harness.kind)
             capabilities = await adapter.probe(harness.configuration)
             probed_at = self._clock()
             await self._persistence.save_harness_probe(
