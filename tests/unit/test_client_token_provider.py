@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import socket
 from collections.abc import AsyncGenerator, Iterator
 from contextlib import aclosing
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -17,7 +18,7 @@ from talktoharnesses.client import APIError, AsyncTalkToHarnessesClient, Convers
 
 @pytest.fixture
 def server() -> Iterator[tuple[str, dict[str, Any]]]:
-    state: dict[str, Any] = {"token": "new", "requests": [], "streams": 0}
+    state: dict[str, Any] = {"token": "new", "requests": [], "streams": 0, "drop_request": None}
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, format: str, *args: object) -> None:
@@ -32,6 +33,10 @@ def server() -> Iterator[tuple[str, dict[str, Any]]]:
         def handle_request(self) -> None:
             body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
             state["requests"].append((self.command, self.path, dict(self.headers), body))
+            if len(state["requests"]) == state["drop_request"]:
+                self.connection.shutdown(socket.SHUT_RDWR)
+                self.connection.close()
+                return
             is_stream = self.path.endswith("/events")
             status = 200
             if self.headers.get("Authorization") != "Bearer " + state["token"]:
@@ -154,11 +159,82 @@ async def test_fixed_tokens_never_reload_and_provider_cannot_rotate(
     async def provider() -> str:
         return "new"
 
+    async def on_rejected(token: str) -> None:
+        raise AssertionError("No request should be sent")
+
     with pytest.raises(ValueError, match="mutually exclusive"):
         AsyncTalkToHarnessesClient(url, token="fixed", token_provider=provider)
+    with pytest.raises(ValueError, match="requires token_provider"):
+        AsyncTalkToHarnessesClient(url, on_token_rejected=on_rejected)
     async with AsyncTalkToHarnessesClient(url, token_provider=provider) as client:
         with pytest.raises(ValueError, match="credential store"):
             await client.rotate_token()
         with pytest.raises(ValueError, match="credential store"):
             await client.revoke_token()
     assert len(state["requests"]) == 1
+
+
+async def test_stream_reconnect_gets_a_fresh_auth_retry(
+    server: tuple[str, dict[str, Any]],
+) -> None:
+    url, state = server
+    state.update(token="current", drop_request=2)
+    tokens = iter(["old", "rotated", "stale", "current"])
+
+    async def provider() -> str:
+        return next(tokens)
+
+    async with (
+        AsyncTalkToHarnessesClient(url, token_provider=provider) as client,
+        aclosing(
+            cast(
+                AsyncGenerator[ConversationStreamItem, None],
+                client.stream_conversation_events(uuid4(), after_sequence=7),
+            )
+        ) as events,
+    ):
+        assert (await anext(events)).sequence == 8
+    headers = [request[2] for request in state["requests"]]
+    assert [header["Authorization"] for header in headers] == [
+        "Bearer old",
+        "Bearer rotated",
+        "Bearer stale",
+        "Bearer current",
+    ]
+    assert [header["Last-Event-ID"] for header in headers] == ["7"] * 4
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("tokens", [("old", "old"), ("old", "rejected-replacement")])
+async def test_final_rejection_reports_the_token_before_api_error(
+    server: tuple[str, dict[str, Any]], stream: bool, tokens: tuple[str, str]
+) -> None:
+    url, _ = server
+    available = iter(tokens)
+    rejected: list[str] = []
+
+    async def provider() -> str:
+        return next(available)
+
+    class CredentialRejected(RuntimeError):
+        pass
+
+    async def on_rejected(token: str) -> None:
+        rejected.append(token)
+        raise CredentialRejected("Replace the stored credential")
+
+    async with AsyncTalkToHarnessesClient(
+        url, token_provider=provider, on_token_rejected=on_rejected
+    ) as client:
+        with pytest.raises(CredentialRejected):
+            if stream:
+                async with aclosing(
+                    cast(
+                        AsyncGenerator[ConversationStreamItem, None],
+                        client.stream_conversation_events(uuid4()),
+                    )
+                ) as events:
+                    await anext(events)
+            else:
+                await client.list_harnesses()
+    assert rejected == [tokens[-1]]

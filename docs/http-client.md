@@ -155,6 +155,18 @@ async with AsyncTalkToHarnessesClient(base_url, token_provider=load_current_toke
 operations. Use a separate fixed-token client in the store's rotation service.
 The `token` property reports only the fixed token, or `None` in provider mode.
 
+Credential stores can also pass an async `on_token_rejected(token)` callback.
+It requires `token_provider` and receives the token rejected by the final 401,
+after the changed-token retry is exhausted or the provider returns the same token.
+The callback runs before callers receive an `APIError`, for both HTTP and SSE.
+It can record that the credential needs replacement and raise an actionable
+application error. Match the rejected token to the current stored credential
+before changing it, since another request may already have installed a replacement.
+
+HTTP and SSE share one HTTPX authentication flow. Each connection starts a new
+flow, so a dropped connection cannot consume a later connection's authentication
+retry. Request bodies, idempotency headers, and SSE cursors remain on the request.
+
 ## SSE streaming
 
 `stream_conversation_events` reconnects after clean EOF and transport errors

@@ -60,6 +60,8 @@ except ModuleNotFoundError as exc:  # pragma: no cover - exercised in packaging 
         ) from exc
     raise
 
+from talktoharnesses._client_auth import TokenProviderAuth
+
 __all__ = [
     "APIError",
     "AsyncTalkToHarnessesClient",
@@ -140,10 +142,13 @@ class AsyncTalkToHarnessesClient:
         *,
         token: str | None = None,
         token_provider: Callable[[], Awaitable[str]] | None = None,
+        on_token_rejected: Callable[[str], Awaitable[None]] | None = None,
         timeout: float | None = 30.0,
     ) -> None:
         if token is not None and token_provider is not None:
             raise ValueError("token and token_provider are mutually exclusive")
+        if on_token_rejected is not None and token_provider is None:
+            raise ValueError("on_token_rejected requires token_provider")
         self._base_url = _normalize_base_url(base_url)
         self._token = token
         self._token_provider = token_provider
@@ -151,6 +156,11 @@ class AsyncTalkToHarnessesClient:
         self._client = httpx.AsyncClient(
             base_url=self._base_url,
             timeout=timeout,
+            auth=(
+                TokenProviderAuth(token_provider, on_token_rejected)
+                if token_provider is not None
+                else None
+            ),
             headers={"User-Agent": f"talktoharnesses/{__version__}"},
         )
 
@@ -167,26 +177,17 @@ class AsyncTalkToHarnessesClient:
     async def aclose(self) -> None:
         await self._client.aclose()
 
-    async def _request_headers(
+    def _request_headers(
         self,
         *,
         extra: Mapping[str, str] | None = None,
     ) -> dict[str, str]:
         headers: dict[str, str] = {}
-        token = await self._token_provider() if self._token_provider else self._token
-        if token is not None:
-            headers["Authorization"] = f"Bearer {token}"
+        if self._token is not None:
+            headers["Authorization"] = f"Bearer {self._token}"
         if extra:
             headers.update(extra)
         return headers
-
-    async def _refreshed_headers(self, previous: dict[str, str]) -> dict[str, str] | None:
-        if self._token_provider is None:
-            return None
-        headers = await self._request_headers()
-        if headers.get("Authorization") == previous.get("Authorization"):
-            return None
-        return {**previous, **headers}
 
     def _resolved_timeout(self, timeout: _Timeout) -> float | None:
         if isinstance(timeout, _UnsetType):
@@ -209,24 +210,14 @@ class AsyncTalkToHarnessesClient:
         if params is not None:
             filtered = {key: value for key, value in params.items() if value is not None}
             query = filtered or None
-        request_headers = await self._request_headers(extra=headers)
-        auth_retried = False
-        while True:
-            response = await self._client.request(
-                method,
-                path,
-                params=query,
-                json=json,
-                headers=request_headers,
-                timeout=self._resolved_timeout(timeout),
-            )
-            if response.status_code == 401 and not auth_retried:
-                refreshed = await self._refreshed_headers(request_headers)
-                if refreshed is not None:
-                    request_headers = refreshed
-                    auth_retried = True
-                    continue
-            break
+        response = await self._client.request(
+            method,
+            path,
+            params=query,
+            json=json,
+            headers=self._request_headers(extra=headers),
+            timeout=self._resolved_timeout(timeout),
+        )
         if response.status_code not in accepted_set:
             raise APIError.from_response(response)
         return response
@@ -1061,16 +1052,13 @@ class AsyncTalkToHarnessesClient:
         next_delay = _BACKOFF_INITIAL_S
         first_attempt = True
         path = f"conversations/{conversation_id}/events"
-        auth_retry_headers: dict[str, str] | None = None
-        auth_retried = False
 
         while True:
-            if not first_attempt and auth_retry_headers is None:
+            if not first_attempt:
                 await asyncio.sleep(next_delay)
                 next_delay = min(next_delay * 2, _BACKOFF_CAP_S)
 
-            headers = auth_retry_headers or await self._request_headers()
-            auth_retry_headers = None
+            headers = self._request_headers()
             if not first_attempt or cursor != 0:
                 headers["Last-Event-ID"] = str(cursor)
 
@@ -1087,17 +1075,9 @@ class AsyncTalkToHarnessesClient:
                     headers=headers,
                     timeout=stream_timeout,
                 ) as response:
-                    if response.status_code == 401 and not auth_retried:
-                        await response.aread()
-                        auth_retry_headers = await self._refreshed_headers(headers)
-                        if auth_retry_headers is not None:
-                            auth_retried = True
-                            continue
                     if response.status_code != 200:
                         await response.aread()
                         raise APIError.from_response(response)
-
-                    auth_retried = False
 
                     content_type = response.headers.get("content-type", "")
                     if not content_type.startswith("text/event-stream"):

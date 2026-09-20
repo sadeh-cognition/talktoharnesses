@@ -15,6 +15,13 @@ verified_against_commit: 78003994d9fe93108ce5a6bc3591ab2e2ef904d9
 
 Entries are appended using `## [YYYY-MM-DD] operation | Title`.
 
+## [2026-09-21] fix | Keep authentication state local to each request
+
+- Replaced separate HTTP and SSE retry loops with one HTTPX authentication flow.
+  SSE reconnections get fresh authentication retry state after transport failure.
+- Documented the final-token rejection callback and its HTTP/SSE regression
+  coverage, so credential stores handle rejection before caller error translation.
+
 ## [2026-09-20] implement | Resolve shared client credentials per request
 
 - Added async token providers to the official HTTP client. A changed token

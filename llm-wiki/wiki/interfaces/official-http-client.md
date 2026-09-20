@@ -8,8 +8,8 @@ tags:
   - type/interface
   - capability/http
   - status/implemented
-last_verified: 2026-09-20
-verified_against_commit: 5adaa86
+last_verified: 2026-09-21
+verified_against_commit: 44c6324
 ---
 
 # Official HTTP Client Interface
@@ -26,9 +26,18 @@ preserving bodies, idempotency keys, and stream cursors. Fixed-token behavior is
 unchanged. Provider clients reject direct rotation/revocation, which belongs to
 the caller's credential store. The two constructor options are mutually exclusive.
 
-Implementation: `src/talktoharnesses/client.py`. Evidence:
+HTTP and SSE use the same HTTPX authentication flow. Each connection gets its own
+retry state, including after a dropped authentication retry. An optional async
+`on_token_rejected(token)` callback reports the final rejected token before
+callers can translate `APIError`. It requires `token_provider` and can raise an
+application-specific replacement error. Stores must compare the reported token
+with their current credential before changing its state.
+
+Implementation: `src/talktoharnesses/client.py` and
+`src/talktoharnesses/_client_auth.py`. Evidence:
 `tests/unit/test_client_token_provider.py` uses real HTTP connections to cover
-bounded retries, request preservation, and stream reconnect cursors;
+bounded retries, request preservation, stream reconnect cursors, reconnection
+after a dropped authentication retry, and final-token rejection callbacks;
 `tests/unit/test_client.py` covers fixed-token behavior. Operator contract:
 `docs/http-client.md`.
 
