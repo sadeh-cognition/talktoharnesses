@@ -400,3 +400,32 @@ retain the previous credential mount. Updated
 [Project sandbox policies](requirements/project-sandbox-policies.md),
 [ASGI readiness](requirements/host-django-asgi-with-readiness.md), the index,
 and HTTP map. The proxy suite passes 853 tests with 91.28% coverage.
+
+## [2026-09-22] update | MCP credential relay for policy sandboxes
+
+Against baseline `81457b75e19d83c6f6840b9f1790fd52ac5cce33`, admit MCP header
+credentials for policy sandboxes by giving the agent opaque gateway URLs and
+relaying them through a Unix socket to a host-side relay that restores the
+stored URL and headers. URL-embedded credentials remain rejected. Updated
+[Project sandbox policies](requirements/project-sandbox-policies.md) and
+[Probe and configure harnesses](requirements/probe-and-configure-harnesses.md).
+Gateway reconciliation now reads the container's recorded image id; resolving
+a deleted image raised `NotFound` and made preparation recreate a gateway that
+still existed. The proxy suite passes 871 tests with 91.41% coverage.
+
+## [2026-09-23] repair | Codex Git worktree permissions
+
+Against baseline `81457b75e19d83c6f6840b9f1790fd52ac5cce33`, allow repository
+metadata writes through a profile extending Codex's workspace sandbox. Preserve
+other modes, approvals, protected agent directories, and Project isolation.
+Record the approved request and actual sandbox test evidence in
+[Provider adapters](architecture/provider-adapters.md), the compatibility map,
+and the index.
+
+## [2026-09-23] repair | Retain provider warnings in the proxy
+
+Against baseline `81457b75e19d83c6f6840b9f1790fd52ac5cce33`, add the existing
+provider warning payload to the dispatcher's streaming-event allowlist. Codex
+retry warnings no longer fail a turn as unsupported events. Record regression
+evidence in [Provider adapters](architecture/provider-adapters.md) and the
+compatibility map.

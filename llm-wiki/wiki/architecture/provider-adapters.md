@@ -7,8 +7,8 @@ audiences:
 tags:
   - type/architecture
   - audience/developer
-last_verified: 2026-09-18
-verified_against_commit: d337f342d5fe7bb427ad5235880c1a1aca09f677
+last_verified: 2026-09-23
+verified_against_commit: 81457b75e19d83c6f6840b9f1790fd52ac5cce33
 ---
 
 # Provider Adapters
@@ -67,6 +67,26 @@ allows native retries to finish. Implementation evidence:
 Test evidence: `tth-codex/tests/harness/test_error_notifications.py` exercises
 the pinned SDK's slotted notifications, recovery, terminal errors, and duplicate
 completion delivery.
+
+The proxy dispatcher also appends these existing `provider_warning` payloads
+without settling the turn. Previously its streaming-event allowlist omitted
+them, so a native retry warning became an unsupported-event failure despite
+the adapter's handling above. Evidence:
+`src/talktoharnesses/application/event_dispatcher.py` and
+`tests/unit/application/test_event_dispatcher.py` (retry and error warnings).
+
+Codex workspace-write sessions in Git repositories now select a permissions
+profile extending `:workspace`, with explicit writes to the resolved Git and
+common directories. Ordinary and linked-worktree commits can run without
+granting writes to parent directories or disabling the inner sandbox. Start and
+resume use the same profile selection. Other modes, approval selection, Project
+mounts, and network restrictions are unchanged. This implements the
+[approved worktree integration fix](../../raw/product/codex-worktree-commits.md).
+Implementation evidence: `tth-codex/src/tth_codex/harness/permissions.py` and
+`adapter.py`. Test evidence: `tth-codex/tests/harness/test_permissions.py` uses
+real Git and the pinned Codex sandbox for ordinary and linked repositories,
+including denied protected-path, unrelated-directory, and network attempts.
+The recorded commit is the baseline for these uncommitted changes.
 
 ## Related
 

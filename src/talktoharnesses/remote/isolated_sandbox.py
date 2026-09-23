@@ -14,11 +14,13 @@ from typing import Any
 from pydantic import BaseModel
 from tth_types.enums import ErrorCode, HarnessKind
 from tth_types.errors import DomainError
+from tth_types.harness import HarnessMcpServer
 from tth_types.sandbox import SandboxPolicyRevision
 
 from talktoharnesses.gateway.credentials import CredentialVault, UnsupportedCredential, atomic_json
 from talktoharnesses.gateway.routes import GATEWAY_HOST
 from talktoharnesses.remote import sandbox_auth, sandbox_rtk
+from talktoharnesses.remote.mcp_relay import ROUTES_FILE, ensure_mcp_relay, register_mcp_servers
 from talktoharnesses.remote.sandbox import (
     SandboxConfig,
     SandboxManager,
@@ -84,6 +86,20 @@ class IsolatedSandbox(SandboxManager):
         ):
             return endpoint
         return None
+
+    async def split_mcp_servers(
+        self, servers: tuple[HarnessMcpServer, ...]
+    ) -> tuple[HarnessMcpServer, ...]:
+        """Replace ``servers`` with gateway URLs the host relay resolves to them.
+
+        Call after the sandbox is prepared: registration needs its identity seed.
+        """
+        if not servers:
+            return servers
+        seed = json.loads((self.state / "identity.json").read_text())["seed"]
+        virtual = await asyncio.to_thread(register_mcp_servers, self.state, seed, servers)
+        await asyncio.to_thread(ensure_mcp_relay, self.state)
+        return virtual
 
     def _image(self, kind: HarnessKind) -> str:
         return f"tth-{kind.value.replace('_', '-')}:{self.config.image_tag}"
@@ -284,7 +300,13 @@ class IsolatedSandbox(SandboxManager):
             gateway_name = self.name + "-gateway"
             try:
                 gateway = client.containers.get(gateway_name)
-                if config_changed or gateway.image.id != client.images.get(self.gateway_image).id:
+                # Compare the recorded image id: after a rebuild the old image
+                # is gone, and resolving it would raise NotFound for a gateway
+                # that still exists.
+                if (
+                    config_changed
+                    or gateway.attrs["Image"] != client.images.get(self.gateway_image).id
+                ):
                     gateway.remove(force=True)
                     gateway = None
             except NotFound:
@@ -316,6 +338,10 @@ class IsolatedSandbox(SandboxManager):
             self.gateway_port = int(
                 gateway.attrs["NetworkSettings"]["Ports"]["8080/tcp"][0]["HostPort"]
             )
+            # Sessions configured by an earlier proxy process keep their
+            # gateway MCP URLs; serve those routes again.
+            if (self.state / ROUTES_FILE).exists():
+                ensure_mcp_relay(self.state)
 
     def _container_matches(
         self,

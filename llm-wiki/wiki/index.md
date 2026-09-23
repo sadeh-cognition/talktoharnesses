@@ -7,8 +7,8 @@ audiences:
   - developer
 tags:
   - type/index
-last_verified: 2026-09-18
-verified_against_commit: d337f342d5fe7bb427ad5235880c1a1aca09f677
+last_verified: 2026-09-23
+verified_against_commit: 81457b75e19d83c6f6840b9f1790fd52ac5cce33
 ---
 
 # Wiki Index
@@ -62,7 +62,7 @@ Use this catalog to route into the maintained knowledge graph. Obsidian users sh
 - [System context](architecture/system-context.md)
 - [Technology stack](architecture/technology-stack.md)
 - [Layered architecture](architecture/layered-architecture.md)
-- [Provider adapters](architecture/provider-adapters.md), including Codex native error and retry handling.
+- [Provider adapters](architecture/provider-adapters.md), including Codex native error handling and Git worktree permissions.
 - [Runtime isolation architecture](architecture/runtime-isolation.md)
 - [Persistence and event sequencing](architecture/persistence-and-event-sequencing.md)
 - [Observability](architecture/observability.md)

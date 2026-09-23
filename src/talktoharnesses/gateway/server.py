@@ -26,6 +26,9 @@ from talktoharnesses.gateway.routes import (
     GATEWAY_HOST,
     GATEWAY_PORT,
     KIND_PROVIDERS,
+    MCP_RELAY_PORT,
+    MCP_RELAY_SOCKET,
+    MCP_ROUTE_PREFIX,
     META_API_HOST,
     PROVIDER_ROUTES,
     ProviderRoute,
@@ -157,6 +160,21 @@ class PolicyGateway:
             and request.method == "POST"
         ):
             return
+        if (
+            request.host == GATEWAY_HOST
+            and request.port == GATEWAY_PORT
+            and path.startswith(MCP_ROUTE_PREFIX)
+        ):
+            # The host relay adds the server's real headers; anything the
+            # agent supplies is discarded rather than forwarded.
+            for name in ("Authorization", "Cookie", "X-Api-Key", "Api-Key", "Proxy-Authorization"):
+                cast(Any, request.headers).pop(name, None)
+            request.scheme = "http"
+            request.host = "127.0.0.1"
+            request.port = MCP_RELAY_PORT
+            cast(Any, request.headers)["Host"] = f"127.0.0.1:{MCP_RELAY_PORT}"
+            request.stream = True
+            return
         if request.scheme != "https" or request.port != 443:
             self._deny(flow)
             return
@@ -232,7 +250,7 @@ class PolicyGateway:
 
     async def server_connect(self, data: server_hooks.ServerConnectionHookData) -> None:
         address = data.server.address
-        if address == (self.config.split_address, 8010):
+        if address in ((self.config.split_address, 8010), ("127.0.0.1", MCP_RELAY_PORT)):
             return
         hosts = {rule.host for rule in self.config.revision.policy.egress}
         hosts.update(
@@ -297,8 +315,37 @@ class PolicyGateway:
         self._unlock(flow)
 
 
+async def bridge_mcp_relay(
+    reader: asyncio.StreamReader, writer: asyncio.StreamWriter, socket_path: str
+) -> None:
+    """Pipe one loopback connection to the host MCP relay's Unix socket."""
+    try:
+        upstream_reader, upstream_writer = await asyncio.open_unix_connection(socket_path)
+    except OSError:
+        writer.close()
+        return
+
+    async def pipe(source: asyncio.StreamReader, target: asyncio.StreamWriter) -> None:
+        try:
+            while chunk := await source.read(65536):
+                target.write(chunk)
+                await target.drain()
+        except OSError:
+            pass
+        finally:
+            target.close()
+
+    await asyncio.gather(pipe(reader, upstream_writer), pipe(upstream_reader, writer))
+
+
 async def serve(config_path: Path) -> None:
     config = GatewayConfig.model_validate_json(config_path.read_text())
+    # Loopback only: the agent reaches this solely through the MCP route above.
+    bridge = await asyncio.start_server(
+        lambda reader, writer: bridge_mcp_relay(reader, writer, MCP_RELAY_SOCKET),
+        "127.0.0.1",
+        MCP_RELAY_PORT,
+    )
     opts = options.Options(
         listen_host="0.0.0.0", listen_port=GATEWAY_PORT, confdir="/state/ca", ssl_insecure=False
     )
@@ -312,7 +359,8 @@ async def serve(config_path: Path) -> None:
         anticomp=True,
     )
     cast(Any, master.addons).add(PolicyGateway(config))
-    await master.run()
+    async with bridge:
+        await master.run()
 
 
 if __name__ == "__main__":

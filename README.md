@@ -262,9 +262,11 @@ resume with `provider_incompatible` when servers are configured. Muse Code
 reads servers from its settings file, so its split renders a private
 `XDG_CONFIG_HOME` per host with the servers merged over the saved settings and
 links to the sandbox's virtual credential and trust files. Managed sandboxes
-admit only HTTPS destinations allowed by the project policy. Loopback and
-private-network MCP endpoints are inaccessible; MCP headers and credentials
-in URLs are rejected until credential proxying supports them.
+admit only HTTPS destinations allowed by the project policy. MCP servers are
+the exception: the agent sees only an opaque gateway URL, and a relay in the
+proxy process forwards those requests to the configured URL with its headers,
+so header credentials stay on the host and loopback servers remain reachable.
+MCP URLs carrying userinfo or a query string are rejected.
 
 ## Development
 

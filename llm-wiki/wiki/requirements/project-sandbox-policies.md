@@ -8,7 +8,7 @@ audiences:
 tags:
   - type/requirement
   - status/implemented
-last_verified: 2026-09-20
+last_verified: 2026-09-22
 verified_against_commit: bd5ffc2c6887ee9ef6354d4d8d84254acd1d5be4
 ---
 
@@ -38,8 +38,17 @@ Each immutable policy revision, provider, and mount set gets separate home/data
 volumes and an internal Docker network. A gateway joins that network and a public
 network. It has no forwarding capability. Only the public interception certificate
 enters the sandbox. Split control uses a separate host token. Existing sessions
-resume with their original policy revision. Secret-bearing MCP headers/URLs are
-rejected. Direct DSPy execution is outside this boundary.
+resume with their original policy revision. MCP servers reach the agent only
+as opaque gateway URLs without headers. The gateway strips agent-supplied
+credentials and forwards those URLs over a Unix socket in its private state
+directory to a relay in the proxy process. The relay restores the stored URL
+and headers, so header secrets never enter the agent container and loopback
+servers on the proxy host stay reachable. Routes persist in gateway state and
+the relay restarts with foreground preparation after a proxy restart.
+Gateway reconciliation compares the container's recorded image id, so a
+rebuilt gateway image replaces a gateway whose original image was deleted. MCP URLs
+carrying userinfo or a query string are rejected. Direct DSPy execution is
+outside this boundary.
 Background readiness checks resolve the full policy, provider, and mount identity
 and consult persisted sandbox records after a proxy restart. Probes receive
 only an existing endpoint and cannot prepare, repair, or build a sandbox. Both
@@ -72,7 +81,9 @@ for every provider.
 Existing deployment images must be rebuilt with the shared policy wire types and
 the gateway image. Legacy sessions without a policy cannot enter managed sandboxes.
 Command guards are best effort; scripts and unobserved execution paths can bypass
-them. Network and credential boundaries remain independent of command approvals.
+them. The MCP relay is covered by unit tests and a real Unix socket crossing into
+a Docker Desktop container; no live provider gate exercises an MCP tool call
+through it yet, and the relay buffers each request body. Network and credential boundaries remain independent of command approvals.
 
 ## Acceptance criteria
 
@@ -86,14 +97,16 @@ them. Network and credential boundaries remain independent of command approvals.
 
 `tth-types/src/tth_types/sandbox.py`, `src/talktoharnesses/gateway/`,
 `src/talktoharnesses/remote/scoped_sandboxes.py`,
-`src/talktoharnesses/remote/isolated_sandbox.py`, and
+`src/talktoharnesses/remote/isolated_sandbox.py`,
+`src/talktoharnesses/remote/mcp_relay.py`, and
 `src/talktoharnesses/django/sandbox_policies.py`.
 The recorded commit is the inspected baseline; this page describes the associated
 uncommitted worktree changes.
 
 ## Test evidence
 
-`tests/unit/gateway/`, `tests/unit/django/test_sandbox_store.py`,
+`tests/unit/gateway/`, `tests/unit/remote/test_mcp_relay.py`,
+`tests/unit/django/test_sandbox_store.py`,
 and `tests/unit/remote/test_sandbox_and_registry.py`. Docker checks additionally
 exercised real package reads, denied direct network access, and command checks. The six real Docker gates cover boundary enforcement,
 workspace setup and split integration. `tests/live/test_policy_provider_sessions.py`

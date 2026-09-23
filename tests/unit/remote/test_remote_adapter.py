@@ -673,3 +673,67 @@ async def test_split_without_loopback_alias_receives_urls_verbatim() -> None:
     await adapter.probe(_mcp_config(url))
 
     assert _sent_mcp_urls(split, "/v1/probe") == [url]
+
+
+async def test_policy_sandbox_split_receives_only_credential_free_relay_urls(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tth_types.harness import HarnessMcpHeader
+    from tth_types.sandbox import SandboxPolicy, SandboxPolicyRef, SandboxPolicyRevision
+
+    from talktoharnesses.remote import isolated_sandbox
+    from talktoharnesses.remote.isolated_sandbox import IsolatedSandbox
+    from talktoharnesses.remote.sandbox import SandboxConfig
+
+    relays: list[Any] = []
+    monkeypatch.setattr(isolated_sandbox, "ensure_mcp_relay", relays.append)
+
+    class _PreparedSandbox(IsolatedSandbox):
+        async def endpoint(
+            self, kind: HarnessKind, required_paths: tuple[str, ...] = ()
+        ) -> SplitEndpoint:
+            del kind, required_paths
+            return SplitEndpoint(base_url="http://split.test", token="tok-1")
+
+    sandbox = _PreparedSandbox(
+        SandboxConfig(),
+        store=None,
+        revision=SandboxPolicyRevision(
+            ref=SandboxPolicyRef(id=uuid4(), revision=1),
+            policy=SandboxPolicy(project_root="/work"),
+        ),
+        name="scope",
+        roots=("/work",),
+        state_root=tmp_path,
+    )
+    sandbox.state.mkdir()
+    (sandbox.state / "identity.json").write_text('{"seed": "seed", "split_token": "t"}')
+    split = FakeSplit()
+    transport = httpx.MockTransport(split.handler)
+
+    class _Client(httpx.AsyncClient):
+        def __init__(self, **kwargs: Any) -> None:
+            kwargs["transport"] = transport
+            super().__init__(**kwargs)
+
+    adapter = RemoteHarnessAdapter(split.kind, sandbox, client_factory=_Client)
+    config = _mcp_config("http://127.0.0.1:8001/mcp/projects/7/memory")
+    config = config.model_copy(
+        update={
+            "mcp_servers": (
+                config.mcp_servers[0].model_copy(
+                    update={"headers": (HarnessMcpHeader(name="Authorization", value="Bearer s"),)}
+                ),
+            )
+        }
+    )
+
+    await adapter.probe(config)
+
+    (url,) = _sent_mcp_urls(split, "/v1/probe")
+    assert url.startswith("http://tth-gateway.invalid:8080/__tth/mcp/")
+    body = [body for _m, path, body in split.requests if path == "/v1/probe"][-1]
+    assert body["configuration"]["mcp_servers"][0]["headers"] == []
+    assert "Bearer s" not in json.dumps(body)
+    assert relays == [sandbox.state]
+    assert config.mcp_servers[0].headers[0].value == "Bearer s"

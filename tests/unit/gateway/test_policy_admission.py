@@ -202,3 +202,47 @@ async def test_invalid_mount_does_not_advance_policy_revision(tmp_path: Path) ->
         ),
     )
     assert saved.ref.revision == 1
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_mcp_header_credentials_are_admitted_but_url_credentials_are_not(
+    tmp_path: Path,
+) -> None:
+    from tth_types.harness import HarnessMcpHeader, HarnessMcpServer
+
+    persistence = DjangoPersistence()
+    registry = AdapterRegistry()
+    service = TalkToHarnessesService(
+        persistence,
+        registry,
+        InProcessCommittedEventBroker(),
+        lambda: NOW,
+        RuntimeManager(persistence, registry, clock=lambda: NOW),
+        sandbox_policies=DjangoSandboxPolicyStore(),
+    )
+    policy = await service.save_sandbox_policy(
+        "owner",
+        uuid4(),
+        SaveSandboxPolicy(policy=SandboxPolicy(project_root=str(tmp_path)), expected_revision=0),
+    )
+    configuration = HarnessConfiguration(
+        kind=HarnessKind.CODEX,
+        working_directory=str(tmp_path),
+        sandbox_policy=policy.ref,
+        mcp_servers=(
+            HarnessMcpServer(
+                name="memory",
+                url="http://localhost:8001/mcp",
+                headers=(HarnessMcpHeader(name="Authorization", value="Bearer secret"),),
+            ),
+        ),
+    )
+    harness = await service.create_harness("owner", name="mcp", configuration=configuration)
+    assert harness.configuration.mcp_servers == configuration.mcp_servers
+    for url in ("http://user:secret@localhost:8001/mcp", "http://localhost:8001/mcp?key=secret"):
+        leaky = configuration.model_copy(
+            update={"mcp_servers": (HarnessMcpServer(name="memory", url=url),)}
+        )
+        with pytest.raises(DomainError) as denied:
+            await service.create_harness("owner", name="leaky", configuration=leaky)
+        assert denied.value.code is ErrorCode.SANDBOX_POLICY_DENIED

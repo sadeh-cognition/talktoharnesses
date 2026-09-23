@@ -51,6 +51,7 @@ from tth_types.split_api import (
 from talktoharnesses._sse import SseDecoder
 from talktoharnesses.domain.events import HarnessEvent
 from talktoharnesses.remote.handle import RemoteProcessHandle
+from talktoharnesses.remote.isolated_sandbox import IsolatedSandbox
 from talktoharnesses.remote.sandbox import SplitEndpoint, rewrite_loopback_url
 from talktoharnesses.remote.sandbox_workspace import (
     WorkspaceSetupOutcome,
@@ -298,7 +299,16 @@ class RemoteHarnessAdapter:
         self, configuration: HarnessConfiguration
     ) -> HarnessConfiguration:
         await self._bind_policy(configuration)
-        return configuration_for_split(configuration, await self._resolved_endpoint())
+        configuration = configuration_for_split(configuration, await self._resolved_endpoint())
+        if isinstance(self._endpoints, IsolatedSandbox) and configuration.mcp_servers:
+            configuration = configuration.model_copy(
+                update={
+                    "mcp_servers": await self._endpoints.split_mcp_servers(
+                        configuration.mcp_servers
+                    )
+                }
+            )
+        return configuration
 
     async def probe(self, config: HarnessConfiguration) -> HarnessCapabilities:
         self._required_paths = (config.working_directory, *config.workspace_roots)

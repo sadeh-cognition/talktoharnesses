@@ -33,6 +33,7 @@ from tth_codex.harness.compatibility import (
     enforce_published_operation,
 )
 from tth_codex.harness.normalizer import CodexNormalizer
+from tth_codex.harness.permissions import git_workspace_config
 from tth_codex.harness.probe import probe_codex
 from tth_codex.harness.schemas import (
     mcp_tool_name,
@@ -116,6 +117,19 @@ def _codex_approval_params(*, yolo: bool) -> dict[str, Any]:
     }
 
 
+def _codex_sandbox_params(sandbox: Any, cwd: str | None) -> dict[str, Any]:
+    """Use the Git workspace profile only for workspace-write sessions."""
+    from openai_codex.generated.v2_all import SandboxMode
+
+    mode = _sandbox_wire_value(sandbox) if sandbox is not None else None
+    if mode is SandboxMode.workspace_write and cwd is not None:
+        config = git_workspace_config(cwd)
+        if config is not None:
+            # An explicit legacy sandbox mode would override permission profiles.
+            return {"config": config}
+    return {"sandbox": mode}
+
+
 def _build_broker_async_codex(
     approval_handler: Callable[[str, dict[str, Any] | None], dict[str, Any]] | None,
     *,
@@ -145,25 +159,23 @@ def _build_broker_async_codex(
 
         async def thread_start(self, **kwargs: Any) -> Any:
             await self._ensure_initialized()
-            sandbox = kwargs.get("sandbox")
             params = ThreadStartParams(
                 **_codex_approval_params(yolo=yolo),
+                **_codex_sandbox_params(kwargs.get("sandbox"), kwargs.get("cwd")),
                 cwd=kwargs.get("cwd"),
                 model=kwargs.get("model"),
-                sandbox=_sandbox_wire_value(sandbox) if sandbox is not None else None,
             )
             started = await self._client.thread_start(params)
             return AsyncThread(self, started.thread.id)
 
         async def thread_resume(self, thread_id: str, **kwargs: Any) -> Any:
             await self._ensure_initialized()
-            sandbox = kwargs.get("sandbox")
             params = ThreadResumeParams(
                 thread_id=thread_id,
                 **_codex_approval_params(yolo=yolo),
+                **_codex_sandbox_params(kwargs.get("sandbox"), kwargs.get("cwd")),
                 cwd=kwargs.get("cwd"),
                 model=kwargs.get("model"),
-                sandbox=_sandbox_wire_value(sandbox) if sandbox is not None else None,
             )
             await self._client.thread_resume(thread_id, params)
             return AsyncThread(self, thread_id)

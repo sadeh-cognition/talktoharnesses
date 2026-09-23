@@ -7,8 +7,8 @@ audiences:
 tags:
   - type/map
   - audience/developer
-last_verified: 2026-09-18
-verified_against_commit: d337f342d5fe7bb427ad5235880c1a1aca09f677
+last_verified: 2026-09-23
+verified_against_commit: 81457b75e19d83c6f6840b9f1790fd52ac5cce33
 ---
 
 # Compatibility and Adapters
@@ -32,6 +32,9 @@ Codex brokers MCP tool confirmation elicitations through its existing approval
 interactions. See [supported shapes and limitations](../requirements/resolve-approvals-and-structured-questions.md).
 Its [adapter](../architecture/provider-adapters.md) preserves native error
 messages and retries, with terminal outcomes driven by `turn/completed`.
+The proxy retains retry warnings as non-terminal events.
+Git workspace permissions also support commits in linked worktrees while
+retaining the workspace sandbox's other protections.
 
 ## Capability flags
 

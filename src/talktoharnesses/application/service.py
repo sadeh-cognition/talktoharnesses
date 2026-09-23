@@ -324,13 +324,17 @@ class TalkToHarnessesService:
         )
         if configuration.kind not in revision.policy.providers:
             raise DomainError(ErrorCode.SANDBOX_POLICY_DENIED, "Provider is not permitted.")
+        # Header credentials stay on the host: the sandbox receives a gateway
+        # URL that the host relay maps back to this server and its headers.
+        # The relay appends the agent's path and query to the stored URL, so
+        # URLs carrying their own credentials or query are refused.
         if any(
-            server.headers or urlsplit(server.url).username or urlsplit(server.url).query
+            urlsplit(server.url).username or urlsplit(server.url).query
             for server in configuration.mcp_servers
         ):
             raise DomainError(
                 ErrorCode.SANDBOX_POLICY_DENIED,
-                "MCP credentials in headers or URLs are not supported.",
+                "MCP credentials in URLs are not supported; send them as headers.",
             )
         return configuration.model_copy(update={"sandbox_policy": revision.ref})
 

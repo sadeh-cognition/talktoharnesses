@@ -297,3 +297,80 @@ async def test_muse_reverse_proxy_uses_fixed_tls_origin_and_the_same_route_polic
     wrong_kind = flow(META_GATEWAY_BASE + "/models")
     await gateway(tmp_path).requestheaders(wrong_kind)
     assert wrong_kind.response is not None and wrong_kind.response.status_code == 403
+
+
+async def test_mcp_route_reaches_only_the_host_relay_without_agent_credentials(
+    tmp_path: Path,
+) -> None:
+    from mitmproxy.proxy.server_hooks import ServerConnectionHookData
+
+    proxy = gateway(tmp_path)
+    request = flow(
+        "http://tth-gateway.invalid:8080/__tth/mcp/handle/sub?cursor=1",
+        "POST",
+        Authorization="Bearer forged",
+        Cookie="session=forged",
+        Accept="text/event-stream",
+    )
+    await proxy.requestheaders(request)
+    assert request.response is None
+    assert (request.request.scheme, request.request.host, request.request.port) == (
+        "http",
+        "127.0.0.1",
+        8081,
+    )
+    assert request.request.path == "/__tth/mcp/handle/sub?cursor=1"
+    assert request.request.stream is True
+    assert "Authorization" not in request.request.headers
+    assert "Cookie" not in request.request.headers
+    assert request.request.headers["Accept"] == "text/event-stream"
+    request.server_conn.address = ("127.0.0.1", 8081)
+    data = ServerConnectionHookData(client=request.client_conn, server=request.server_conn)
+    await proxy.server_connect(data)
+    assert data.server.error is None
+    # The prefix only matters on the gateway's own origin.
+    elsewhere = flow("http://pypi.org/__tth/mcp/handle")
+    await proxy.requestheaders(elsewhere)
+    assert elsewhere.response is not None and elsewhere.response.status_code == 403
+    loopback = flow("https://example.org/")
+    loopback.server_conn.address = ("127.0.0.1", 8082)
+    data = ServerConnectionHookData(client=loopback.client_conn, server=loopback.server_conn)
+    await proxy.server_connect(data)
+    assert data.server.error == "Sandbox policy denied this connection."
+
+
+async def test_mcp_bridge_pipes_loopback_connections_to_the_relay_socket(
+    tmp_path: Path,
+) -> None:
+    import asyncio
+
+    from talktoharnesses.gateway.server import bridge_mcp_relay
+
+    socket_path = str(tmp_path / "relay.sock")
+
+    async def echo(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        writer.write(b"relay:" + await reader.readexactly(4))
+        await writer.drain()
+        writer.close()
+
+    relay = await asyncio.start_unix_server(echo, socket_path)
+    bridge = await asyncio.start_server(
+        lambda reader, writer: bridge_mcp_relay(reader, writer, socket_path), "127.0.0.1", 0
+    )
+    async with relay, bridge:
+        port = bridge.sockets[0].getsockname()[1]
+        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        writer.write(b"ping")
+        await writer.drain()
+        assert await reader.read() == b"relay:ping"
+        writer.close()
+        # A missing relay closes the agent's connection instead of hanging.
+        missing = await asyncio.start_server(
+            lambda r, w: bridge_mcp_relay(r, w, str(tmp_path / "absent.sock")), "127.0.0.1", 0
+        )
+        async with missing:
+            reader, writer = await asyncio.open_connection(
+                "127.0.0.1", missing.sockets[0].getsockname()[1]
+            )
+            assert await reader.read() == b""
+            writer.close()

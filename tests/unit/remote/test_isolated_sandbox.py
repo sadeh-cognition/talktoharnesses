@@ -1,11 +1,11 @@
 import json
 from pathlib import Path
 from typing import Any
-from unittest.mock import Mock
+from unittest.mock import Mock, PropertyMock
 from uuid import uuid4
 
 import pytest
-from docker.errors import NotFound
+from docker.errors import ImageNotFound, NotFound
 from tth_types.enums import HarnessKind
 from tth_types.sandbox import SandboxPolicy, SandboxPolicyRef, SandboxPolicyRevision
 
@@ -97,9 +97,12 @@ def test_launch_keeps_secrets_and_public_network_outside_agent(
         gateways.append(kwargs)
         container: Any = Mock()
         container.status = "created"
-        container.image.id = client.images.get.return_value.id
+        # Resolving a container's image fails once a rebuild removed it; the
+        # recorded id remains readable.
+        type(container).image = PropertyMock(side_effect=ImageNotFound("removed"))
         container.attrs = {
-            "NetworkSettings": {"Networks": {}, "Ports": {"8080/tcp": [{"HostPort": "19234"}]}}
+            "Image": client.images.get.return_value.id,
+            "NetworkSettings": {"Networks": {}, "Ports": {"8080/tcp": [{"HostPort": "19234"}]}},
         }
         containers[manager.name + "-gateway"] = container
         return container
@@ -119,6 +122,8 @@ def test_launch_keeps_secrets_and_public_network_outside_agent(
         return client
 
     monkeypatch.setattr(manager, "_docker_client", docker_client)
+    relays: list[Path] = []
+    monkeypatch.setattr("talktoharnesses.remote.isolated_sandbox.ensure_mcp_relay", relays.append)
     if failure == "attachment":
         with pytest.raises(RuntimeError, match="network attachment failed"):
             manager._ensure_container(HarnessKind.CODEX, "host-only-control")  # pyright: ignore[reportPrivateUsage]
@@ -138,8 +143,13 @@ def test_launch_keeps_secrets_and_public_network_outside_agent(
     assert config["auth_file"] == "/credentials/auth.json"
     assert config["split_token"] != config["control_token"]
     assert manager.gateway_port == 19234
+    # Only a sandbox with MCP routes gets a host relay, including after a
+    # proxy restart where no split has been configured yet.
+    assert relays == []
+    (manager.state / "mcp-routes.json").write_text("{}")
     # Reattachment preserves identities, permissions, and isolated homes.
     manager._ensure_container(HarnessKind.CODEX, "host-only-control")  # pyright: ignore[reportPrivateUsage]
+    assert relays == [manager.state]
     assert len(gateways) == 1
     assert len([call for call in runs if call.get("name") == "scope"]) == 1
     assert network.connect.call_count == (2 if failure == "attachment" else 1)
@@ -175,6 +185,15 @@ def test_launch_keeps_secrets_and_public_network_outside_agent(
         assert json.loads((manager.state / "config.json").read_text())["auth_source"] == str(
             replacement_auth
         )
+    # A rebuilt gateway image replaces the gateway even though the image the
+    # running gateway was created from no longer exists.
+    client.images.get.return_value.id = "sha256:rebuilt"
+    previous = containers["scope-gateway"]
+    previous.remove.side_effect = None
+    previous.remove.reset_mock()
+    manager._ensure_container(HarnessKind.CODEX, "host-only-control")  # pyright: ignore[reportPrivateUsage]
+    previous.remove.assert_called_once_with(force=True)
+    assert containers["scope-gateway"].attrs["Image"] == "sha256:rebuilt"
     # Recorded VM translations do not excuse a different bind source.
     bound = next(mount for mount in containers["scope"].attrs["Mounts"] if mount["Type"] == "bind")
     bound["Source"] = "/different-source"

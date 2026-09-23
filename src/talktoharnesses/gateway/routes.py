@@ -14,6 +14,11 @@ GATEWAY_HOST = "tth-gateway.invalid"
 GATEWAY_PORT = 8080
 META_API_HOST = "api.meta.ai"
 META_GATEWAY_BASE = f"http://{GATEWAY_HOST}:{GATEWAY_PORT}/v1"
+# Credential-free MCP URLs handed to the agent. The gateway forwards them to
+# the host relay through a loopback listener bridged to a Unix socket.
+MCP_ROUTE_PREFIX = "/__tth/mcp/"
+MCP_RELAY_PORT = 8081
+MCP_RELAY_SOCKET = "/state/mcp.sock"
 
 
 class TokenExchange(Enum):
