@@ -44,7 +44,9 @@ from talktoharnesses.providers.adapter import (
     TurnRequest,
 )
 from talktoharnesses.remote.adapter import RemoteHarnessAdapter
+from talktoharnesses.remote.isolated_sandbox import IsolatedSandbox
 from talktoharnesses.remote.sandbox import SplitEndpoint
+from talktoharnesses.remote.scoped_sandboxes import ScopedSandboxManager
 
 
 class FakeSplit:
@@ -682,7 +684,6 @@ async def test_policy_sandbox_split_receives_only_credential_free_relay_urls(
     from tth_types.sandbox import SandboxPolicy, SandboxPolicyRef, SandboxPolicyRevision
 
     from talktoharnesses.remote import isolated_sandbox
-    from talktoharnesses.remote.isolated_sandbox import IsolatedSandbox
     from talktoharnesses.remote.sandbox import SandboxConfig
 
     relays: list[Any] = []
@@ -716,7 +717,9 @@ async def test_policy_sandbox_split_receives_only_credential_free_relay_urls(
             kwargs["transport"] = transport
             super().__init__(**kwargs)
 
-    adapter = RemoteHarnessAdapter(split.kind, sandbox, client_factory=_Client)
+    adapter = RemoteHarnessAdapter(
+        split.kind, _resolving_to(sandbox, tmp_path, monkeypatch), client_factory=_Client
+    )
     config = _mcp_config("http://127.0.0.1:8001/mcp/projects/7/memory")
     config = config.model_copy(
         update={
@@ -737,3 +740,51 @@ async def test_policy_sandbox_split_receives_only_credential_free_relay_urls(
     assert "Bearer s" not in json.dumps(body)
     assert relays == [sandbox.state]
     assert config.mcp_servers[0].headers[0].value == "Bearer s"
+
+
+def _resolving_to(
+    scope: IsolatedSandbox, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> ScopedSandboxManager:
+    """A scoped manager that resolves every configuration to ``scope``."""
+    from unittest.mock import Mock
+
+    from talktoharnesses.remote.sandbox import SandboxConfig
+
+    sandboxes = ScopedSandboxManager(
+        SandboxConfig(), store=Mock(), policies=Mock(), state_root=tmp_path
+    )
+
+    async def for_configuration(configuration: HarnessConfiguration) -> IsolatedSandbox:
+        del configuration
+        return scope
+
+    monkeypatch.setattr(sandboxes, "for_configuration", for_configuration)
+    return sandboxes
+
+
+async def test_policy_scope_is_in_use_while_an_adapter_is_bound(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tth_types.sandbox import SandboxPolicy, SandboxPolicyRef, SandboxPolicyRevision
+
+    from talktoharnesses.remote.sandbox import SandboxConfig
+
+    scope = IsolatedSandbox(
+        SandboxConfig(),
+        store=None,
+        revision=SandboxPolicyRevision(
+            ref=SandboxPolicyRef(id=uuid4(), revision=1),
+            policy=SandboxPolicy(project_root="/work"),
+        ),
+        name="scope",
+        roots=("/work",),
+        state_root=tmp_path,
+    )
+
+    adapter = RemoteHarnessAdapter(HarnessKind.CLAUDE, _resolving_to(scope, tmp_path, monkeypatch))
+
+    await adapter._bind_policy(_config())  # pyright: ignore[reportPrivateUsage]
+    assert scope.in_use
+
+    await adapter.aclose()
+    assert not scope.in_use

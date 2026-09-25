@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+import os
+
 import pytest
+
+# A started lifespan must never reclaim the developer's real sandbox scopes.
+os.environ.setdefault("TTH_SANDBOX_REAPER", "0")
 
 # Modules whose tests wait on real timers, leases, or subprocesses (isolated
 # installs, fresh interpreters). ``-n ... --dist=worksteal`` hands each worker

@@ -140,9 +140,35 @@ forwards only to that scope's split. Agents cannot use the host control route.
 
 Containers drop all capabilities, disable privilege escalation, and run with
 resource limits. The internal network has no host bridge address; direct
-external traffic is blocked. Containers and their scope-specific volumes remain
-available for resume until an operator removes them. Image/config drift
-recreates containers on next use; schedule upgrades while conversations are idle.
+external traffic is blocked. Image/config drift recreates containers on next
+use; schedule upgrades while conversations are idle.
+
+Every mount set gets its own scope, so each linked worktree (for example one
+per Agentbahn workflow run) adds a scope. The proxy reclaims them in two tiers:
+
+- Containers and the internal network are disposable: they are removed once
+  the scope has been unused for `TTH_SANDBOX_CONTAINER_IDLE_SECONDS` (default
+  86400), or at the next pass after they stop running, e.g. after a Docker
+  Desktop restart left them unstartable. The next session in that scope
+  recreates them.
+- The `-home`/`-data` volumes, the private state directory and the sandbox row
+  keep harness sessions and caches, so old conversations still resume
+  natively. They are purged when a host path the scope mounts no longer exists
+  (its worktree was deleted), or after `TTH_SANDBOX_PURGE_IDLE_SECONDS`
+  (default 7776000, 90 days; `0` keeps them).
+
+Scopes with a live harness runtime in this process are never reclaimed. The
+reaper passes every `TTH_SANDBOX_REAP_INTERVAL_SECONDS` (default 600, and
+shorter than the container idle period), first 30 seconds after startup.
+`TTH_SANDBOX_REAPER=0` stops it reclaiming; passes still mark the scopes this
+process uses. It only considers scopes whose state directory is under this
+proxy's `TTH_SANDBOX_STATE_DIR`, so legacy `tth-<kind>` containers and scopes
+prepared under another state root (a second proxy, or a live test's temporary
+one) are never touched. With several proxy processes sharing a state root, a
+scope used only by another process is judged by its `last-used` state file.
+Processes touch it when a runtime binds to or leaves the scope, and on every
+pass while it is in use. Per-scope lock files live in the state root's
+`.locks` directory and are kept after a scope is purged.
 
 ## Toolchains and caches
 

@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+from typing import Any
 
 from tth_types.enums import ErrorCode
 from tth_types.errors import DomainError
@@ -15,6 +16,7 @@ from tth_types.harness import HarnessConfiguration
 from talktoharnesses.remote.isolated_sandbox import IsolatedSandbox
 from talktoharnesses.remote.sandbox import SandboxConfig, SandboxStore, SplitEndpoint
 from talktoharnesses.remote.sandbox_paths import repository_directory
+from talktoharnesses.remote.scope_layout import SCOPE_NAME, SCOPE_PREFIX, ScopeLayout
 from talktoharnesses.sandbox_policies import SandboxPolicyStore
 
 
@@ -37,6 +39,7 @@ class ScopedSandboxManager:
             ).expanduser()
         ).resolve()
         self.instances: dict[str, IsolatedSandbox] = {}
+        self._retiring: dict[str, asyncio.Future[None]] = {}
 
     async def for_configuration(self, configuration: HarnessConfiguration) -> IsolatedSandbox:
         ref = configuration.sandbox_policy
@@ -108,7 +111,10 @@ class ScopedSandboxManager:
         identity = json.dumps(
             [ref.model_dump(mode="json"), configuration.kind.value, roots], sort_keys=True
         )
-        name = "tth-scope-" + hashlib.sha256(identity.encode()).hexdigest()[:24]
+        name = SCOPE_PREFIX + hashlib.sha256(identity.encode()).hexdigest()[:24]
+        # A scope being reclaimed comes back as a fresh instance afterwards.
+        while (retiring := self._retiring.get(name)) is not None:
+            await asyncio.shield(retiring)
         if name not in self.instances:
             self.instances[name] = IsolatedSandbox(
                 self.config,
@@ -119,6 +125,50 @@ class ScopedSandboxManager:
                 state_root=self.state_root,
             )
         return self.instances[name]
+
+    def owned_scopes(self) -> list[ScopeLayout]:
+        """Blocking; the scopes whose state directory lives under this state root.
+
+        The state directory proves ownership and holds the evidence of use, so
+        scopes prepared under another state root are never reclaimed here.
+        """
+        if not self.state_root.is_dir():
+            return []
+        return [
+            ScopeLayout(path.name, self.state_root)
+            for path in sorted(self.state_root.iterdir())
+            if SCOPE_NAME.fullmatch(path.name) and path.is_dir() and not path.is_symlink()
+        ]
+
+    async def touch_in_use(self) -> None:
+        """Record a use of every scope this process is using."""
+        in_use = [instance.layout for instance in self.instances.values() if instance.in_use]
+        for layout in in_use:
+            await asyncio.to_thread(layout.touch)
+
+    async def reclaim(self, name: str, client: Any, *, purge: bool) -> bool:
+        """Remove a scope's containers, and with ``purge`` its session state and row.
+
+        Returns ``False`` without removing anything while this process uses
+        the scope. The check and the hand-off happen without yielding, and
+        callers resolving the scope meanwhile wait until the removal, row
+        included, has finished; they then get a fresh instance.
+        """
+        instance = self.instances.get(name)
+        if (instance is not None and instance.in_use) or name in self._retiring:
+            return False
+        self.instances.pop(name, None)
+        done = asyncio.get_running_loop().create_future()
+        self._retiring[name] = done
+        try:
+            layout = ScopeLayout(name, self.state_root)
+            await asyncio.to_thread(layout.remove, client, purge=purge)
+            if purge:
+                await self.store.delete(name)
+        finally:
+            del self._retiring[name]
+            done.set_result(None)
+        return True
 
     async def running_endpoint(self, configuration: HarnessConfiguration) -> SplitEndpoint | None:
         # Resolve the same scope as foreground preparation, then return only

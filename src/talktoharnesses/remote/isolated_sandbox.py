@@ -30,6 +30,7 @@ from talktoharnesses.remote.sandbox import (
     security_options,
 )
 from talktoharnesses.remote.sandbox_workspace import TOOLCHAIN_ENV
+from talktoharnesses.remote.scope_layout import SCOPE_LABEL, ScopeLayout
 
 GATEWAY_IMAGE = "tth-policy-gateway"
 CA_MOUNT_PATHS = ("/etc/tth/ca.pem", "/etc/ssl/certs/ca-certificates.crt")
@@ -72,9 +73,24 @@ class IsolatedSandbox(SandboxManager):
         self.revision = revision
         self.name = name
         self.roots = roots
-        self.state = state_root / name
+        self.layout = ScopeLayout(name, state_root)
+        self.state = self.layout.state
         self.gateway_port = 0
         self.gateway_image = f"{GATEWAY_IMAGE}:{config.image_tag}"
+        self._users: set[object] = set()
+
+    def acquire(self, user: object) -> None:
+        """Mark the scope in use by ``user`` until :meth:`release`."""
+        self._users.add(user)
+        self.layout.touch()
+
+    def release(self, user: object) -> None:
+        self._users.discard(user)
+        self.layout.touch()
+
+    @property
+    def in_use(self) -> bool:
+        return bool(self._users) or any(not task.done() for task in self._prepare_tasks.values())
 
     def _container_name(self, kind: HarnessKind) -> str:
         return self.name
@@ -82,7 +98,7 @@ class IsolatedSandbox(SandboxManager):
     async def running_endpoint(self, kind: HarnessKind) -> SplitEndpoint | None:
         endpoint = await super().running_endpoint(kind)
         if endpoint is not None and await asyncio.to_thread(
-            self._container_running, self.name + "-gateway"
+            self._container_running, self.layout.gateway
         ):
             return endpoint
         return None
@@ -141,14 +157,11 @@ class IsolatedSandbox(SandboxManager):
             )
 
     def _ensure_container(self, kind: HarnessKind, token: str) -> None:
-        import fcntl
-
         from docker.errors import NotFound
         from docker.types import Mount
 
-        self.state.mkdir(parents=True, exist_ok=True, mode=0o700)
-        with (self.state / "prepare.lock").open("a") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+        with self.layout.locked():
+            self.state.mkdir(parents=True, exist_ok=True, mode=0o700)
             client = self._docker_client(kind)
             self._ensure_gateway_image(client)
             identity_path = self.state / "identity.json"
@@ -180,7 +193,7 @@ class IsolatedSandbox(SandboxManager):
                     ErrorCode.CREDENTIAL_PROXY_UNSUPPORTED,
                     "The configured login cannot be proxied safely.",
                 ) from exc
-            network_name = self.name + "-network"
+            network_name = self.layout.network
             try:
                 network = client.networks.get(network_name)
             except NotFound:
@@ -192,7 +205,7 @@ class IsolatedSandbox(SandboxManager):
                         "com.docker.network.bridge.gateway_mode_ipv4": "isolated",
                         "com.docker.network.bridge.gateway_mode_ipv6": "isolated",
                     },
-                    labels={"tth.sandbox": self.name},
+                    labels={SCOPE_LABEL: self.name},
                 )
             network.reload()
             if not network.attrs.get("Internal") or any(
@@ -233,10 +246,10 @@ class IsolatedSandbox(SandboxManager):
                     kind=kind,
                     auth_file=str(virtual_file),
                     image=image,
-                    home_volume=self.name + "-home",
+                    home_volume=self.layout.home_volume,
                 )
             sandbox_rtk.seed_rtk_config(
-                client, Mount, kind=kind, image=image, home_volume=self.name + "-home"
+                client, Mount, kind=kind, image=image, home_volume=self.layout.home_volume
             )
             environment = {
                 **TOOLCHAIN_ENV,
@@ -293,18 +306,21 @@ class IsolatedSandbox(SandboxManager):
                 "auth_source": str(source) if source is not None else None,
                 "api_keys": keys,
             }
-            config_path = self.state / "config.json"
+            config_path = self.layout.config_file
             config_changed = (
                 not config_path.exists() or json.loads(config_path.read_text()) != gateway_config
             )
-            gateway_name = self.name + "-gateway"
+            gateway_name = self.layout.gateway
             try:
                 gateway = client.containers.get(gateway_name)
                 # Compare the recorded image id: after a rebuild the old image
                 # is gone, and resolving it would raise NotFound for a gateway
-                # that still exists.
+                # that still exists. The gateway keeps no state of its own, so
+                # a stopped one is recreated rather than restarted: a Docker
+                # Desktop restart can leave its bind-mount sources invalid.
                 if (
                     config_changed
+                    or gateway.status != "running"
                     or gateway.attrs["Image"] != client.images.get(self.gateway_image).id
                 ):
                     gateway.remove(force=True)
@@ -327,7 +343,7 @@ class IsolatedSandbox(SandboxManager):
                     mem_limit="512m",
                     pids_limit=128,
                     restart_policy={"Name": "unless-stopped"},
-                    labels={"tth.sandbox": self.name},
+                    labels={SCOPE_LABEL: self.name},
                 )
             gateway.reload()
             if network_name not in gateway.attrs["NetworkSettings"]["Networks"]:
@@ -362,7 +378,7 @@ class IsolatedSandbox(SandboxManager):
             "/data",
             *CA_MOUNT_PATHS,
         }
-        recorded_mounts = self.state / "mounts.json"
+        recorded_mounts = self.layout.mounts_file
         return (
             image in (container.image.tags or [])
             and recorded_mounts.exists()
@@ -370,7 +386,7 @@ class IsolatedSandbox(SandboxManager):
             == SandboxMounts.inspect(container)
             and set(mounts) == expected_paths
             and all(actual_env.get(key) == value for key, value in environment.items())
-            and set(attrs["NetworkSettings"]["Networks"]) == {name + "-network"}
+            and set(attrs["NetworkSettings"]["Networks"]) == {self.layout.network}
             and set(attrs["HostConfig"].get("CapDrop", [])) == {"ALL"}
             and set(attrs["HostConfig"].get("SecurityOpt", [])) == set(security_options(kind))
             and attrs["HostConfig"].get("PidsLimit") == pids_limit(kind)
@@ -380,10 +396,8 @@ class IsolatedSandbox(SandboxManager):
                 mounts[root]["Type"] == "bind" and mounts[root]["RW"] == (root in self.roots)
                 for root in (*self.roots, *self.revision.policy.read_only_roots)
             )
-            and all(
-                mounts[target].get("Name") == name + suffix
-                for target, suffix in (("/home/agent", "-home"), ("/data", "-data"))
-            )
+            and mounts["/home/agent"].get("Name") == self.layout.home_volume
+            and mounts["/data"].get("Name") == self.layout.data_volume
             and all(
                 mounts[target]["Type"] == "bind" and not mounts[target]["RW"]
                 for target in CA_MOUNT_PATHS
@@ -401,8 +415,8 @@ class IsolatedSandbox(SandboxManager):
         environment: dict[str, str],
     ) -> None:
         mounts = [
-            mount_type(target="/home/agent", source=name + "-home", type="volume"),
-            mount_type(target="/data", source=name + "-data", type="volume"),
+            mount_type(target="/home/agent", source=self.layout.home_volume, type="volume"),
+            mount_type(target="/data", source=self.layout.data_volume, type="volume"),
             *(
                 mount_type(
                     target=target,
@@ -425,14 +439,14 @@ class IsolatedSandbox(SandboxManager):
             init=True,
             mounts=mounts,
             environment=environment,
-            network=name + "-network",
+            network=self.layout.network,
             dns=["127.0.0.1"],
             cap_drop=["ALL"],
             security_opt=security_options(kind),
             pids_limit=pids_limit(kind),
             mem_limit="4g",
             restart_policy={"Name": "unless-stopped"},
-            labels={"tth.sandbox": name},
+            labels={SCOPE_LABEL: name},
         )
         container.reload()
-        atomic_json(self.state / "mounts.json", SandboxMounts.inspect(container).model_dump())
+        atomic_json(self.layout.mounts_file, SandboxMounts.inspect(container).model_dump())

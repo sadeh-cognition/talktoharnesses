@@ -51,6 +51,7 @@ Use this catalog to route into the maintained knowledge graph. Obsidian users sh
 - [Authenticate with JWT](requirements/authenticate-with-jwt.md)
 - [Host Django ASGI with readiness](requirements/host-django-asgi-with-readiness.md)
 - [Provision sandbox workspaces](requirements/provision-sandbox-workspaces.md)
+- [Reclaim sandbox scopes](requirements/reclaim-sandbox-scopes.md)
 - [Host Django and run a conversation](journeys/host-django-and-run-a-conversation.md)
 - [Resolve a pending approval](journeys/resolve-a-pending-approval.md)
 - [Search conversations and apply retention](journeys/search-conversations-and-apply-retention.md)

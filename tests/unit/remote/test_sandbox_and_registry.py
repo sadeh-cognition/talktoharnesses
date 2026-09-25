@@ -59,6 +59,11 @@ class FakeStore:
         self.records[record.kind] = record
         return record
 
+    async def delete(self, scope: str) -> None:
+        self.records = {
+            kind: row for kind, row in self.records.items() if row.container_name != scope
+        }
+
 
 def _spawnable_manager(
     monkeypatch: pytest.MonkeyPatch,

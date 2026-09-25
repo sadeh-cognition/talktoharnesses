@@ -23,7 +23,7 @@ import socket
 import threading
 from collections.abc import Awaitable, Callable, MutableMapping
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 from urllib.parse import urlsplit
 
 import httpx
@@ -32,6 +32,9 @@ from tth_types.harness import HarnessMcpHeader, HarnessMcpServer
 
 from talktoharnesses.gateway.credentials import atomic_json
 from talktoharnesses.gateway.routes import GATEWAY_HOST, GATEWAY_PORT, MCP_ROUTE_PREFIX
+
+if TYPE_CHECKING:
+    import uvicorn
 
 ROUTES_FILE = "mcp-routes.json"
 SOCKET_FILE = "mcp.sock"
@@ -226,7 +229,12 @@ def _bind(path: Path) -> socket.socket:
     return sock
 
 
-_relays: dict[Path, threading.Thread] = {}
+class _Relay(NamedTuple):
+    thread: threading.Thread
+    server: uvicorn.Server
+
+
+_relays: dict[Path, _Relay] = {}
 _relays_lock = threading.Lock()
 
 
@@ -237,7 +245,7 @@ def ensure_mcp_relay(state: Path) -> None:
     state = state.resolve()
     with _relays_lock:
         running = _relays.get(state)
-        if running is not None and running.is_alive():
+        if running is not None and running.thread.is_alive():
             return
         sock = _bind(state / SOCKET_FILE)
         server = uvicorn.Server(
@@ -255,4 +263,18 @@ def ensure_mcp_relay(state: Path) -> None:
             daemon=True,
         )
         thread.start()
-        _relays[state] = thread
+        _relays[state] = _Relay(thread, server)
+
+
+def stop_mcp_relay(state: Path) -> None:
+    """Stop ``state``'s relay, if this process runs one, and remove its socket.
+
+    Preparing the sandbox again restarts it from the persisted routes.
+    """
+    state = state.resolve()
+    with _relays_lock:
+        relay = _relays.pop(state, None)
+    if relay is not None:
+        relay.server.should_exit = True
+        relay.thread.join(timeout=5)
+    (state / SOCKET_FILE).unlink(missing_ok=True)

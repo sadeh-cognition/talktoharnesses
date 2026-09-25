@@ -13,7 +13,9 @@ from talktoharnesses.remote.isolated_sandbox import IsolatedSandbox
 from talktoharnesses.remote.sandbox import SandboxConfig
 
 
-@pytest.mark.parametrize("failure", ["none", "attachment", "replacement", "credentials"])
+@pytest.mark.parametrize(
+    "failure", ["none", "attachment", "replacement", "credentials", "stopped_gateway"]
+)
 def test_launch_keeps_secrets_and_public_network_outside_agent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
 ) -> None:
@@ -48,6 +50,7 @@ def test_launch_keeps_secrets_and_public_network_outside_agent(
     containers: dict[str, Any] = {}
     runs: list[dict[str, Any]] = []
     gateways: list[dict[str, Any]] = []
+    created: list[Any] = []
 
     def get(name: str) -> Any:
         if name not in containers:
@@ -104,6 +107,8 @@ def test_launch_keeps_secrets_and_public_network_outside_agent(
             "Image": client.images.get.return_value.id,
             "NetworkSettings": {"Networks": {}, "Ports": {"8080/tcp": [{"HostPort": "19234"}]}},
         }
+        container.start.side_effect = lambda: setattr(container, "status", "running")
+        created.append(container)
         containers[manager.name + "-gateway"] = container
         return container
 
@@ -150,9 +155,19 @@ def test_launch_keeps_secrets_and_public_network_outside_agent(
     # Reattachment preserves identities, permissions, and isolated homes.
     manager._ensure_container(HarnessKind.CODEX, "host-only-control")  # pyright: ignore[reportPrivateUsage]
     assert relays == [manager.state]
-    assert len(gateways) == 1
+    # A gateway left unstarted by the failed attachment is recreated.
+    assert len(gateways) == (2 if failure == "attachment" else 1)
     assert len([call for call in runs if call.get("name") == "scope"]) == 1
     assert network.connect.call_count == (2 if failure == "attachment" else 1)
+    if failure == "stopped_gateway":
+        # A Docker Desktop restart can leave a stopped gateway unstartable;
+        # it holds no state, so it is recreated instead of restarted.
+        created[0].status = "exited"
+        manager._ensure_container(HarnessKind.CODEX, "host-only-control")  # pyright: ignore[reportPrivateUsage]
+        created[0].remove.assert_called_once_with(force=True)
+        created[0].start.assert_called_once()
+        assert len(gateways) == 2 and created[1].status == "running"
+        return
     assert "scope-network" in containers["scope-gateway"].attrs["NetworkSettings"]["Networks"]
     if failure == "replacement":
         previous = containers["scope-gateway"]

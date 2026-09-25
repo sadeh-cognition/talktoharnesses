@@ -175,11 +175,17 @@ class RemoteHarnessAdapter:
         self._probe_advisory: VersionAdvisory | None = None
         self._handle: RemoteProcessHandle | None = None
         self._endpoint: ResolvedEndpoint | None = None
+        # The policy scope this adapter holds in use until it closes.
+        self._scope: IsolatedSandbox | None = None
         self._closed = False
 
     async def _bind_policy(self, configuration: HarnessConfiguration) -> None:
         if isinstance(self._endpoints, ScopedSandboxManager):
-            self._endpoints = await self._endpoints.for_configuration(configuration)
+            scope = await self._endpoints.for_configuration(configuration)
+            # No await between resolving and acquiring: the reaper must never
+            # see this scope unused once it has been handed out.
+            scope.acquire(self)
+            self._endpoints = self._scope = scope
 
     # ------------------------------------------------------------------
     # Duck-typed hooks used by RuntimeManager / CommandProcessor
@@ -300,12 +306,10 @@ class RemoteHarnessAdapter:
     ) -> HarnessConfiguration:
         await self._bind_policy(configuration)
         configuration = configuration_for_split(configuration, await self._resolved_endpoint())
-        if isinstance(self._endpoints, IsolatedSandbox) and configuration.mcp_servers:
+        if self._scope is not None and configuration.mcp_servers:
             configuration = configuration.model_copy(
                 update={
-                    "mcp_servers": await self._endpoints.split_mcp_servers(
-                        configuration.mcp_servers
-                    )
+                    "mcp_servers": await self._scope.split_mcp_servers(configuration.mcp_servers)
                 }
             )
         return configuration
@@ -564,12 +568,14 @@ class RemoteHarnessAdapter:
             await self.aclose()
 
     async def aclose(self) -> None:
-        """Release the HTTP client without touching any split session.
+        """Release the policy scope and HTTP client without touching any split session.
 
         Probe-only callers (service probe, readiness monitor) never create a
         session but do open the client; they call this to avoid leaking a
-        connection pool per probe.
+        connection pool per probe and holding the scope in use.
         """
+        if self._scope is not None:
+            self._scope.release(self)
         if self._client is None:
             return
         client = self._client

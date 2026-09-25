@@ -28,7 +28,7 @@ import socket
 from collections.abc import Awaitable, Callable, MutableMapping
 from datetime import UTC, datetime
 from functools import partial
-from typing import Any
+from typing import Any, NamedTuple
 
 from talktoharnesses.application.service import TalkToHarnessesService
 from talktoharnesses.django.auth import validate_jwt_settings
@@ -43,6 +43,7 @@ from talktoharnesses.remote.sandbox import (
     SandboxConfig,
     ensure_docker_cli_available,
 )
+from talktoharnesses.remote.scope_reaper import ScopeReaper, ScopeReaperPolicy
 from talktoharnesses.remote.scoped_sandboxes import ScopedSandboxManager
 from talktoharnesses.runtime.manager import RuntimeManager
 from talktoharnesses.runtime.policy import RuntimePolicy
@@ -57,6 +58,7 @@ ASGIApp = Callable[[Scope, Receive, Send], Awaitable[None]]
 
 # One service instance per process/event loop (set on lifespan startup).
 _service: TalkToHarnessesService | None = None
+_scope_reaper: ScopeReaper | None = None
 
 
 def get_service() -> TalkToHarnessesService:
@@ -77,15 +79,21 @@ def get_service() -> TalkToHarnessesService:
 
 def reset_service_for_tests() -> None:
     """Clear the process-local service handle (tests only)."""
-    global _service
+    global _service, _scope_reaper
     _service = None
+    _scope_reaper = None
 
 
 def _utc_clock() -> datetime:
     return datetime.now(UTC)
 
 
-def _build_service() -> TalkToHarnessesService:
+class _Components(NamedTuple):
+    service: TalkToHarnessesService
+    reaper: ScopeReaper
+
+
+def _build_components() -> _Components:
     """Construct the default production composition for one ASGI process."""
     # Fail closed on invalid JWT config before accepting HTTP traffic.
     validate_jwt_settings()
@@ -104,7 +112,7 @@ def _build_service() -> TalkToHarnessesService:
     runtime = RuntimeManager(
         persistence, registry, policy=RuntimePolicy.from_env(), clock=_utc_clock
     )
-    return TalkToHarnessesService(
+    service = TalkToHarnessesService(
         persistence,
         registry,
         broker,
@@ -113,6 +121,7 @@ def _build_service() -> TalkToHarnessesService:
         readiness_adapter_factory=partial(running_sandbox_adapter, sandboxes),
         sandbox_policies=policies,
     )
+    return _Components(service, ScopeReaper(sandboxes, ScopeReaperPolicy.from_env()))
 
 
 def _worker_id() -> str:
@@ -121,18 +130,24 @@ def _worker_id() -> str:
 
 
 async def _startup() -> TalkToHarnessesService:
-    global _service
-    service = _build_service()
+    global _service, _scope_reaper
+    service, reaper = _build_components()
     await service.start(_worker_id())
     _service = service
+    reaper.start()
+    _scope_reaper = reaper
     logger.info("talktoharnesses service started worker_id=%s", _worker_id())
     return service
 
 
 async def _shutdown() -> None:
-    global _service
+    global _service, _scope_reaper
     service = _service
+    reaper = _scope_reaper
     _service = None
+    _scope_reaper = None
+    if reaper is not None:
+        await reaper.stop()
     if service is None:
         return
     try:

@@ -82,3 +82,16 @@ async def test_reserve_returns_existing_row_and_keeps_its_token() -> None:
     loaded = await store.get("tth-grok")
     assert loaded is not None
     assert loaded.split_token == "token-first"
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_delete_removes_only_that_scope() -> None:
+    store = DjangoSandboxStore()
+    scope = "tth-scope-" + "a" * 24
+    await store.upsert(_record())
+    await store.upsert(_record().model_copy(update={"scope": scope}))
+    await store.delete(scope)
+    await store.delete("tth-scope-missing")
+    assert await store.get(scope) is None
+    assert await store.get("tth-grok") is not None

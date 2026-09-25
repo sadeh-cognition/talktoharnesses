@@ -135,3 +135,4 @@ the provider inference gates or the split test suites.
 ## Related
 
 - [Project sandbox policy request](../../raw/product/project-sandbox-policies.md)
+- [Reclaim sandbox scopes](reclaim-sandbox-scopes.md): idle and dead scope containers are removed; session volumes stay for resume.

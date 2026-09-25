@@ -464,3 +464,15 @@ Against baseline `3643af2`, the Codex split starts every Codex process (probe,
 session start, resume) through one shared `CODEX_HOME` gate, so concurrent
 first starts no longer race to create its SQLite state. Record the behavior and
 test evidence in [Provider adapters](architecture/provider-adapters.md).
+
+## [2026-09-25] ingest | Reclaim sandbox scopes
+
+Against baseline `b7fa653` plus this working tree, a lifespan reaper removes
+the containers, gateway and network of policy sandbox scopes that are dead or
+unused for a day, and keeps their volumes, state and row so old conversations
+resume natively. Session state is purged when a mounted worktree is gone or
+after 90 days. Only scopes with a state directory under the proxy's state root
+are considered. The removal and the row deletion are atomic against binding.
+Gateway preparation recreates a stopped gateway instead of restarting it.
+Record the behavior and test evidence in
+[Reclaim sandbox scopes](requirements/reclaim-sandbox-scopes.md).

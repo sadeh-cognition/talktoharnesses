@@ -200,6 +200,10 @@ class SandboxStore(Protocol):
         """
         ...
 
+    async def delete(self, scope: str) -> None:
+        """Remove ``scope``'s row, if any."""
+        ...
+
 
 @dataclass
 class SandboxManager:

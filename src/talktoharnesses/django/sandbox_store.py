@@ -80,3 +80,9 @@ class DjangoSandboxStore:
             },
         )
         return _to_data(row)
+
+    async def delete(self, scope: str) -> None:
+        await sync_to_async(self._delete, thread_sensitive=True)(scope)
+
+    def _delete(self, scope: str) -> None:
+        SandboxRecord.objects.filter(scope=scope).delete()
