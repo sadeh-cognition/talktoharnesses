@@ -8,8 +8,8 @@ tags:
   - type/interface
   - capability/http
   - status/implemented
-last_verified: 2026-09-21
-verified_against_commit: 44c6324
+last_verified: 2026-09-24
+verified_against_commit: 3643af2
 ---
 
 # Official HTTP Client Interface
@@ -19,6 +19,17 @@ verified_against_commit: 44c6324
 Public exports are `APIError`, `AsyncTalkToHarnessesClient`, and `ConversationStreamItem`. Stream items are conversation events, snapshots, or sync projections.
 
 The client is the supported remote boundary for HTTP consumers.
+
+Ordinary HTTP calls are not retried; callers own backoff. `APIError.retry_after`
+exposes the response's `Retry-After` in seconds. The API sends it with
+`503 worker_unavailable` while its command worker cannot take new turns,
+steers, interrupts, or harness switches, so callers can retry with the same
+idempotency key after that delay. The idempotent commands (`submit_turn`,
+`steer`, `switch_harness`) do that themselves when the client is built with
+`command_retry_seconds` (default `0`): they wait each `Retry-After` (1 s when
+absent, at least 0.1 s) with the same idempotency key until the budget is
+spent, then raise the last refusal; other errors are raised at once, and
+`interrupt`, which has no idempotency key, is never retried.
 
 An optional async `token_provider` resolves a shared credential before each HTTP
 request and SSE connection. A 401 reloads it and retries once only when it changed,
@@ -38,7 +49,8 @@ Implementation: `src/talktoharnesses/client.py` and
 `tests/unit/test_client_token_provider.py` uses real HTTP connections to cover
 bounded retries, request preservation, stream reconnect cursors, reconnection
 after a dropped authentication retry, and final-token rejection callbacks;
-`tests/unit/test_client.py` covers fixed-token behavior. Operator contract:
+`tests/unit/test_client.py` covers fixed-token behavior, `Retry-After`
+parsing, and the command retry budget. Operator contract:
 `docs/http-client.md`.
 
 ## Related

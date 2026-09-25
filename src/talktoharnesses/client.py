@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import math
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping, Sequence
-from datetime import datetime
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from typing import Any, TypeAlias, TypeVar
 from urllib.parse import urlparse
 from uuid import UUID
@@ -14,7 +17,7 @@ from tth_types.sandbox import SandboxPolicyRevision, SaveSandboxPolicy
 
 from talktoharnesses import __version__
 from talktoharnesses._sse import SseDecoder
-from talktoharnesses.domain.enums import ApprovalDecision
+from talktoharnesses.domain.enums import ApprovalDecision, ErrorCode
 from talktoharnesses.domain.events import (
     ConversationEvent,
     ConversationMetadataChangedPayload,
@@ -89,6 +92,12 @@ _HEALTH = TypeAdapter(dict[str, str])
 
 _BACKOFF_CAP_S = 30.0
 _BACKOFF_INITIAL_S = 1.0
+# Wait between commands the worker refused without a ``Retry-After``; the
+# floor keeps a ``0`` hint from turning the wait into a busy loop.
+_COMMAND_RETRY_DEFAULT_S = 1.0
+_COMMAND_RETRY_MIN_S = 0.1
+
+logger = logging.getLogger(__name__)
 
 
 class _UnsetType:
@@ -100,16 +109,28 @@ _Timeout: TypeAlias = float | None | _UnsetType
 
 
 class APIError(Exception):
-    """Typed failure for non-success HTTP responses from the API."""
+    """Typed failure for non-success HTTP responses from the API.
+
+    ``retry_after`` is the response's ``Retry-After`` in seconds, when present.
+    """
 
     status_code: int
     code: str | None
     message: str
+    retry_after: float | None
 
-    def __init__(self, status_code: int, code: str | None, message: str) -> None:
+    def __init__(
+        self,
+        status_code: int,
+        code: str | None,
+        message: str,
+        *,
+        retry_after: float | None = None,
+    ) -> None:
         self.status_code = status_code
         self.code = code
         self.message = message
+        self.retry_after = retry_after
         super().__init__(self._format())
 
     def _format(self) -> str:
@@ -119,11 +140,38 @@ class APIError(Exception):
 
     @classmethod
     def from_response(cls, response: httpx.Response) -> APIError:
+        retry_after = _retry_after_seconds(response)
         try:
             projection = ErrorProjection.model_validate_json(response.content)
         except Exception:  # noqa: BLE001 — fall back to generic safe message
-            return cls(response.status_code, None, "HTTP request failed")
-        return cls(response.status_code, projection.code, projection.message)
+            return cls(response.status_code, None, "HTTP request failed", retry_after=retry_after)
+        return cls(
+            response.status_code,
+            projection.code,
+            projection.message,
+            retry_after=retry_after,
+        )
+
+
+def _retry_after_seconds(response: httpx.Response) -> float | None:
+    """Parse ``Retry-After`` as delta-seconds or an HTTP-date; ``None`` if absent or invalid."""
+    value = response.headers.get("Retry-After")
+    if value is None:
+        return None
+    value = value.strip()
+    try:
+        seconds = float(value)
+    except ValueError:
+        try:
+            when = parsedate_to_datetime(value)
+        except (TypeError, ValueError):
+            return None
+        if when.tzinfo is None:
+            return None
+        return max(0.0, (when - datetime.now(UTC)).total_seconds())
+    if not math.isfinite(seconds) or seconds < 0:
+        return None
+    return seconds
 
 
 def _normalize_base_url(base_url: str) -> str:
@@ -144,6 +192,7 @@ class AsyncTalkToHarnessesClient:
         token_provider: Callable[[], Awaitable[str]] | None = None,
         on_token_rejected: Callable[[str], Awaitable[None]] | None = None,
         timeout: float | None = 30.0,
+        command_retry_seconds: float = 0.0,
     ) -> None:
         if token is not None and token_provider is not None:
             raise ValueError("token and token_provider are mutually exclusive")
@@ -153,6 +202,7 @@ class AsyncTalkToHarnessesClient:
         self._token = token
         self._token_provider = token_provider
         self._timeout = timeout
+        self._command_retry_seconds = command_retry_seconds
         self._client = httpx.AsyncClient(
             base_url=self._base_url,
             timeout=timeout,
@@ -193,6 +243,44 @@ class AsyncTalkToHarnessesClient:
         if isinstance(timeout, _UnsetType):
             return self._timeout
         return timeout
+
+    async def _command(
+        self,
+        path: str,
+        *,
+        body: dict[str, Any],
+        idempotency_key: str,
+        timeout: _Timeout,
+    ) -> httpx.Response:
+        """POST an idempotent command, waiting out a worker that cannot take it yet.
+
+        The API refuses turns, steers, and harness switches with 503
+        ``worker_unavailable`` while its command worker is not ready. Such a
+        refusal is retried with the same idempotency key after its
+        ``Retry-After`` for up to the client's ``command_retry_seconds`` (off by
+        default); every other error, and the last refusal once that budget is
+        spent, is raised.
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self._command_retry_seconds
+        while True:
+            try:
+                return await self._request(
+                    "POST",
+                    path,
+                    accepted=202,
+                    json=body,
+                    headers={"Idempotency-Key": idempotency_key},
+                    timeout=timeout,
+                )
+            except APIError as exc:
+                remaining = deadline - loop.time()
+                if exc.code != ErrorCode.WORKER_UNAVAILABLE.value or remaining <= 0:
+                    raise
+                hint = _COMMAND_RETRY_DEFAULT_S if exc.retry_after is None else exc.retry_after
+                delay = min(max(hint, _COMMAND_RETRY_MIN_S), remaining)
+                logger.warning("Command worker unavailable; retrying %s in %.1fs", path, delay)
+                await asyncio.sleep(delay)
 
     async def _request(
         self,
@@ -751,12 +839,10 @@ class AsyncTalkToHarnessesClient:
         body: dict[str, Any] = {"prompt": prompt}
         if model is not None:
             body["model"] = model
-        response = await self._request(
-            "POST",
+        response = await self._command(
             f"conversations/{conversation_id}/turns",
-            accepted=202,
-            json=body,
-            headers={"Idempotency-Key": idempotency_key},
+            body=body,
+            idempotency_key=idempotency_key,
             timeout=timeout,
         )
         return self._parse_model(SubmitTurnResult, response)
@@ -801,12 +887,10 @@ class AsyncTalkToHarnessesClient:
         idempotency_key: str,
         timeout: _Timeout = _UNSET,
     ) -> CommandProjection:
-        response = await self._request(
-            "POST",
+        response = await self._command(
             f"conversations/{conversation_id}/steer",
-            accepted=202,
-            json={"prompt": prompt},
-            headers={"Idempotency-Key": idempotency_key},
+            body={"prompt": prompt},
+            idempotency_key=idempotency_key,
             timeout=timeout,
         )
         return self._parse_model(CommandProjection, response)
@@ -819,12 +903,10 @@ class AsyncTalkToHarnessesClient:
         idempotency_key: str,
         timeout: _Timeout = _UNSET,
     ) -> CommandProjection:
-        response = await self._request(
-            "POST",
+        response = await self._command(
             f"conversations/{conversation_id}/switch",
-            accepted=202,
-            json={"harness_id": str(harness_id)},
-            headers={"Idempotency-Key": idempotency_key},
+            body={"harness_id": str(harness_id)},
+            idempotency_key=idempotency_key,
             timeout=timeout,
         )
         return self._parse_model(CommandProjection, response)

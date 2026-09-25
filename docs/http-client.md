@@ -110,7 +110,24 @@ except APIError as exc:
 ```
 
 Ordinary HTTP calls are not retried. Callers own backoff and retries for
-non-streaming requests.
+non-streaming requests. `APIError.retry_after` carries the response's
+`Retry-After` in seconds (delta-seconds or HTTP-date), or `None` when the
+header is absent or invalid. The API sends it with
+`503 worker_unavailable`, returned for new turns, steers, interrupts, and
+harness switches while the command worker cannot take commands (for example
+while it reacquires its lease after the host slept), with the worker's lease
+renewal interval as the delay; retry with the same idempotency key after it.
+
+The idempotent commands, `submit_turn`, `steer`, and `switch_harness`, are the
+one exception, opt-in through the constructor's `command_retry_seconds`
+(default `0`, no retry): they retry `503 worker_unavailable` with the same
+idempotency key after each `Retry-After` (1 s when absent, never under 0.1 s)
+until that budget is spent, then raise the last refusal. Every other error is
+raised at once. `interrupt` carries no idempotency key and is never retried.
+
+```python
+client = AsyncTalkToHarnessesClient(base_url, token=token, command_retry_seconds=30)
+```
 
 ## Timeouts
 

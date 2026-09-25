@@ -430,6 +430,24 @@ retry warnings no longer fail a turn as unsupported events. Record regression
 evidence in [Provider adapters](architecture/provider-adapters.md) and the
 compatibility map.
 
+## [2026-09-24] repair | Expose Retry-After on client errors
+
+Against baseline `3643af2`, `APIError.retry_after` carries the response's
+`Retry-After`, which the API sends with `503 worker_unavailable` while
+its command worker cannot take commands. Retries stay with callers. Record the
+behavior and test evidence in
+[Official HTTP client interface](interfaces/official-http-client.md).
+
+## [2026-09-25] update | Retry refused idempotent commands in the client
+
+Against baseline `3643af2` plus this working tree, `submit_turn`, `steer`, and
+`switch_harness` retry `503 worker_unavailable` with the same idempotency
+key after each `Retry-After` for up to the constructor's
+`command_retry_seconds` (default `0`, off), so callers such as Agentbahn no
+longer wrap every submission. Record the
+behavior and test evidence in
+[Official HTTP client interface](interfaces/official-http-client.md).
+
 ## [2026-09-25] repair | Recover lost worker leases
 
 Against baseline `3643af2`, a worker that loses its lease reacquires it from

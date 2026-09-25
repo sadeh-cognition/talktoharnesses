@@ -5,7 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from email.utils import format_datetime
 from typing import Any, cast
 from unittest.mock import patch
 from uuid import UUID, uuid4
@@ -415,6 +416,152 @@ async def test_api_error_parsing(handler: RecordingHandler) -> None:
             handler.respond(200, b'{"not": "a snapshot"}')
             with pytest.raises(ValidationError):
                 await client.get_conversation(_CONV_ID)
+
+
+def _error_response(body: bytes, retry_after: str | None) -> httpx.Response:
+    headers = {"content-type": "application/json"}
+    if retry_after is not None:
+        headers["Retry-After"] = retry_after
+    return httpx.Response(503, content=body, headers=headers)
+
+
+_WORKER_UNAVAILABLE = b'{"code": "worker_unavailable", "message": "command worker unavailable"}'
+
+
+@pytest.mark.parametrize(
+    ("header", "expected"),
+    [("7", 7.0), (" 0 ", 0.0), (None, None), ("soon", None), ("-3", None), ("nan", None)],
+)
+def test_api_error_carries_retry_after_seconds(header: str | None, expected: float | None) -> None:
+    err = APIError.from_response(_error_response(_WORKER_UNAVAILABLE, header))
+    assert err.status_code == 503
+    assert err.code == "worker_unavailable"
+    assert err.message == "command worker unavailable"
+    assert err.retry_after == expected
+
+
+def test_api_error_retry_after_accepts_http_dates() -> None:
+    future = datetime.now(UTC) + timedelta(seconds=120)
+    err = APIError.from_response(_error_response(_WORKER_UNAVAILABLE, format_datetime(future)))
+    assert err.retry_after is not None
+    assert 100 < err.retry_after <= 120
+
+    past = format_datetime(datetime(2020, 1, 1, tzinfo=UTC))
+    assert APIError.from_response(_error_response(_WORKER_UNAVAILABLE, past)).retry_after == 0.0
+
+
+def test_api_error_retry_after_survives_unparseable_body() -> None:
+    err = APIError.from_response(_error_response(b"not-json", "4"))
+    assert err.code is None
+    assert err.retry_after == 4.0
+
+
+def _refuse_command(
+    handler: RecordingHandler, retry_after: str | None, body: bytes = _WORKER_UNAVAILABLE
+) -> None:
+    headers = {"content-type": "application/json"}
+    if retry_after is not None:
+        headers["Retry-After"] = retry_after
+    handler.respond(503, body, headers=headers)
+
+
+@pytest.fixture
+async def frozen_retry_clock(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """Record the client's retry sleeps on a clock that only they advance."""
+    loop = asyncio.get_running_loop()
+    now = [loop.time()]
+    sleeps: list[float] = []
+    real_sleep = asyncio.sleep
+
+    async def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+        now[0] += delay
+        await real_sleep(0)
+
+    monkeypatch.setattr(loop, "time", lambda: now[0])
+    monkeypatch.setattr("talktoharnesses.client.asyncio.sleep", fake_sleep)
+    return sleeps
+
+
+def _mock_client(handler: RecordingHandler, **kwargs: Any) -> AsyncTalkToHarnessesClient:
+    transport = httpx.MockTransport(handler)
+    real_cls = httpx.AsyncClient
+
+    def factory(*args: Any, **client_kwargs: Any) -> httpx.AsyncClient:
+        client_kwargs["transport"] = transport
+        return real_cls(*args, **client_kwargs)
+
+    with patch("talktoharnesses.client.httpx.AsyncClient", side_effect=factory):
+        return AsyncTalkToHarnessesClient(_BASE, token="tok-a", **kwargs)
+
+
+_COMMANDS: dict[str, tuple[Callable[[AsyncTalkToHarnessesClient], Any], BaseModel]] = {
+    "turns": (
+        lambda client: client.submit_turn(_CONV_ID, prompt="hello", idempotency_key="idem-1"),
+        SubmitTurnResult(command=_command(), turn=_turn()),
+    ),
+    "steer": (
+        lambda client: client.steer(_CONV_ID, prompt="hello", idempotency_key="idem-1"),
+        _command(),
+    ),
+    "switch": (
+        lambda client: client.switch_harness(
+            _CONV_ID, harness_id=_HARNESS_ID, idempotency_key="idem-1"
+        ),
+        _command(),
+    ),
+}
+
+
+@pytest.mark.parametrize("path", _COMMANDS)
+async def test_commands_wait_out_a_recovering_worker(
+    handler: RecordingHandler, frozen_retry_clock: list[float], path: str
+) -> None:
+    send, accepted = _COMMANDS[path]
+    _refuse_command(handler, "2")
+    _refuse_command(handler, None)
+    _refuse_command(handler, "0")
+    handler.respond(202, accepted)
+    async with _mock_client(handler, command_retry_seconds=30) as client:
+        assert await send(client) == accepted
+
+    assert frozen_retry_clock == [2.0, 1.0, 0.1]
+    assert {request.url.path.rsplit("/", 1)[-1] for request in handler.requests} == {path}
+    assert [request.headers["Idempotency-Key"] for request in handler.requests] == ["idem-1"] * 4
+
+
+async def test_submit_turn_raises_the_last_refusal_once_the_budget_is_spent(
+    handler: RecordingHandler, frozen_retry_clock: list[float]
+) -> None:
+    _refuse_command(handler, "3")
+    _refuse_command(handler, "3")
+    _refuse_command(handler, "3")
+    async with _mock_client(handler, command_retry_seconds=5) as client:
+        with pytest.raises(APIError) as exc_info:
+            await client.submit_turn(_CONV_ID, prompt="hello", idempotency_key="idem-1")
+
+    assert exc_info.value.code == "worker_unavailable"
+    assert frozen_retry_clock == [3.0, 2.0]
+    assert len(handler.requests) == 3
+
+
+@pytest.mark.parametrize(
+    ("retry_seconds", "body"),
+    [
+        (0.0, _WORKER_UNAVAILABLE),
+        (30.0, b'{"code": "service_unavailable", "message": "unavailable"}'),
+    ],
+)
+async def test_submit_turn_does_not_retry_other_refusals_or_without_a_budget(
+    handler: RecordingHandler, frozen_retry_clock: list[float], retry_seconds: float, body: bytes
+) -> None:
+    _refuse_command(handler, "1", body)
+    async with _mock_client(handler, command_retry_seconds=retry_seconds) as client:
+        with pytest.raises(APIError):
+            await client.submit_turn(_CONV_ID, prompt="hello", idempotency_key="idem-1")
+
+    assert frozen_retry_clock == []
+    assert len(handler.requests) == 1
 
 
 # ---------------------------------------------------------------------------
