@@ -218,6 +218,15 @@ class TalkToHarnessesService:
             return False
         return await self._readiness.has_fresh_probe(self._clock())
 
+    def _require_worker_ready(self) -> None:
+        """Refuse a new command once started while the worker cannot claim it.
+
+        Before :meth:`start`, commands queue for the worker it launches, and
+        callers that drive the processor themselves never start the service.
+        """
+        if self._started:
+            self._coordinator.require_ready_for_work()
+
     async def start(self, worker_id: str) -> None:
         """Start the durable command worker (idempotent)."""
         if self._started:
@@ -829,6 +838,7 @@ class TalkToHarnessesService:
                 turn=turn_projection,
             )
 
+        self._require_worker_ready()
         events = await self._persistence.commit_facade_mutation(
             conversation_id,
             owner_id,
@@ -907,6 +917,7 @@ class TalkToHarnessesService:
             raise DomainError(ErrorCode.INVALID_STATE, "steer produced no command")
         if not result.events:
             return CommandProjection.from_command(result.command)
+        self._require_worker_ready()
         events = await self._persistence.commit_facade_mutation(
             conversation_id,
             owner_id,
@@ -977,6 +988,7 @@ class TalkToHarnessesService:
         for existing in state.commands.values():
             if existing.idempotency_key == key:
                 return CommandProjection.from_command(existing)
+        self._require_worker_ready()
         command = Command(
             conversation_id=conversation_id,
             kind=CommandKind.INTERRUPT,
@@ -1038,6 +1050,7 @@ class TalkToHarnessesService:
                 )
             return CommandProjection.from_command(existing)
 
+        self._require_worker_ready()
         harness = await self._persistence.get_harness(harness_id, owner_id)
         if (
             state.active_turn is not None

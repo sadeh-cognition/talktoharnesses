@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 
 from django.http import HttpRequest, HttpResponse
 from ninja import NinjaAPI
@@ -44,6 +45,10 @@ _BAD_REQUEST_CODES = frozenset(
     }
 )
 
+# Transient refusals: the raiser puts the retry delay in
+# details["retry_after_seconds"], sent as Retry-After.
+_SERVICE_UNAVAILABLE_CODES = frozenset({ErrorCode.WORKER_UNAVAILABLE})
+
 _UNPROCESSABLE_CODES = frozenset(
     {
         ErrorCode.INVALID_CURSOR,
@@ -52,11 +57,19 @@ _UNPROCESSABLE_CODES = frozenset(
 )
 
 
-def _json_error(code: str, message: str, status: int) -> HttpResponse:
+def _json_error(
+    code: str,
+    message: str,
+    status: int,
+    *,
+    retry_after: float | None = None,
+) -> HttpResponse:
     body = ErrorProjection(code=code, message=message).model_dump_json()
     response = HttpResponse(body, status=status, content_type="application/json")
     if status == 401:
         response["WWW-Authenticate"] = "Bearer"
+    if retry_after is not None:
+        response["Retry-After"] = str(math.ceil(retry_after))
     return response
 
 
@@ -73,6 +86,9 @@ def domain_error_response(exc: DomainError) -> HttpResponse:
         return _json_error(ErrorCode.NOT_FOUND.value, public_message(ErrorCode.NOT_FOUND), 404)
     if exc.code is ErrorCode.INVALID_STATE and "owner mismatch" in exc.message.lower():
         return _json_error(ErrorCode.NOT_FOUND.value, public_message(ErrorCode.NOT_FOUND), 404)
+    if exc.code in _SERVICE_UNAVAILABLE_CODES:
+        retry_after = exc.details.get("retry_after_seconds")
+        return _json_error(exc.code.value, message, 503, retry_after=retry_after)
     if exc.code in _BAD_REQUEST_CODES:
         return _json_error(exc.code.value, message, 400)
     if exc.code in _CONFLICT_CODES:

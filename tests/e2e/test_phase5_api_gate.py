@@ -11,11 +11,11 @@ import asyncio
 import json
 from datetime import UTC, datetime
 from typing import Any, cast
-from unittest.mock import Mock
 
 import pytest
 from django.contrib.auth import get_user_model
 from django.test import Client
+from tests.worker_fixtures import mark_worker_ready
 
 from talktoharnesses.application.broker import InProcessCommittedEventBroker
 from talktoharnesses.application.service import TalkToHarnessesService
@@ -68,14 +68,7 @@ def service(db: Any) -> Any:
     svc._worker_id = "e2e"  # type: ignore[attr-defined]
     # Phase 5 gate exercises the authenticated API surface without a full
     # worker recovery/probe cycle; mark readiness healthy for /ready.
-    coordinator = svc.coordinator
-    coordinator._lease_healthy = True  # type: ignore[attr-defined]
-    coordinator._heartbeat_healthy = True  # type: ignore[attr-defined]
-    coordinator._initial_recovery_complete = True  # type: ignore[attr-defined]
-    coordinator._draining = False  # type: ignore[attr-defined]
-    coordinator._claims_healthy = True  # type: ignore[attr-defined]
-    svc.processor._running = True  # type: ignore[attr-defined]
-    svc.processor._claim_task = Mock(done=Mock(return_value=False))  # type: ignore[attr-defined]
+    mark_worker_ready(svc)
     svc._readiness.notify_success(_now())  # type: ignore[attr-defined]
     asgi_mod._service = svc  # type: ignore[attr-defined]
 

@@ -429,3 +429,13 @@ provider warning payload to the dispatcher's streaming-event allowlist. Codex
 retry warnings no longer fail a turn as unsupported events. Record regression
 evidence in [Provider adapters](architecture/provider-adapters.md) and the
 compatibility map.
+
+## [2026-09-25] repair | Recover lost worker leases
+
+Against baseline `3643af2`, a worker that loses its lease reacquires it from
+the heartbeat, recovers as at startup, and resumes claims unless shutdown began
+meanwhile; the runtime manager's `close_all` tears runtimes down without the
+one-way shutdown. Until then a started service refuses new commands with the
+dedicated `503 worker_unavailable` and the renewal interval as `Retry-After`.
+Record the behavior and test evidence in
+[Runtime isolation architecture](architecture/runtime-isolation.md).

@@ -119,3 +119,27 @@ def test_not_found_and_auth_remain_stable() -> None:
     )
     assert owner.status_code == 404
     assert json.loads(owner.content)["message"] == "not found"
+
+
+def test_worker_not_ready_is_a_retryable_503() -> None:
+    response = domain_error_response(
+        DomainError(
+            ErrorCode.WORKER_UNAVAILABLE,
+            "command worker is not ready",
+            details={"readiness": {"worker_lease": False}, "retry_after_seconds": 2.5},
+        )
+    )
+    assert response.status_code == 503
+    assert response["Retry-After"] == "3"
+    assert json.loads(response.content) == {
+        "code": "worker_unavailable",
+        "message": public_message(ErrorCode.WORKER_UNAVAILABLE),
+    }
+
+
+def test_internal_worker_lease_error_is_not_a_retryable_503() -> None:
+    response = domain_error_response(
+        DomainError(ErrorCode.WORKER_LEASE_UNAVAILABLE, "worker lease unavailable")
+    )
+    assert response.status_code == 409
+    assert "Retry-After" not in response

@@ -13,6 +13,7 @@ from django.db import connection
 from django.test.utils import CaptureQueriesContext
 from tests.performance.helpers import measure_p95_ns, percentile_ns
 from tests.phase8_fixtures import NOW, idle_state
+from tests.worker_fixtures import mark_worker_ready
 
 from talktoharnesses.application.broker import InProcessCommittedEventBroker
 from talktoharnesses.application.publisher import ConversationWakeup
@@ -152,6 +153,7 @@ async def test_idempotent_submit_p95() -> None:
     runtime = RuntimeManager(persistence, registry, clock=lambda: NOW)
     service = TalkToHarnessesService(persistence, registry, broker, lambda: NOW, runtime)
     service._started = True  # pyright: ignore[reportPrivateUsage]
+    mark_worker_ready(service)
     first = await service.submit_turn(
         OWNER,
         state.conversation.id,

@@ -5,13 +5,13 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 from typing import Any, cast
-from unittest.mock import Mock
 from uuid import UUID
 
 import pytest
 from django.contrib.auth import get_user_model
 from django.test import Client
 from pydantic import ValidationError
+from tests.worker_fixtures import mark_worker_ready
 
 from talktoharnesses.application.broker import InProcessCommittedEventBroker
 from talktoharnesses.application.service import TalkToHarnessesService
@@ -132,6 +132,7 @@ def service(db: Any) -> Any:
     svc = TalkToHarnessesService(persistence, registry, broker, _now, runtime)
     svc._started = True  # type: ignore[attr-defined]
     svc._worker_id = "test"  # type: ignore[attr-defined]
+    mark_worker_ready(svc)
     asgi_mod._service = svc  # type: ignore[attr-defined]
     yield svc
     reset_service_for_tests()
@@ -155,7 +156,7 @@ def test_health_and_ready_public(service: TalkToHarnessesService) -> None:
     assert health.json()["status"] == "ok"
 
     ready = client.get("/api/v1/ready")
-    # Without worker lease / fresh harness probe the process is not ready.
+    # Without a fresh harness probe the process is not ready.
     assert ready.status_code == 503
     body = ready.json()
     assert body == {"ready": False, "reason": "not_ready"}
@@ -163,14 +164,6 @@ def test_health_and_ready_public(service: TalkToHarnessesService) -> None:
 
 @pytest.mark.django_db(transaction=True)
 def test_ready_true_with_worker_and_fresh_probe(service: TalkToHarnessesService) -> None:
-    coordinator = service.coordinator
-    coordinator._lease_healthy = True  # type: ignore[attr-defined]
-    coordinator._heartbeat_healthy = True  # type: ignore[attr-defined]
-    coordinator._initial_recovery_complete = True  # type: ignore[attr-defined]
-    coordinator._draining = False  # type: ignore[attr-defined]
-    coordinator._claims_healthy = True  # type: ignore[attr-defined]
-    service.processor._running = True  # type: ignore[attr-defined]
-    service.processor._claim_task = Mock(done=Mock(return_value=False))  # type: ignore[attr-defined]
     service._readiness.notify_success(_now())  # type: ignore[attr-defined]
 
     client = Client()
@@ -478,6 +471,39 @@ def test_submit_turn_requires_idempotency_key(
     assert ok.status_code == 202, ok.content
     body = ok.json()
     assert body["command"]["idempotency_key"] == "k1"
+
+
+@pytest.mark.django_db(transaction=True)
+def test_submit_turn_is_refused_while_worker_is_not_ready(
+    service: TalkToHarnessesService, auth_header: str
+) -> None:
+    client = Client()
+    owner = owner_id_for_user(authenticate_bearer_sync(auth_header))
+
+    import asyncio
+
+    async def setup() -> UUID:
+        h = await service.create_harness(
+            owner,
+            name="h",
+            configuration=HarnessConfiguration(kind=HarnessKind.GROK, working_directory="/tmp"),
+        )
+        snap = await service.create_conversation(owner, h.id)
+        return snap.detail.conversation.id
+
+    cid = asyncio.run(setup())
+    service.coordinator._lease_healthy = False  # type: ignore[attr-defined]
+
+    refused = client.post(
+        f"/api/v1/conversations/{cid}/turns",
+        data=json.dumps({"prompt": "hi"}),
+        content_type="application/json",
+        HTTP_AUTHORIZATION=auth_header,
+        HTTP_IDEMPOTENCY_KEY="k1",
+    )
+    assert refused.status_code == 503, refused.content
+    assert refused["Retry-After"] == "10"
+    assert refused.json()["code"] == "worker_unavailable"
 
 
 @pytest.mark.django_db(transaction=True)

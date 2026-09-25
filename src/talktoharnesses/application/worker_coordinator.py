@@ -144,6 +144,23 @@ class WorkerCoordinator:
             "ready_for_work": self.ready_for_work,
         }
 
+    def require_ready_for_work(self) -> None:
+        """Refuse a new command while this worker cannot claim it.
+
+        Otherwise the command is accepted and waits, unclaimed, until the worker
+        recovers. A lost lease is retried once per renewal interval, so that is
+        when the caller should try again.
+        """
+        if not self.ready_for_work:
+            raise DomainError(
+                ErrorCode.WORKER_UNAVAILABLE,
+                "command worker is not ready",
+                details={
+                    "readiness": self.readiness_snapshot(),
+                    "retry_after_seconds": self._policy.lease_renewal_interval,
+                },
+            )
+
     async def acquire_and_heartbeat(self, worker_id: str) -> None:
         """Acquire the process worker lease and start the heartbeat loop."""
         await self._persistence.acquire_worker_lease(
@@ -151,11 +168,9 @@ class WorkerCoordinator:
             lease_duration=self._policy.lease_duration,
         )
         self._worker_id = worker_id
-        self._lease_healthy = True
         self._draining = False
         self._initial_recovery_complete = False
-        self._heartbeat_healthy = True
-        self._claims_healthy = True
+        self._mark_lease_acquired()
         self._processor.set_claims_enabled(False)
         self._processor.initialize_worker(worker_id)
         if self._heartbeat_task is None or self._heartbeat_task.done():
@@ -169,10 +184,7 @@ class WorkerCoordinator:
         assert self._worker_id is not None
         obs = get_observability()
         started = time.perf_counter()
-        while self._capacity_remaining() > 0:
-            if not await self._recover_batch(trigger=RecoveryTrigger.STARTUP):
-                self._initial_recovery_complete = True
-                break
+        await self._recover_until_empty(trigger=RecoveryTrigger.STARTUP)
         # Also inspect conversations already owned (e.g. renewed after acquire).
         for conversation_id, fence in list(self._fences.items()):
             if conversation_id in self._attempt_ids:
@@ -299,6 +311,8 @@ class WorkerCoordinator:
         interval = self._policy.lease_renewal_interval
         while True:
             try:
+                if not self._lease_healthy and not self._draining:
+                    await self._reacquire_worker_lease()
                 await self._persistence.renew_worker_lease(
                     self._worker_id,
                     lease_duration=self._policy.lease_duration,
@@ -316,17 +330,30 @@ class WorkerCoordinator:
                     if not claimed and self._capacity_remaining() > 0:
                         self._initial_recovery_complete = True
             except DomainError as exc:
-                if exc.code is ErrorCode.WORKER_LEASE_UNAVAILABLE:
+                if exc.code is not ErrorCode.WORKER_LEASE_UNAVAILABLE:
+                    logger.warning("worker heartbeat failed code=%s", exc.code.value)
+                    self._heartbeat_healthy = False
+                elif self._lease_healthy:
+                    # Typically the host slept past the lease; keep retrying
+                    # the acquisition instead of leaving the worker idle.
+                    logger.error(
+                        "worker lease lost worker_id=%s; claims stopped until it is reacquired",
+                        self._worker_id,
+                    )
                     await self._on_worker_lease_lost()
-                    return
-                logger.warning("worker heartbeat failed code=%s", exc.code.value)
-                self._heartbeat_healthy = False
             except asyncio.CancelledError:
                 raise
             except Exception:
                 logger.exception("worker heartbeat failed")
                 self._heartbeat_healthy = False
             await asyncio.sleep(interval)
+
+    async def _recover_until_empty(self, *, trigger: RecoveryTrigger) -> None:
+        """Recover expired conversations batch by batch until none remain or capacity is full."""
+        while self._capacity_remaining() > 0:
+            if not await self._recover_batch(trigger=trigger):
+                self._initial_recovery_complete = True
+                return
 
     async def _recover_batch(self, *, trigger: RecoveryTrigger) -> int:
         assert self._worker_id is not None
@@ -875,15 +902,40 @@ class WorkerCoordinator:
         with contextlib.suppress(Exception):
             await self._runtime.close(conversation_id, reason="lease_lost")
 
+    def _mark_lease_acquired(self) -> None:
+        self._lease_healthy = True
+        self._heartbeat_healthy = True
+        self._claims_healthy = True
+
+    async def _reacquire_worker_lease(self) -> None:
+        """Take back a lost worker lease, recover, and resume claims as startup does.
+
+        Raises while another worker holds the lease. The lease stays marked lost
+        until recovery finishes, so a failed attempt is retried on the next tick.
+        """
+        assert self._worker_id is not None
+        await self._persistence.acquire_worker_lease(
+            self._worker_id,
+            lease_duration=self._policy.lease_duration,
+        )
+        await self._recover_until_empty(trigger=RecoveryTrigger.TAKEOVER)
+        if self._draining:
+            # Shutdown began meanwhile; finish_shutdown releases the lease.
+            return
+        self._mark_lease_acquired()
+        self._processor.set_claims_enabled(True)
+        logger.warning("worker lease reacquired worker_id=%s", self._worker_id)
+
     async def _on_worker_lease_lost(self) -> None:
         self._lease_healthy = False
         self._heartbeat_healthy = False
         self._claims_healthy = False
+        self._initial_recovery_complete = False
         self._processor.set_claims_enabled(False)
         for conversation_id in list(self._fences):
             await self._on_lost_lease(conversation_id)
         with contextlib.suppress(Exception):
-            await self._runtime.shutdown(deadline=time.monotonic() + self._policy.shutdown_budget)
+            await self._runtime.close_all(deadline=time.monotonic() + self._policy.shutdown_budget)
 
     async def _safe_publish(
         self,

@@ -16,6 +16,7 @@ import pytest
 from django.contrib.auth import get_user_model
 from django.test import Client
 from tests.runtime.conftest import FakeAdapter
+from tests.worker_fixtures import mark_worker_ready
 
 from talktoharnesses.application.broker import InProcessCommittedEventBroker
 from talktoharnesses.application.service import TalkToHarnessesService
@@ -74,6 +75,7 @@ def service(db: Any) -> Any:
     svc = TalkToHarnessesService(persistence, registry, broker, _now, runtime)
     svc._started = True  # type: ignore[attr-defined]
     svc._worker_id = "e2e-p8"  # type: ignore[attr-defined]
+    mark_worker_ready(svc)
     asgi_mod._service = svc  # type: ignore[attr-defined]
 
     asyncio.run(broker.start())

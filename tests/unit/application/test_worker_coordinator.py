@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import asyncio
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import AsyncMock
 from uuid import UUID, uuid4
 
@@ -62,11 +64,14 @@ class _Publisher:
 
 def _coordinator(
     persistence: MemoryPersistence | None = None,
+    *,
+    policy: RuntimePolicy | None = None,
 ) -> tuple[WorkerCoordinator, MemoryPersistence, RuntimeManager]:
     p = persistence or MemoryPersistence()
+    policy = policy or RuntimePolicy()
     registry = AdapterRegistry()
     publisher = _Publisher()
-    runtime = RuntimeManager(p, registry, clock=_now, policy=RuntimePolicy())
+    runtime = RuntimeManager(p, registry, clock=_now, policy=policy)
     processor = CommandProcessor(p, publisher, runtime, clock=_now)  # type: ignore[arg-type]
     coordinator = WorkerCoordinator(
         p,
@@ -74,7 +79,7 @@ def _coordinator(
         publisher,  # type: ignore[arg-type]
         processor,
         _now,
-        RuntimePolicy(),
+        policy,
         database_system="sqlite",
     )
     return coordinator, p, runtime
@@ -222,6 +227,101 @@ async def test_initial_recovery_marks_ready_bits() -> None:
     assert snap["recovery_complete"] is True
     assert snap["worker_lease"] is True
     await coordinator._processor.stop()  # pyright: ignore[reportPrivateUsage]
+
+
+async def _wait_until(condition: Callable[[], bool]) -> None:
+    for _ in range(300):
+        if condition():
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("condition not reached")
+
+
+def _claims_enabled(coordinator: WorkerCoordinator) -> bool:
+    return coordinator._processor._claims_enabled  # pyright: ignore[reportPrivateUsage]
+
+
+async def _ready_worker(
+    policy: RuntimePolicy,
+) -> tuple[WorkerCoordinator, MemoryPersistence, RuntimeManager]:
+    coordinator, persistence, runtime = _coordinator(policy=policy)
+    await coordinator.acquire_and_heartbeat("worker-a")
+    await coordinator.run_initial_recovery()
+    coordinator._processor.set_claims_enabled(True)  # pyright: ignore[reportPrivateUsage]
+    await coordinator._processor.start("worker-a")  # pyright: ignore[reportPrivateUsage]
+    assert coordinator.ready_for_work is True
+    return coordinator, persistence, runtime
+
+
+async def _stop_worker(coordinator: WorkerCoordinator) -> None:
+    await coordinator._processor.stop()  # pyright: ignore[reportPrivateUsage]
+    await coordinator.finish_shutdown()
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_reacquires_worker_lease_that_expired_while_host_slept() -> None:
+    coordinator, persistence, runtime = await _ready_worker(
+        RuntimePolicy(lease_renewal_interval=0.01)
+    )
+    close_all = AsyncMock(wraps=runtime.close_all)
+    runtime.close_all = close_all  # type: ignore[method-assign]
+    lease = persistence.worker_leases["sqlite-supervisor"]
+    lease["expires_at"] = datetime.now(UTC) - timedelta(seconds=1)
+
+    await _wait_until(lambda: close_all.await_count == 1 and coordinator.ready_for_work)
+
+    lease = persistence.worker_leases["sqlite-supervisor"]
+    assert lease["worker_id"] == "worker-a"
+    assert cast(datetime, lease["expires_at"]) > datetime.now(UTC)
+    assert _claims_enabled(coordinator) is True
+    assert runtime._shutting_down is False  # pyright: ignore[reportPrivateUsage]
+    await _stop_worker(coordinator)
+
+
+@pytest.mark.asyncio
+async def test_shutdown_during_lease_reacquisition_keeps_claims_off() -> None:
+    coordinator, persistence, _ = await _ready_worker(RuntimePolicy(lease_renewal_interval=0.01))
+    acquire = persistence.acquire_worker_lease
+    acquiring = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow_acquire(worker_id: str, *, lease_duration: float) -> None:
+        acquiring.set()
+        await release.wait()
+        await acquire(worker_id, lease_duration=lease_duration)
+
+    persistence.acquire_worker_lease = slow_acquire  # type: ignore[method-assign]
+    lease = persistence.worker_leases["sqlite-supervisor"]
+    lease["expires_at"] = datetime.now(UTC) - timedelta(seconds=1)
+    await asyncio.wait_for(acquiring.wait(), timeout=3)
+
+    await coordinator.begin_shutdown(deadline=0)
+    release.set()
+    await asyncio.sleep(0.05)
+
+    assert _claims_enabled(coordinator) is False
+    assert coordinator.ready_for_work is False
+    await _stop_worker(coordinator)
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_waits_for_other_worker_lease_before_reacquiring() -> None:
+    coordinator, persistence, _ = await _ready_worker(RuntimePolicy(lease_renewal_interval=0.01))
+    lease = persistence.worker_leases["sqlite-supervisor"]
+    lease["worker_id"] = "worker-b"
+    lease["expires_at"] = datetime.now(UTC) + timedelta(minutes=1)
+
+    await _wait_until(lambda: not coordinator.readiness_snapshot()["worker_lease"])
+    await asyncio.sleep(0.05)
+    assert lease["worker_id"] == "worker-b"
+    assert _claims_enabled(coordinator) is False
+    assert coordinator.ready_for_work is False
+
+    lease["expires_at"] = datetime.now(UTC) - timedelta(seconds=1)
+    await _wait_until(lambda: coordinator.ready_for_work)
+    assert persistence.worker_leases["sqlite-supervisor"]["worker_id"] == "worker-a"
+    assert _claims_enabled(coordinator) is True
+    await _stop_worker(coordinator)
 
 
 @pytest.mark.asyncio
@@ -599,13 +699,13 @@ async def test_release_undelivered_claims_and_worker_lease_lost() -> None:
     assert released.worker_id is None
 
     runtime.close = AsyncMock()  # type: ignore[method-assign]
-    runtime.shutdown = AsyncMock()  # type: ignore[method-assign]
+    runtime.close_all = AsyncMock()  # type: ignore[method-assign]
     coordinator._fences[cid] = fence  # pyright: ignore[reportPrivateUsage]
     await coordinator._on_worker_lease_lost()  # pyright: ignore[reportPrivateUsage]
     assert coordinator._lease_healthy is False  # pyright: ignore[reportPrivateUsage]
     assert cid not in coordinator._fences  # pyright: ignore[reportPrivateUsage]
     runtime.close.assert_awaited()
-    runtime.shutdown.assert_awaited()
+    runtime.close_all.assert_awaited()
 
 
 @pytest.mark.asyncio

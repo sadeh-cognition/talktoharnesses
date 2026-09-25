@@ -1828,21 +1828,29 @@ class RuntimeManager:
 
     async def shutdown(self, *, deadline: float | None = None) -> None:
         """Idempotent shutdown: reject new runtimes, interrupt, then force-kill."""
+        async with self._global_lock:
+            already_shutting_down = self._shutting_down
+            self._shutting_down = True
+        if already_shutting_down:
+            await self._force_all(self._resolve_deadline(deadline))
+            return
+        await self.close_all(deadline=deadline)
+
+    async def close_all(self, *, deadline: float | None = None) -> None:
+        """Interrupt, close, then force-kill every runtime and candidate.
+
+        Unlike :meth:`shutdown`, new runtimes stay admitted afterwards; the
+        worker uses this when it loses its lease and may reacquire it.
+        """
         loop = asyncio.get_running_loop()
-        if deadline is None:
-            deadline = loop.time() + self._policy.shutdown_budget
+        deadline = self._resolve_deadline(deadline)
         force_reserve = min(
             self._policy.terminate_escalation + 0.25,
             self._policy.shutdown_budget / 2,
         )
         graceful_deadline = deadline - force_reserve
         async with self._global_lock:
-            already_shutting_down = self._shutting_down
-            self._shutting_down = True
             startups = list(self._startup_tasks)
-        if already_shutting_down:
-            await self._force_all(deadline)
-            return
 
         # Cancel admitted starts before taking the runtime snapshot. Their
         # cancellation path terminates any child that has already been spawned.
@@ -1884,6 +1892,11 @@ class RuntimeManager:
                 )
 
         await self._force_all(deadline)
+
+    def _resolve_deadline(self, deadline: float | None) -> float:
+        if deadline is None:
+            return asyncio.get_running_loop().time() + self._policy.shutdown_budget
+        return deadline
 
     async def _force_all(self, deadline: float) -> None:
         for binding_id in list(self._candidates):

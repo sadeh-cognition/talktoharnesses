@@ -48,6 +48,7 @@ _PUBLIC_MESSAGES: Final[dict[ErrorCode, str]] = {
     ErrorCode.OPTIMISTIC_CONFLICT: "optimistic conflict",
     ErrorCode.STALE_OWNER: "stale owner",
     ErrorCode.WORKER_LEASE_UNAVAILABLE: "worker lease unavailable",
+    ErrorCode.WORKER_UNAVAILABLE: "command worker unavailable",
     ErrorCode.INVALID_CURSOR: "invalid cursor",
     ErrorCode.INVALID_SEARCH_QUERY: "invalid search query",
     ErrorCode.NOT_FOUND: "not found",

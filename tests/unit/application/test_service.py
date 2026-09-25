@@ -202,6 +202,40 @@ async def test_submit_turn_idempotency() -> None:
 
 
 @pytest.mark.asyncio
+async def test_new_commands_are_refused_while_worker_lease_is_lost() -> None:
+    service, p, _pub = _service()
+    config = HarnessConfiguration(kind=HarnessKind.GROK, working_directory="/tmp/ws")
+    h = await service.create_harness("owner", name="h", configuration=config)
+    cid = (await service.create_conversation("owner", h.id)).detail.conversation.id
+    await service.start("worker-1")
+    assert service.coordinator.ready_for_work is True
+    await service.coordinator._on_worker_lease_lost()  # pyright: ignore[reportPrivateUsage]
+
+    with pytest.raises(DomainError) as exc:
+        await service.submit_turn("owner", cid, prompt="hello", idempotency_key="k1")
+    assert exc.value.code is ErrorCode.WORKER_UNAVAILABLE
+    assert exc.value.details["readiness"]["worker_lease"] is False
+    assert exc.value.details["retry_after_seconds"] == RuntimePolicy().lease_renewal_interval
+    state = await p.get_snapshot(cid, "owner")
+    assert state.commands == {}
+
+    # A retry of a submission accepted before the outage still replays.
+    accepted = submit_turn(state, prompt="hello", idempotency_key="k0", now=_now())
+    assert accepted.command is not None
+    await p.commit_facade_mutation(
+        cid,
+        "owner",
+        state.conversation.version,
+        accepted.state,
+        accepted.events,
+        commands=(accepted.command,),
+    )
+    replay = await service.submit_turn("owner", cid, prompt="hello", idempotency_key="k0")
+    assert replay.command.id == accepted.command.id
+    await service.stop()
+
+
+@pytest.mark.asyncio
 async def test_interrupt_persists_command() -> None:
     service, p, _pub = _service()
     config = HarnessConfiguration(kind=HarnessKind.GROK, working_directory="/tmp/ws")
