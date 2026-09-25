@@ -7,8 +7,8 @@ audiences:
 tags:
   - type/architecture
   - audience/developer
-last_verified: 2026-09-23
-verified_against_commit: 81457b75e19d83c6f6840b9f1790fd52ac5cce33
+last_verified: 2026-09-25
+verified_against_commit: 3643af2
 ---
 
 # Provider Adapters
@@ -87,6 +87,14 @@ Implementation evidence: `tth-codex/src/tth_codex/harness/permissions.py` and
 real Git and the pinned Codex sandbox for ordinary and linked repositories,
 including denied protected-path, unrelated-directory, and network attempts.
 The recorded commit is the baseline for these uncommitted changes.
+
+Codex processes started together on a fresh `CODEX_HOME` race to create its
+SQLite state, and the losers exit. The Codex split owns one `CodexHomeGate`
+shared by every adapter: probes, session starts, and resumes each start their
+Codex process through it, one at a time until one succeeds, then concurrently.
+Implementation evidence: `tth-codex/src/tth_codex/harness/codex_home.py`,
+`adapter.py`, and `service.py`. Test evidence:
+`tth-codex/tests/harness/test_codex_home.py`.
 
 ## Related
 

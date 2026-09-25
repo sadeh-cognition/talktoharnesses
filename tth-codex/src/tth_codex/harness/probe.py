@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.metadata
+import logging
 import sys
 from typing import Any, cast
 
@@ -20,6 +21,8 @@ from tth_codex.harness.compatibility import (
     match_release,
 )
 from tth_codex.shared.effort import validate_effort
+
+logger = logging.getLogger(__name__)
 
 
 def _import_openai_codex() -> Any:
@@ -75,9 +78,10 @@ async def _discover_models(
         async with openai_codex.AsyncCodex(sdk_config) as client:
             response = await client.models()
     except Exception as exc:  # noqa: BLE001
+        logger.exception("Codex model discovery failed")
         raise DomainError(
             ErrorCode.PROVIDER_INCOMPATIBLE,
-            "Codex model discovery failed",
+            f"Codex model discovery failed: {type(exc).__name__}: {exc}",
         ) from exc
     data = getattr(response, "data", None)
     if not isinstance(data, list) or not data:

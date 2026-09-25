@@ -457,3 +457,10 @@ one-way shutdown. Until then a started service refuses new commands with the
 dedicated `503 worker_unavailable` and the renewal interval as `Retry-After`.
 Record the behavior and test evidence in
 [Runtime isolation architecture](architecture/runtime-isolation.md).
+
+## [2026-09-25] repair | Serialize first Codex starts on a fresh CODEX_HOME
+
+Against baseline `3643af2`, the Codex split starts every Codex process (probe,
+session start, resume) through one shared `CODEX_HOME` gate, so concurrent
+first starts no longer race to create its SQLite state. Record the behavior and
+test evidence in [Provider adapters](architecture/provider-adapters.md).

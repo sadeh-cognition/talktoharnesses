@@ -137,3 +137,26 @@ def test_import_and_runtime_version_helpers(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.undo()
     monkeypatch.setattr(importlib.metadata, "version", version)
     assert probe_mod._runtime_version() == "0.154.0"  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.asyncio
+async def test_discovery_failure_reports_cause() -> None:
+    class _FailingClient:
+        def __init__(self, _config: object) -> None:
+            pass
+
+        async def __aenter__(self) -> _FailingClient:
+            raise RuntimeError("failed to initialize sqlite state runtime")
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+    sdk = SimpleNamespace(__version__="0.154.0", AsyncCodex=_FailingClient, CodexConfig=_Config)
+
+    with pytest.raises(DomainError) as exc:
+        await probe_mod._discover_models(sdk, "/tmp")  # pyright: ignore[reportPrivateUsage]
+
+    assert exc.value.code is ErrorCode.PROVIDER_INCOMPATIBLE
+    assert exc.value.message == (
+        "Codex model discovery failed: RuntimeError: failed to initialize sqlite state runtime"
+    )

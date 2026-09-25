@@ -31,6 +31,7 @@ from tth_types.mcp import require_mcp_servers_supported
 from tth_types.split_api import CreateSessionRequest, ProbeRequest, ProbeResponse, SessionCreated
 
 from tth_codex.harness.adapter import CodexAdapter
+from tth_codex.harness.codex_home import CodexHomeGate
 from tth_codex.harness.compatibility import load_codex_compatibility
 from tth_codex.sessions import SessionEntry, get_session_store
 from tth_codex.shared.compatibility import (
@@ -44,12 +45,13 @@ from tth_codex.shared.policy import RuntimePolicy
 KIND = HarnessKind.CODEX
 
 _policy = RuntimePolicy()
+_codex_home_gate = CodexHomeGate()
 
 AdapterFactory = Callable[[], HarnessAdapter]
 
 
 def _default_adapter_factory() -> HarnessAdapter:
-    return CodexAdapter()
+    return CodexAdapter(home_gate=_codex_home_gate)
 
 
 def _resolve_adapter_factory() -> AdapterFactory:

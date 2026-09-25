@@ -28,6 +28,7 @@ from tth_types.harness import (
 )
 from tth_types.mcp import codex_mcp_overrides
 
+from tth_codex.harness.codex_home import CodexHomeGate
 from tth_codex.harness.compatibility import (
     CodexReleaseRecord,
     enforce_published_operation,
@@ -191,7 +192,12 @@ def _build_broker_async_codex(
 
 
 class CodexAdapter:
-    """SDK-managed Codex adapter. One instance per conversation runtime."""
+    """SDK-managed Codex adapter. One instance per conversation runtime.
+
+    Every Codex process this adapter starts, for its probe or its session,
+    passes through ``home_gate``. The split shares one gate across adapters;
+    the default gate covers only this adapter.
+    """
 
     kind: HarnessKind = HarnessKind.CODEX
     sdk_managed: ClassVar[Literal[True]] = True
@@ -200,8 +206,10 @@ class CodexAdapter:
         self,
         *,
         client_factory: ClientFactory | None = None,
+        home_gate: CodexHomeGate | None = None,
     ) -> None:
         self._client_factory = client_factory
+        self._home_gate = home_gate or CodexHomeGate()
         self._client: Any | None = None
         self._thread: Any | None = None
         self._turn_handle: Any | None = None
@@ -231,7 +239,8 @@ class CodexAdapter:
         return self._normalizer.export_seen()
 
     async def probe(self, config: HarnessConfiguration) -> HarnessCapabilities:
-        caps, release = await probe_codex(config)
+        async with self._home_gate.start():
+            caps, release = await probe_codex(config)
         self._capabilities = caps
         self._release = release
         return caps
@@ -442,6 +451,11 @@ class CodexAdapter:
         yolo = configuration.yolo if configuration is not None else False
         config_overrides = codex_mcp_overrides(configuration) if configuration is not None else ()
         self._loop = asyncio.get_running_loop()
+        async with self._home_gate.start():
+            self._client = await self._open_client(yolo=yolo, config_overrides=config_overrides)
+
+    async def _open_client(self, *, yolo: bool, config_overrides: tuple[str, ...]) -> Any:
+        """Build the Codex client and start its process."""
         if self._client_factory is not None:
             client = self._client_factory()
         else:
@@ -468,7 +482,7 @@ class CodexAdapter:
                 started = start()
                 if asyncio.iscoroutine(started):
                     await started
-        self._client = client
+        return client
 
     def _approval_handler(
         self,
