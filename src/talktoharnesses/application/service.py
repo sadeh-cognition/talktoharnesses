@@ -105,6 +105,16 @@ from talktoharnesses.sandbox_policies import SandboxPolicyStore
 
 logger = logging.getLogger(__name__)
 
+# Removes a configuration's sandbox containers, keeping its session volumes;
+# False while another runtime still uses them.
+SandboxStopper = Callable[[HarnessConfiguration], Awaitable[bool]]
+
+
+async def _no_sandbox(configuration: HarnessConfiguration) -> bool:
+    """Without a sandbox layer there is nothing to stop."""
+    del configuration
+    return False
+
 
 def _turn_projection(turn: Turn) -> TurnProjection:
     return TurnProjection(
@@ -148,8 +158,10 @@ class TalkToHarnessesService:
         fault_callback: FaultCallback = None,
         readiness_adapter_factory: ProbeAdapterFactory | None = None,
         sandbox_policies: SandboxPolicyStore | None = None,
+        stop_sandbox: SandboxStopper = _no_sandbox,
     ) -> None:
         self._sandbox_policies = sandbox_policies
+        self._stop_sandbox = stop_sandbox
         self._persistence = persistence
         self._registry = registry
         self._publisher = publisher
@@ -929,7 +941,9 @@ class TalkToHarnessesService:
         await self._publish(events)
         return CommandProjection.from_command(result.command)
 
-    async def close_runtime(self, owner_id: str, conversation_id: UUID) -> None:
+    async def close_runtime(
+        self, owner_id: str, conversation_id: UUID, *, release_sandbox: bool = False
+    ) -> None:
         """Release the idle conversation's live runtime; the next turn resumes it.
 
         History and the native session id are kept. Refused while a turn is
@@ -940,6 +954,11 @@ class TalkToHarnessesService:
         Runtimes are per worker and are not transferred, so a close that lands
         on a worker other than the one holding the conversation lease is
         refused rather than reported as done.
+
+        ``release_sandbox`` then also stops the conversation's sandbox scope,
+        whether or not this worker still held a runtime: its containers and
+        network go, its volumes stay, so the next turn still resumes natively.
+        A scope another runtime in this process uses is kept.
         """
         state = await self._persistence.get_snapshot(conversation_id, owner_id)
         if not runtime_idle(state):
@@ -948,12 +967,19 @@ class TalkToHarnessesService:
                 "conversation is not idle",
                 details={"conversation_id": str(conversation_id)},
             )
-        if await self._runtime.close_idle(conversation_id, reason="client_close"):
-            return
-        # No runtime here. Idempotent no-op unless another live worker still
-        # runs one: closes and reaps persist the process exit, so a starting or
-        # running incarnation under a live foreign lease is a runtime we cannot
-        # reach.
+        if not await self._runtime.close_idle(conversation_id, reason="client_close"):
+            await self._refuse_foreign_runtime(conversation_id)
+        if release_sandbox and state.binding is not None:
+            await self._stop_conversation_sandbox(conversation_id, state.binding.configuration)
+
+    async def _refuse_foreign_runtime(self, conversation_id: UUID) -> None:
+        """Refuse a close whose runtime another live worker still runs.
+
+        This worker holds no runtime for the conversation, so the close is an
+        idempotent no-op unless another worker does: closes and reaps persist
+        the process exit, so a starting or running incarnation under a live
+        foreign lease is a runtime this worker cannot reach.
+        """
         if not await self._persistence.has_live_process(conversation_id):
             return
         ownership = await self._persistence.get_conversation_ownership(conversation_id)
@@ -971,6 +997,19 @@ class TalkToHarnessesService:
                 "reason": "runtime_owned_by_other_worker",
             },
         )
+
+    async def _stop_conversation_sandbox(
+        self, conversation_id: UUID, configuration: HarnessConfiguration
+    ) -> None:
+        """Best effort: the scope reaper stops what a failure here leaves running."""
+        try:
+            stopped = await self._stop_sandbox(configuration)
+        except Exception:
+            logger.warning(
+                "sandbox stop failed for conversation %s", conversation_id, exc_info=True
+            )
+            return
+        logger.info("sandbox stop for conversation %s: stopped=%s", conversation_id, stopped)
 
     async def interrupt(
         self,

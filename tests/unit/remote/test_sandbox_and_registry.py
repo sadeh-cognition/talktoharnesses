@@ -1124,34 +1124,32 @@ def test_reconcile_recreates_container_when_start_fails(
     [
         ("driver failed: port is already allocated", "port_conflict"),
         ("invalid mount config for type bind", "container_start_failed"),
+        ("all predefined address pools have been fully subnetted", "network_pool_exhausted"),
     ],
 )
-def test_ensure_container_maps_run_failures_to_reasons(
+async def test_preparation_maps_docker_failures_to_reasons(
     monkeypatch: pytest.MonkeyPatch,
     error_message: str,
     reason: str,
 ) -> None:
     from docker.errors import APIError
 
-    def fake_docker_client(kind: HarnessKind) -> Any:
-        return SimpleNamespace()
-
     manager = SandboxManager(SandboxConfig.from_env({}))
-    monkeypatch.setattr(manager, "_docker_client", fake_docker_client)
 
-    def failing_reconcile(*args: Any, **kwargs: Any) -> None:
+    def image_present(kind: HarnessKind) -> None:
+        del kind
+
+    def failing_container(kind: HarnessKind, token: str) -> None:
         raise APIError(error_message)
 
-    monkeypatch.setattr(manager, "_reconcile_container", failing_reconcile)
-    _skip_rtk_seeding(monkeypatch)
+    monkeypatch.setattr(manager, "_ensure_image", image_present)
+    monkeypatch.setattr(manager, "_ensure_container", failing_container)
 
     with pytest.raises(DomainError) as excinfo:
-        manager._ensure_container(  # pyright: ignore[reportPrivateUsage]
-            HarnessKind.GROK, "tok"
-        )
+        await manager._prepare(HarnessKind.GROK)  # pyright: ignore[reportPrivateUsage]
 
     assert excinfo.value.code is ErrorCode.SANDBOX_UNAVAILABLE
-    assert excinfo.value.details["reason"] == reason
+    assert excinfo.value.details == {"kind": "grok", "reason": reason}
 
 
 def test_reconcile_recreates_container_whose_image_was_pruned(

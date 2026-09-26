@@ -87,7 +87,9 @@ images with `deploy/build-splits.sh` avoids the first-use build wait; while a
 build or boot is still in progress a request fails with `sandbox_preparing`
 (retry shortly), and unrecoverable sandbox failures surface as
 `sandbox_unavailable` with an actionable message (Docker unreachable, build
-failed, missing credential file, port in use, or health timeout). Background
+failed, missing credential file, port in use, no free Docker network address
+ranges, or health timeout). Other unexpected startup failures surface as
+`runtime_start_failed`; the server log has the details. Background
 readiness probing never spawns or builds — it only reattaches to sandboxes
 that are already running.
 

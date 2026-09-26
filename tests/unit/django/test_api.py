@@ -630,6 +630,10 @@ def test_close_runtime_route(service: TalkToHarnessesService, auth_header: str, 
     ok = client.post(path, HTTP_AUTHORIZATION=auth_header)
     assert ok.status_code == 204, ok.content
     assert client.post(path, HTTP_AUTHORIZATION=auth_header).status_code == 204
+    released = client.post(path + "?release_sandbox=true", HTTP_AUTHORIZATION=auth_header)
+    assert released.status_code == 204, released.content
+    invalid = client.post(path + "?release_sandbox=maybe", HTTP_AUTHORIZATION=auth_header)
+    assert invalid.status_code == 422, invalid.content
 
     # A queued turn counts as busy: the runtime is about to be needed.
     asyncio.run(service.submit_turn(owner, cid, prompt="go", idempotency_key="s1"))

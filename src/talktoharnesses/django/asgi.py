@@ -120,6 +120,7 @@ def _build_components() -> _Components:
         runtime,
         readiness_adapter_factory=partial(running_sandbox_adapter, sandboxes),
         sandbox_policies=policies,
+        stop_sandbox=sandboxes.stop,
     )
     return _Components(service, ScopeReaper(sandboxes, ScopeReaperPolicy.from_env()))
 

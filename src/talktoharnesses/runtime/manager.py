@@ -131,6 +131,19 @@ async def _await_start_resume(
     return await asyncio.wait_for(operation, timeout=timeout)
 
 
+def _startup_failed(conversation_id: UUID) -> DomainError:
+    """What an unexpected error while starting a runtime reaches callers as.
+
+    Raise it ``from`` the error, so the cause stays in logged tracebacks while
+    clients only ever see the fixed RUNTIME_START_FAILED wording.
+    """
+    return DomainError(
+        ErrorCode.RUNTIME_START_FAILED,
+        "runtime startup failed",
+        details={"conversation_id": str(conversation_id)},
+    )
+
+
 def _import_remote_seen(
     adapter: HarnessAdapter,
     seen_native_ids: frozenset[str],
@@ -868,7 +881,7 @@ class RuntimeManager:
                 fence=fence,
             )
             raise
-        except Exception:
+        except Exception as exc:
             await self._rollback_adapter_startup(
                 adapter,
                 conversation_id=conversation_id,
@@ -882,12 +895,12 @@ class RuntimeManager:
                 owner_id,
                 process_record,
                 handle,
-                ErrorCode.INVALID_STATE.value,
-                public_message(ErrorCode.INVALID_STATE),
+                ErrorCode.RUNTIME_START_FAILED.value,
+                public_message(ErrorCode.RUNTIME_START_FAILED),
                 worker_id=worker_id,
                 fence=fence,
             )
-            raise
+            raise _startup_failed(conversation_id) from exc
 
     async def _rollback_adapter_startup(
         self,
@@ -1111,7 +1124,7 @@ class RuntimeManager:
                 "candidate session start timed out",
                 details={"conversation_id": str(conversation_id)},
             ) from exc
-        except BaseException:
+        except BaseException as exc:
             await asyncio.shield(
                 self._abort_candidate_startup(
                     plan,
@@ -1121,7 +1134,9 @@ class RuntimeManager:
                     configuration=configuration,
                 )
             )
-            raise
+            if isinstance(exc, DomainError) or not isinstance(exc, Exception):
+                raise
+            raise _startup_failed(conversation_id) from exc
 
         if handle is None:
             handle = _remote_process_handle(plan.adapter)

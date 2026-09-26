@@ -5,6 +5,7 @@ from __future__ import annotations
 from unittest.mock import Mock
 
 from talktoharnesses.application.service import TalkToHarnessesService
+from talktoharnesses.application.worker_coordinator import WorkerPhase
 
 
 def mark_worker_ready(service: TalkToHarnessesService) -> None:
@@ -18,6 +19,6 @@ def mark_worker_ready(service: TalkToHarnessesService) -> None:
     coordinator._heartbeat_healthy = True  # pyright: ignore[reportPrivateUsage]
     coordinator._initial_recovery_complete = True  # pyright: ignore[reportPrivateUsage]
     coordinator._draining = False  # pyright: ignore[reportPrivateUsage]
-    coordinator._claims_healthy = True  # pyright: ignore[reportPrivateUsage]
+    coordinator._phase = WorkerPhase.RUNNING  # pyright: ignore[reportPrivateUsage]
     service.processor._running = True  # pyright: ignore[reportPrivateUsage]
     service.processor._claim_task = Mock(done=Mock(return_value=False))  # pyright: ignore[reportPrivateUsage]

@@ -875,10 +875,7 @@ class CommandProcessor:
     async def _fail_switch(self, command: Command, exc: BaseException) -> None:
         """Settle the switch command and publish only harness_switch_failed."""
         err = exc.code if isinstance(exc, DomainError) else ErrorCode.INVALID_STATE
-        logger.warning(
-            "harness switch failed code=%s",
-            err.value,
-        )
+        logger.warning("harness switch failed code=%s", err.value, exc_info=exc)
         code = err.value
         message = public_message(err, details=exc.details if isinstance(exc, DomainError) else None)
         state = await self._persistence.get_worker_snapshot(command.conversation_id)

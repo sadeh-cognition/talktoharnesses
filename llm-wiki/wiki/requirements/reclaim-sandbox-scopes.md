@@ -8,8 +8,8 @@ audiences:
 tags:
   - type/requirement
   - status/implemented
-last_verified: 2026-09-25
-verified_against_commit: b7fa653c44fc3ce5297fb0d8521b5f5a3c143311
+last_verified: 2026-09-26
+verified_against_commit: 37c8daf9e2d18fc70439c98f2222174b51f29463
 ---
 
 # Reclaim sandbox scopes
@@ -74,6 +74,15 @@ gateway and recreates a stopped one, since the gateway keeps its state in the
 bind-mounted state directory and a Docker Desktop restart can leave a stopped
 gateway unstartable.
 
+Clients can also stop a scope on demand.
+`POST /conversations/{id}/runtime/close?release_sandbox=true` closes the
+conversation's runtime as usual, then resolves the scope from the
+conversation's binding and stops it: the containers and network go, while the
+volumes, state directory and row stay. Because the scope comes from the
+binding, the stop also works when the idle reap already closed the runtime. A
+scope that another runtime in this process uses is kept. A failed stop is
+only logged; the reaper stops the scope later.
+
 Settings: `TTH_SANDBOX_REAPER=0` disables reclaiming;
 `TTH_SANDBOX_REAP_INTERVAL_SECONDS` (default 600),
 `TTH_SANDBOX_CONTAINER_IDLE_SECONDS` (default 86400) and
@@ -84,12 +93,13 @@ sandboxes.
 ## Gap
 
 In-use tracking is per process. With several proxy processes sharing a state
-root, a scope used only by another process is judged by its `last-used` file.
-Docker resources of scopes whose state directory is gone are left for the
-operator, and so are sandbox rows without a state directory. Lock files are
-never removed. There is no API to release a scope explicitly; clients rely on
-the idle periods and on deleted worktrees. The reaper has not been exercised
-by a live Docker gate.
+root, the reaper judges a scope used only by another process by its
+`last-used` file, but an on-demand stop cannot see that use and removes the
+other process's containers under its live runtime. Docker resources of scopes
+whose state directory is gone are left for the operator, and so are sandbox
+rows without a state directory. Lock files are never removed. Scopes that no
+client stops still rely on the idle periods and on deleted worktrees. The
+reaper has not been exercised by a live Docker gate.
 
 ## Acceptance criteria
 
@@ -109,7 +119,11 @@ by a live Docker gate.
 - `src/talktoharnesses/remote/scope_reaper.py`: policy, fact gathering, the
   pure `decide` and the loop
 - `src/talktoharnesses/remote/scoped_sandboxes.py`: `owned_scopes`,
-  `touch_in_use` and the atomic `reclaim`
+  `touch_in_use`, the atomic `reclaim`, the on-demand `stop` and the Docker
+  client factory the reaper shares
+- `src/talktoharnesses/application/service.py`: `close_runtime` stopping the
+  binding's scope; `src/talktoharnesses/django/api/routes.py` and
+  `src/talktoharnesses/client.py`: the `release_sandbox` query parameter
 - `src/talktoharnesses/remote/isolated_sandbox.py`: `acquire`, `release`,
   `in_use`, layout-based naming and the gateway start fallback
 - `src/talktoharnesses/remote/adapter.py`: the adapter's scope lease
@@ -130,6 +144,7 @@ associated uncommitted worktree changes.
 - purges on a missing worktree and after the purge period, and purges
   disabled with `0`
 - scopes in use, released scopes, and use recorded while reclaiming is off
+- on-demand stops that keep volumes, state and row, and refuse scopes in use
 - scopes owned by another state root, symlinks and foreign names
 - retrying a failed purge, and passes when Docker is unreachable
 - resolution waiting until a reclaim has deleted the row
@@ -144,8 +159,12 @@ The existing tests also cover:
 - `tests/unit/remote/test_mcp_relay.py`: stopping a relay
 - `tests/unit/django/test_sandbox_store.py`: row deletion
 - `tests/unit/django/test_asgi.py`: lifespan wiring and the policy settings
+- `tests/unit/application/test_service.py`: stopping the scope on close, after
+  the runtime is already gone, and surviving a failed stop
+- `tests/unit/django/test_api.py` and `tests/unit/test_client.py`: the
+  `release_sandbox` query parameter
 
-The proxy suite passes 912 tests outside `tests/live` with 91.65% coverage,
+The proxy suite passes 936 tests outside `tests/live` with 91.86% coverage,
 and lint passes.
 
 ## Related

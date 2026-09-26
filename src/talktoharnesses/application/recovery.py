@@ -91,6 +91,15 @@ def _resumable_native(state: ConversationState, *, supports_resume: bool) -> boo
     return not binding.requires_session_recreation
 
 
+def resume_support_matters(state: ConversationState) -> bool:
+    """True when classifying ``state`` depends on whether its harness supports resume.
+
+    Only live work with a native session to resume can resume natively, so
+    every other conversation classifies the same either way.
+    """
+    return _has_live_work(state) and _resumable_native(state, supports_resume=True)
+
+
 def _ambiguous_delivery(command: Command) -> bool:
     if command.status is CommandStatus.DELIVERY_STARTED:
         return True

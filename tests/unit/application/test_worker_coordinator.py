@@ -341,6 +341,8 @@ async def test_apply_native_resume_success() -> None:
         attempt_id=None,
         trigger=RecoveryTrigger.STARTUP,
     )
+    # Resuming depends on the harness's capabilities, so the sandbox is probed.
+    runtime.prepare_launch_snapshot.assert_awaited_once()
     runtime.resume_for_recovery.assert_awaited_once()
     resume_await = runtime.resume_for_recovery.await_args
     assert resume_await is not None
@@ -729,3 +731,141 @@ async def test_native_resume_without_native_session_returns_false_path() -> None
         trigger=RecoveryTrigger.STARTUP,
     )
     runtime.recovery_handoff_fallback.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_idle_conversation_recovery_does_not_probe_its_sandbox() -> None:
+    persistence = MemoryPersistence()
+    conversation_id = uuid4()
+    binding = ConversationHarnessBinding(
+        conversation_id=conversation_id,
+        kind=HarnessKind.GROK,
+        configuration=HarnessConfiguration(kind=HarnessKind.GROK, working_directory="/tmp/ws"),
+        native_session_id="native-1",
+        launch_snapshot=_launch(),
+        created_at=_now(),
+    )
+    persistence.seed(
+        new_conversation_state(
+            owner_id="owner", now=_now(), binding=binding, conversation_id=conversation_id
+        )
+    )
+    coordinator, _, runtime = _coordinator(persistence)
+    fence = _own(coordinator, persistence, conversation_id)
+    runtime.prepare_launch_snapshot = AsyncMock(return_value=_launch())  # type: ignore[method-assign]
+
+    await coordinator._recover_owned(  # pyright: ignore[reportPrivateUsage]
+        conversation_id, fence, attempt_id=None, trigger=RecoveryTrigger.TAKEOVER
+    )
+
+    # Probing prepares the sandbox; an idle conversation must not restart it.
+    runtime.prepare_launch_snapshot.assert_not_awaited()
+
+
+class _BlockedClaims:
+    """Stands in for claiming expired conversations; blocks until released."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.claiming = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def __call__(
+        self, worker_id: str, limit: int, *, lease_duration: float, trigger: str
+    ) -> list[object]:
+        self.calls += 1
+        self.claiming.set()
+        await self.release.wait()
+        return []
+
+
+async def _started_worker(policy: RuntimePolicy) -> tuple[WorkerCoordinator, MemoryPersistence]:
+    """A worker past startup recovery, so its heartbeat runs takeover recovery."""
+    coordinator, persistence, _ = _coordinator(policy=policy)
+    await coordinator.acquire_and_heartbeat("worker-a")
+    await coordinator.run_initial_recovery()
+    return coordinator, persistence
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_keeps_renewing_while_a_recovery_runs() -> None:
+    coordinator, persistence = await _started_worker(RuntimePolicy(lease_renewal_interval=0.01))
+    claims = _BlockedClaims()
+    persistence.claim_expired_conversations = claims  # type: ignore[method-assign]
+    renew = AsyncMock(wraps=persistence.renew_worker_lease)
+    persistence.renew_worker_lease = renew  # type: ignore[method-assign]
+    await asyncio.wait_for(claims.claiming.wait(), timeout=3)
+    renewed = renew.await_count
+
+    # A recovery longer than a lease must not stop the renewals that keep
+    # the leases it claims, and the heartbeat starts no second recovery.
+    await _wait_until(lambda: renew.await_count >= renewed + 3)
+    assert claims.calls == 1
+    recovery = coordinator._recovery_task  # pyright: ignore[reportPrivateUsage]
+    assert recovery is not None
+
+    await coordinator.finish_shutdown()
+    assert recovery.cancelled()
+
+
+@pytest.mark.asyncio
+async def test_losing_the_worker_lease_stops_a_running_recovery() -> None:
+    coordinator, persistence = await _started_worker(RuntimePolicy(lease_renewal_interval=0.01))
+    claims = _BlockedClaims()
+    persistence.claim_expired_conversations = claims  # type: ignore[method-assign]
+    await asyncio.wait_for(claims.claiming.wait(), timeout=3)
+    recovery = coordinator._recovery_task  # pyright: ignore[reportPrivateUsage]
+    assert recovery is not None
+
+    await coordinator._on_worker_lease_lost()  # pyright: ignore[reportPrivateUsage]
+
+    assert recovery.cancelled()
+    await coordinator.finish_shutdown()
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_starts_takeover_recovery_only_after_startup_recovery() -> None:
+    coordinator, persistence, _ = _coordinator(policy=RuntimePolicy(lease_renewal_interval=0.01))
+    claim = persistence.claim_expired_conversations
+    triggers: list[str] = []
+
+    async def recording_claim(
+        worker_id: str, limit: int, *, lease_duration: float, trigger: str
+    ) -> Sequence[object]:
+        triggers.append(trigger)
+        return await claim(worker_id, limit, lease_duration=lease_duration, trigger=trigger)
+
+    persistence.claim_expired_conversations = recording_claim  # type: ignore[method-assign]
+    await coordinator.acquire_and_heartbeat("worker-a")
+    await asyncio.sleep(0.05)
+    # Startup recovery claims first, so nothing races it for capacity.
+    assert triggers == []
+
+    await coordinator.run_initial_recovery()
+    await _wait_until(lambda: RecoveryTrigger.TAKEOVER.value in triggers)
+
+    assert triggers[0] == RecoveryTrigger.STARTUP.value
+    await coordinator.finish_shutdown()
+
+
+@pytest.mark.asyncio
+async def test_a_drain_stops_recovery_between_batches() -> None:
+    coordinator, persistence, _ = _coordinator()
+    coordinator._worker_id = "worker-a"  # pyright: ignore[reportPrivateUsage]
+    coordinator._processor.initialize_worker("worker-a")  # pyright: ignore[reportPrivateUsage]
+    claim = AsyncMock(
+        return_value=[SimpleNamespace(conversation_id=uuid4(), fence=1, recovery_attempt_id=None)]
+    )
+    persistence.claim_expired_conversations = claim  # type: ignore[method-assign]
+
+    async def shutdown_begins(*args: object, **kwargs: object) -> None:
+        coordinator._draining = True  # pyright: ignore[reportPrivateUsage]
+
+    coordinator._recover_owned = shutdown_begins  # type: ignore[method-assign]
+
+    await coordinator._recover_until_empty(  # pyright: ignore[reportPrivateUsage]
+        trigger=RecoveryTrigger.TAKEOVER
+    )
+
+    claim.assert_awaited_once()
+    assert coordinator.initial_recovery_complete is False

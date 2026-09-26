@@ -8,11 +8,13 @@ import os
 import threading
 from pathlib import Path
 from typing import Any
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 from uuid import uuid4
 
 import pytest
 from docker.errors import APIError, NotFound
+from tth_types.enums import HarnessKind
+from tth_types.harness import HarnessConfiguration
 from tth_types.sandbox import SandboxPolicy, SandboxPolicyRef, SandboxPolicyRevision
 
 from talktoharnesses.remote import scope_layout
@@ -121,21 +123,21 @@ def _state(root: Path, name: str, *, mounted: Path, used: float) -> Path:
     return state
 
 
-def _manager(tmp_path: Path, store: FakeStore | None = None) -> ScopedSandboxManager:
+def _manager(
+    tmp_path: Path, store: FakeStore | None = None, *, docker: FakeDocker | None = None
+) -> ScopedSandboxManager:
+    """A manager whose reclaiming, and the reaper's passes, reach ``docker``."""
     return ScopedSandboxManager(
         SandboxConfig(),
         store=store or FakeStore(),
         policies=Mock(),
         state_root=tmp_path / "states",
+        client_factory=lambda: docker,
     )
 
 
-def _reaper(
-    manager: ScopedSandboxManager, docker: FakeDocker, policy: ScopeReaperPolicy | None = None
-) -> ScopeReaper:
-    return ScopeReaper(
-        manager, policy or ScopeReaperPolicy(), client_factory=lambda: docker, clock=lambda: NOW
-    )
+def _reaper(manager: ScopedSandboxManager, policy: ScopeReaperPolicy | None = None) -> ScopeReaper:
+    return ScopeReaper(manager, policy or ScopeReaperPolicy(), clock=lambda: NOW)
 
 
 def _instance(manager: ScopedSandboxManager, project: Path) -> IsolatedSandbox:
@@ -172,13 +174,13 @@ async def test_dead_scope_loses_containers_but_keeps_session_state(
     tmp_path: Path, project: Path, relays: list[Path]
 ) -> None:
     store = FakeStore(SCOPE)
-    manager = _manager(tmp_path, store)
     docker = FakeDocker()
+    manager = _manager(tmp_path, store, docker=docker)
     # A Docker Desktop restart left the split unstartable; its gateway runs on.
     docker.add_scope(SCOPE, main="exited", gateway="running")
     state = _state(manager.state_root, SCOPE, mounted=project, used=NOW - HOUR)
 
-    report = await _reaper(manager, docker).reap_once()
+    report = await _reaper(manager).reap_once()
 
     assert report == ReapReport(stopped=(SCOPE,))
     assert docker.containers.items == {} and docker.networks.items == {}
@@ -190,14 +192,14 @@ async def test_dead_scope_loses_containers_but_keeps_session_state(
 async def test_healthy_scope_keeps_its_containers_until_idle(
     tmp_path: Path, project: Path, relays: list[Path]
 ) -> None:
-    manager = _manager(tmp_path)
     docker = FakeDocker()
+    manager = _manager(tmp_path, docker=docker)
     docker.add_scope(SCOPE)
     _state(manager.state_root, SCOPE, mounted=project, used=NOW - HOUR)
     docker.add_scope(OTHER)
     _state(manager.state_root, OTHER, mounted=project, used=NOW - 2 * DAY)
 
-    report = await _reaper(manager, docker).reap_once()
+    report = await _reaper(manager).reap_once()
 
     assert report == ReapReport(stopped=(OTHER,))
     assert set(docker.containers.items) == {SCOPE, SCOPE + "-gateway"}
@@ -208,8 +210,8 @@ async def test_healthy_scope_keeps_its_containers_until_idle(
 async def test_recent_use_postpones_reaping(
     tmp_path: Path, project: Path, relays: list[Path]
 ) -> None:
-    manager = _manager(tmp_path)
     docker = FakeDocker()
+    manager = _manager(tmp_path, docker=docker)
     docker.add_scope(SCOPE)
     state = _state(manager.state_root, SCOPE, mounted=project, used=NOW - 2 * DAY)
     layout = ScopeLayout(SCOPE, manager.state_root)
@@ -217,7 +219,7 @@ async def test_recent_use_postpones_reaping(
     os.utime(layout.last_used_file, (NOW - HOUR, NOW - HOUR))
     os.utime(state, (NOW - 2 * DAY, NOW - 2 * DAY))
 
-    assert await _reaper(manager, docker).reap_once() == ReapReport()
+    assert await _reaper(manager).reap_once() == ReapReport()
     assert len(docker.containers.items) == 2
 
 
@@ -225,13 +227,13 @@ async def test_scope_whose_worktree_is_gone_is_purged(
     tmp_path: Path, project: Path, relays: list[Path]
 ) -> None:
     store = FakeStore(SCOPE)
-    manager = _manager(tmp_path, store)
     docker = FakeDocker()
+    manager = _manager(tmp_path, store, docker=docker)
     docker.add_scope(SCOPE)
     state = _state(manager.state_root, SCOPE, mounted=project, used=NOW - HOUR)
     project.rmdir()
 
-    report = await _reaper(manager, docker).reap_once()
+    report = await _reaper(manager).reap_once()
 
     assert report == ReapReport(purged=(SCOPE,))
     assert docker.containers.items == {}
@@ -245,17 +247,17 @@ async def test_scope_whose_worktree_is_gone_is_purged(
 async def test_purge_ttl_reclaims_session_state_unless_disabled(
     tmp_path: Path, project: Path, relays: list[Path]
 ) -> None:
-    manager = _manager(tmp_path)
     docker = FakeDocker()
+    manager = _manager(tmp_path, docker=docker)
     docker.add_scope(SCOPE, main=None, gateway=None)
     del docker.networks.items[SCOPE + "-network"]
     _state(manager.state_root, SCOPE, mounted=project, used=NOW - 100 * DAY)
 
-    kept = await _reaper(manager, docker, ScopeReaperPolicy(purge_idle=0)).reap_once()
+    kept = await _reaper(manager, ScopeReaperPolicy(purge_idle=0)).reap_once()
     assert kept == ReapReport()
     assert len(docker.volumes.items) == 2
 
-    purged = await _reaper(manager, docker).reap_once()
+    purged = await _reaper(manager).reap_once()
     assert purged == ReapReport(purged=(SCOPE,))
     assert docker.volumes.items == {}
 
@@ -263,8 +265,8 @@ async def test_purge_ttl_reclaims_session_state_unless_disabled(
 async def test_scope_in_use_is_kept_and_marked_used(
     tmp_path: Path, project: Path, relays: list[Path]
 ) -> None:
-    manager = _manager(tmp_path)
     docker = FakeDocker()
+    manager = _manager(tmp_path, docker=docker)
     docker.add_scope(SCOPE, main="exited")
     _state(manager.state_root, SCOPE, mounted=project, used=NOW - 200 * DAY)
     project.rmdir()
@@ -272,7 +274,7 @@ async def test_scope_in_use_is_kept_and_marked_used(
     adapter = object()
     instance.acquire(adapter)
     instance.layout.last_used_file.unlink()
-    reaper = _reaper(manager, docker)
+    reaper = _reaper(manager)
 
     assert await reaper.tick() == ReapReport()
     assert len(docker.containers.items) == 2
@@ -284,11 +286,54 @@ async def test_scope_in_use_is_kept_and_marked_used(
     assert SCOPE not in manager.instances
 
 
+async def test_stop_removes_a_configurations_containers_but_keeps_volumes_once_unused(
+    tmp_path: Path, project: Path, relays: list[Path]
+) -> None:
+    revision = SandboxPolicyRevision(
+        ref=SandboxPolicyRef(id=uuid4(), revision=1),
+        policy=SandboxPolicy(project_root=str(project)),
+    )
+    policies = Mock()
+    policies.resolve = AsyncMock(return_value=revision)
+    store = FakeStore()
+    docker = FakeDocker()
+    manager = ScopedSandboxManager(
+        SandboxConfig(mount_roots=(str(tmp_path),)),
+        store=store,
+        policies=policies,
+        state_root=tmp_path / "states",
+        client_factory=lambda: docker,
+    )
+    configuration = HarnessConfiguration(
+        kind=HarnessKind.CODEX, working_directory=str(project), sandbox_policy=revision.ref
+    )
+    scope = await manager.for_configuration(configuration)
+    docker.add_scope(scope.name)
+    store.rows.add(scope.name)
+    state = _state(manager.state_root, scope.name, mounted=project, used=NOW)
+    first, second = object(), object()
+    scope.acquire(first)
+    scope.acquire(second)
+
+    scope.release(first)
+    assert not await manager.stop(configuration)
+    assert len(docker.containers.items) == 2
+
+    scope.release(second)
+    assert await manager.stop(configuration)
+    assert docker.containers.items == {}
+    assert docker.networks.items == {}
+    assert sorted(docker.volumes.items) == [scope.name + "-data", scope.name + "-home"]
+    assert state.is_dir()
+    assert store.rows == {scope.name}
+    assert scope.name not in manager.instances
+
+
 async def test_disabled_reaper_marks_use_but_reclaims_nothing(
     tmp_path: Path, project: Path, relays: list[Path]
 ) -> None:
-    manager = _manager(tmp_path)
     docker = FakeDocker()
+    manager = _manager(tmp_path, docker=docker)
     docker.add_scope(SCOPE, main="exited")
     _state(manager.state_root, SCOPE, mounted=project, used=NOW - 200 * DAY)
     instance = _instance(manager, project)
@@ -296,7 +341,7 @@ async def test_disabled_reaper_marks_use_but_reclaims_nothing(
     instance.layout.last_used_file.unlink()
     policy = ScopeReaperPolicy(enabled=False)
 
-    assert await _reaper(manager, docker, policy).tick() == ReapReport()
+    assert await _reaper(manager, policy).tick() == ReapReport()
     assert len(docker.containers.items) == 2
     assert instance.layout.last_used_file.exists()
 
@@ -304,8 +349,8 @@ async def test_disabled_reaper_marks_use_but_reclaims_nothing(
 async def test_scopes_owned_elsewhere_are_never_touched(
     tmp_path: Path, project: Path, relays: list[Path]
 ) -> None:
-    manager = _manager(tmp_path)
     docker = FakeDocker()
+    manager = _manager(tmp_path, docker=docker)
     # Prepared under another state root, such as a live test's temporary one.
     docker.add_scope(OTHER, main="created", gateway=None)
     FakeResource(
@@ -315,7 +360,7 @@ async def test_scopes_owned_elsewhere_are_never_touched(
     foreign.mkdir(parents=True)
     (manager.state_root / SCOPE).symlink_to(project)
 
-    assert await _reaper(manager, docker).reap_once() == ReapReport()
+    assert await _reaper(manager).reap_once() == ReapReport()
     assert set(docker.containers.items) == {OTHER, "tth-codex"}
     assert len(docker.volumes.items) == 2
     assert foreign.is_dir() and project.is_dir()
@@ -325,13 +370,13 @@ async def test_failed_purge_keeps_the_row_for_the_next_pass(
     tmp_path: Path, project: Path, relays: list[Path]
 ) -> None:
     store = FakeStore(SCOPE)
-    manager = _manager(tmp_path, store)
     docker = FakeDocker()
+    manager = _manager(tmp_path, store, docker=docker)
     docker.add_scope(SCOPE)
     _state(manager.state_root, SCOPE, mounted=project, used=NOW - HOUR)
     project.rmdir()
     docker.volumes.items[SCOPE + "-home"].remove_error = APIError("volume is in use")
-    reaper = _reaper(manager, docker)
+    reaper = _reaper(manager)
 
     assert await reaper.reap_once() == ReapReport()
     assert store.rows == {SCOPE} and docker.containers.items == {}
@@ -345,7 +390,14 @@ async def test_unreachable_docker_skips_the_pass(tmp_path: Path) -> None:
     def unreachable() -> Any:
         raise RuntimeError("daemon down")
 
-    reaper = ScopeReaper(_manager(tmp_path), ScopeReaperPolicy(), client_factory=unreachable)
+    manager = ScopedSandboxManager(
+        SandboxConfig(),
+        store=FakeStore(),
+        policies=Mock(),
+        state_root=tmp_path / "states",
+        client_factory=unreachable,
+    )
+    reaper = ScopeReaper(manager, ScopeReaperPolicy())
 
     assert await reaper.reap_once() == ReapReport()
 
@@ -355,13 +407,12 @@ async def test_scope_resolution_waits_until_the_row_is_gone(
 ) -> None:
     store = FakeStore(SCOPE)
     store.deleting = asyncio.Event()
-    manager = _manager(tmp_path, store)
-    docker = FakeDocker()
+    manager = _manager(tmp_path, store, docker=FakeDocker())
 
-    reclaim = asyncio.create_task(manager.reclaim(SCOPE, docker, purge=True))
+    reclaim = asyncio.create_task(manager.reclaim(SCOPE, purge=True))
     while SCOPE not in manager._retiring:  # pyright: ignore[reportPrivateUsage]
         await asyncio.sleep(0)
-    assert not await manager.reclaim(SCOPE, docker, purge=True)
+    assert not await manager.reclaim(SCOPE, purge=True)
     waiter = asyncio.shield(manager._retiring[SCOPE])  # pyright: ignore[reportPrivateUsage]
     await asyncio.sleep(0.01)
     # Docker resources are gone, but the row is not: resolution still waits.

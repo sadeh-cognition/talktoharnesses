@@ -28,6 +28,9 @@ _PUBLIC_MESSAGES: Final[dict[ErrorCode, str]] = {
     ErrorCode.INVALID_EXECUTABLE: "invalid executable",
     ErrorCode.EXECUTABLE_OWNER_MISMATCH: "executable owner mismatch",
     ErrorCode.RUNTIME_TIMEOUT: "runtime timeout",
+    ErrorCode.RUNTIME_START_FAILED: (
+        "harness runtime failed to start; check TalkToHarnesses server logs"
+    ),
     ErrorCode.INVALID_STATE: "invalid state",
     ErrorCode.INTERACTION_ALREADY_RESOLVED: "interaction already resolved",
     ErrorCode.QUEUED_PROMPT_NOT_EDITABLE: "queued prompt not editable",
@@ -73,6 +76,10 @@ _SANDBOX_UNAVAILABLE_REASONS: Final[dict[str, str]] = {
     "port_conflict": "sandbox port is already in use on the TalkToHarnesses host",
     "container_start_failed": (
         "sandbox container failed to start; check TalkToHarnesses server logs"
+    ),
+    "network_pool_exhausted": (
+        "sandbox could not start: Docker has no free network address ranges; "
+        "remove idle sandboxes or widen Docker's default-address-pools"
     ),
 }
 

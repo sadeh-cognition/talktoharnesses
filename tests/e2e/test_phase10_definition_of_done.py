@@ -19,6 +19,7 @@ from tests.runtime.conftest import FakeAdapter
 
 from talktoharnesses.application.broker import InProcessCommittedEventBroker
 from talktoharnesses.application.service import TalkToHarnessesService
+from talktoharnesses.application.worker_coordinator import WorkerPhase
 from talktoharnesses.django import asgi as asgi_mod
 from talktoharnesses.django.asgi import reset_service_for_tests
 from talktoharnesses.django.auth import issue_token_sync, owner_id_for_user
@@ -162,7 +163,7 @@ def service(db: Any) -> Any:
     coordinator._heartbeat_healthy = True  # pyright: ignore[reportPrivateUsage]
     coordinator._initial_recovery_complete = True  # pyright: ignore[reportPrivateUsage]
     coordinator._draining = False  # pyright: ignore[reportPrivateUsage]
-    coordinator._claims_healthy = True  # pyright: ignore[reportPrivateUsage]
+    coordinator._phase = WorkerPhase.RUNNING  # pyright: ignore[reportPrivateUsage]
     svc.processor.initialize_worker("p10")
     svc.processor._running = True  # pyright: ignore[reportPrivateUsage]
     svc.processor._claims_enabled = True  # pyright: ignore[reportPrivateUsage]

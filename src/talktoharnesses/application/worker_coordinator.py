@@ -8,6 +8,7 @@ import logging
 import time
 from collections.abc import Callable
 from datetime import datetime
+from enum import Enum
 from typing import Literal
 from uuid import UUID
 
@@ -27,6 +28,7 @@ from talktoharnesses.application.recovery import (
     RecoveryDecisionKind,
     classify_conversation,
     is_switch_command,
+    resume_support_matters,
     turn_needs_interrupt_messages,
 )
 from talktoharnesses.domain.enums import (
@@ -66,6 +68,19 @@ def _detect_database_system() -> DatabaseSystem:
     return "sqlite"
 
 
+class WorkerPhase(Enum):
+    """Which recovery may run beside the heartbeat, and whether claims may run."""
+
+    # Startup recovery has not finished; the heartbeat starts no takeover
+    # recovery beside it.
+    STARTING = "starting"
+    # The heartbeat keeps one takeover recovery going.
+    RUNNING = "running"
+    # The worker lease was lost. Claims stay stopped until the takeover
+    # recovery that follows taking the lease back has finished.
+    LEASE_LOST = "lease_lost"
+
+
 class WorkerCoordinator:
     """Sole owner of the worker lease, fences, heartbeat, and recovery scan."""
 
@@ -94,11 +109,13 @@ class WorkerCoordinator:
         self._fences: dict[UUID, int] = {}
         self._attempt_ids: dict[UUID, UUID] = {}
         self._heartbeat_task: asyncio.Task[None] | None = None
+        # Takeover recovery runs beside the heartbeat, never on it.
+        self._recovery_task: asyncio.Task[None] | None = None
         self._initial_recovery_complete = False
         self._draining = False
         self._heartbeat_healthy = False
-        self._claims_healthy = True
         self._lease_healthy = False
+        self._phase = WorkerPhase.STARTING
 
     @property
     def worker_id(self) -> str | None:
@@ -122,7 +139,7 @@ class WorkerCoordinator:
 
     @property
     def claims_healthy(self) -> bool:
-        return self._claims_healthy and self._processor.claim_loop_healthy
+        return self._phase is not WorkerPhase.LEASE_LOST and self._processor.claim_loop_healthy
 
     @property
     def ready_for_work(self) -> bool:
@@ -170,7 +187,9 @@ class WorkerCoordinator:
         self._worker_id = worker_id
         self._draining = False
         self._initial_recovery_complete = False
-        self._mark_lease_acquired()
+        self._lease_healthy = True
+        self._heartbeat_healthy = True
+        self._phase = WorkerPhase.STARTING
         self._processor.set_claims_enabled(False)
         self._processor.initialize_worker(worker_id)
         if self._heartbeat_task is None or self._heartbeat_task.done():
@@ -202,6 +221,9 @@ class WorkerCoordinator:
                 attempt_id=attempt.id if attempt else None,
                 trigger=RecoveryTrigger.STARTUP,
             )
+        # A lease lost meanwhile keeps its phase: that takeover resumes claims.
+        if self._phase is WorkerPhase.STARTING:
+            self._phase = WorkerPhase.RUNNING
         obs.record_startup_recovery_duration(
             time.perf_counter() - started,
             database_system=self._database_system,
@@ -287,6 +309,7 @@ class WorkerCoordinator:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await task
+        await self._stop_recovery()
         self._heartbeat_healthy = False
 
         live = getattr(self._runtime, "_runtimes", {})
@@ -307,12 +330,22 @@ class WorkerCoordinator:
             self._lease_healthy = False
 
     async def _heartbeat_loop(self) -> None:
+        """Renew this worker's leases every interval, taking a lost worker lease back.
+
+        Recovery runs beside it (see :meth:`_ensure_recovery`), so a recovery
+        longer than a lease never holds up the renewals that keep the leases
+        it claims.
+        """
         assert self._worker_id is not None
         interval = self._policy.lease_renewal_interval
         while True:
             try:
                 if not self._lease_healthy and not self._draining:
-                    await self._reacquire_worker_lease()
+                    # Raises while another worker holds the lease.
+                    await self._persistence.acquire_worker_lease(
+                        self._worker_id,
+                        lease_duration=self._policy.lease_duration,
+                    )
                 await self._persistence.renew_worker_lease(
                     self._worker_id,
                     lease_duration=self._policy.lease_duration,
@@ -325,10 +358,8 @@ class WorkerCoordinator:
                 )
                 for item in lost:
                     await self._on_lost_lease(item.conversation_id)
-                if not self._draining and self._lease_healthy:
-                    claimed = await self._recover_batch(trigger=RecoveryTrigger.TAKEOVER)
-                    if not claimed and self._capacity_remaining() > 0:
-                        self._initial_recovery_complete = True
+                if not self._draining and self._phase is not WorkerPhase.STARTING:
+                    self._ensure_recovery()
             except DomainError as exc:
                 if exc.code is not ErrorCode.WORKER_LEASE_UNAVAILABLE:
                     logger.warning("worker heartbeat failed code=%s", exc.code.value)
@@ -348,9 +379,46 @@ class WorkerCoordinator:
                 self._heartbeat_healthy = False
             await asyncio.sleep(interval)
 
+    def _ensure_recovery(self) -> None:
+        """Start a takeover recovery unless one is still running."""
+        if self._recovery_task is None or self._recovery_task.done():
+            self._recovery_task = asyncio.create_task(
+                self._recover_expired(),
+                name=f"worker-recovery-{self._worker_id}",
+            )
+
+    async def _recover_expired(self) -> None:
+        """Recover expired conversations; after a lost worker lease, then resume claims.
+
+        A failed recovery is retried on the next heartbeat, and claims stopped
+        by a lost lease stay stopped until one finishes. Losing the lease again
+        cancels this task, so it never resumes claims without the lease.
+        """
+        try:
+            await self._recover_until_empty(trigger=RecoveryTrigger.TAKEOVER)
+        except Exception:
+            logger.exception("takeover recovery failed")
+            return
+        if self._phase is not WorkerPhase.LEASE_LOST or self._draining:
+            return
+        # The lease was taken back and what expired meanwhile is recovered:
+        # resume claims as startup does.
+        self._phase = WorkerPhase.RUNNING
+        self._processor.set_claims_enabled(True)
+        logger.warning("worker lease reacquired worker_id=%s", self._worker_id)
+
+    async def _stop_recovery(self) -> None:
+        task, self._recovery_task = self._recovery_task, None
+        if task is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
     async def _recover_until_empty(self, *, trigger: RecoveryTrigger) -> None:
-        """Recover expired conversations batch by batch until none remain or capacity is full."""
-        while self._capacity_remaining() > 0:
+        """Recover expired conversations batch by batch until none remain or capacity is full.
+
+        A drain stops it between batches without marking recovery complete.
+        """
+        while not self._draining and self._capacity_remaining() > 0:
             if not await self._recover_batch(trigger=trigger):
                 self._initial_recovery_complete = True
                 return
@@ -406,7 +474,12 @@ class WorkerCoordinator:
         ) as span:
             try:
                 state = await self._persistence.get_worker_snapshot(conversation_id)
-                supports_resume = await self._probe_supports_resume(state)
+                # Probing prepares the conversation's sandbox, starting its
+                # containers when they are stopped; skip it when the answer
+                # cannot change the decision.
+                supports_resume = resume_support_matters(state) and (
+                    await self._probe_supports_resume(state)
+                )
                 decisions = classify_conversation(
                     state,
                     now=self._clock(),
@@ -902,36 +975,13 @@ class WorkerCoordinator:
         with contextlib.suppress(Exception):
             await self._runtime.close(conversation_id, reason="lease_lost")
 
-    def _mark_lease_acquired(self) -> None:
-        self._lease_healthy = True
-        self._heartbeat_healthy = True
-        self._claims_healthy = True
-
-    async def _reacquire_worker_lease(self) -> None:
-        """Take back a lost worker lease, recover, and resume claims as startup does.
-
-        Raises while another worker holds the lease. The lease stays marked lost
-        until recovery finishes, so a failed attempt is retried on the next tick.
-        """
-        assert self._worker_id is not None
-        await self._persistence.acquire_worker_lease(
-            self._worker_id,
-            lease_duration=self._policy.lease_duration,
-        )
-        await self._recover_until_empty(trigger=RecoveryTrigger.TAKEOVER)
-        if self._draining:
-            # Shutdown began meanwhile; finish_shutdown releases the lease.
-            return
-        self._mark_lease_acquired()
-        self._processor.set_claims_enabled(True)
-        logger.warning("worker lease reacquired worker_id=%s", self._worker_id)
-
     async def _on_worker_lease_lost(self) -> None:
         self._lease_healthy = False
         self._heartbeat_healthy = False
-        self._claims_healthy = False
+        self._phase = WorkerPhase.LEASE_LOST
         self._initial_recovery_complete = False
         self._processor.set_claims_enabled(False)
+        await self._stop_recovery()
         for conversation_id in list(self._fences):
             await self._on_lost_lease(conversation_id)
         with contextlib.suppress(Exception):

@@ -399,8 +399,7 @@ class SandboxManager:
         token = record.split_token
         await self._save(record)
         try:
-            await asyncio.to_thread(self._ensure_image, kind)
-            await asyncio.to_thread(self._ensure_container, kind, token)
+            await self._start_container(kind, token)
             base_url = self._base_url(kind)
             record = record.model_copy(
                 update={"base_url": base_url, "host_port": self._port_for(kind)}
@@ -414,6 +413,22 @@ class SandboxManager:
         endpoint = SplitEndpoint(base_url=base_url, token=token, loopback_alias=None)
         self._endpoints[kind] = endpoint
         return endpoint
+
+    async def _start_container(self, kind: HarnessKind, token: str) -> None:
+        """Build the image when it is missing, then run the container.
+
+        Docker failures from either step become SANDBOX_UNAVAILABLE with a
+        classified reason; subclasses override only the blocking steps.
+        """
+        from docker.errors import DockerException
+
+        try:
+            await asyncio.to_thread(self._ensure_image, kind)
+            await asyncio.to_thread(self._ensure_container, kind, token)
+        except DockerException as exc:
+            raise docker_ops.docker_failure(
+                exc, name=self._container_name(kind), kind=kind
+            ) from exc
 
     def _base_url(self, kind: HarnessKind) -> str:
         return f"http://127.0.0.1:{self._port_for(kind)}"
@@ -584,50 +599,26 @@ class SandboxManager:
     def _ensure_container(self, kind: HarnessKind, token: str) -> None:
         """Blocking docker-py path; always called via asyncio.to_thread."""
         client = self._docker_client(kind)
-        from docker.errors import APIError, DockerException, NotFound
+        from docker.errors import NotFound
         from docker.types import Mount
 
         name = self._container_name(kind)
         image = self._image(kind)
         environment = self._environment(kind, token)
-        try:
-            # Idempotent; re-running also upgrades homes after an image bump.
-            sandbox_rtk.seed_rtk_config(
-                client, Mount, kind=kind, image=image, home_volume=f"{name}-home"
-            )
-            self._reconcile_container(
-                client,
-                Mount,
-                NotFound,
-                kind=kind,
-                name=name,
-                image=image,
-                environment=environment,
-                token=token,
-            )
-        except DomainError:
-            raise
-        except APIError as exc:
-            logger.warning("docker failed to run sandbox %s: %s", name, exc)
-            message = str(exc).lower()
-            port_conflict = (
-                "port is already allocated" in message or "address already in use" in message
-            )
-            raise DomainError(
-                ErrorCode.SANDBOX_UNAVAILABLE,
-                f"docker failed to run sandbox {name}: {exc}",
-                details={
-                    "kind": kind.value,
-                    "reason": "port_conflict" if port_conflict else "container_start_failed",
-                },
-            ) from exc
-        except DockerException as exc:
-            logger.warning("docker failed to run sandbox %s: %s", name, exc)
-            raise DomainError(
-                ErrorCode.SANDBOX_UNAVAILABLE,
-                f"docker failed to run sandbox {name}: {exc}",
-                details={"kind": kind.value, "reason": "container_start_failed"},
-            ) from exc
+        # Idempotent; re-running also upgrades homes after an image bump.
+        sandbox_rtk.seed_rtk_config(
+            client, Mount, kind=kind, image=image, home_volume=f"{name}-home"
+        )
+        self._reconcile_container(
+            client,
+            Mount,
+            NotFound,
+            kind=kind,
+            name=name,
+            image=image,
+            environment=environment,
+            token=token,
+        )
 
     def _reconcile_container(
         self,

@@ -15,6 +15,30 @@ verified_against_commit: 78003994d9fe93108ce5a6bc3591ab2e2ef904d9
 
 Entries are appended using `## [YYYY-MM-DD] operation | Title`.
 
+## [2026-09-26] implement | Stop sandbox scopes on runtime close and keep recovery leases alive
+
+- `POST /conversations/{id}/runtime/close?release_sandbox=true` also stops the
+  conversation's sandbox scope after the close: the containers and network go
+  and the volumes stay, unless another runtime in this process uses the scope.
+  The scope comes from the conversation's binding, so the stop also works
+  after the idle reap closed the runtime. The Python client exposes it as
+  `close_runtime(..., release_sandbox=True)`. Updated
+  [Reclaim sandbox scopes](requirements/reclaim-sandbox-scopes.md).
+- Sandbox preparation classifies Docker failures in one place. Exhausted
+  network address pools become `sandbox_unavailable` with reason
+  `network_pool_exhausted`. The policy gateway image build shares the split
+  image build runner, so a failed build logs its output and reports
+  `image_build_failed`.
+- The runtime manager reports unexpected start failures as
+  `runtime_start_failed`; other unclassified failures keep `invalid_state`.
+  Harness switch failures now log their cause.
+- The worker heartbeat only renews leases, and takeover recovery runs in its
+  own task, so a recovery longer than a lease no longer lets the leases it
+  claimed expire. Takeover recovery starts only after startup recovery, and a
+  drain stops any recovery between batches. Recovery asks a conversation's harness whether it supports
+  resume, which prepares its sandbox, only when the conversation has live
+  work and a native session to resume.
+
 ## [2026-09-21] fix | Keep authentication state local to each request
 
 - Replaced separate HTTP and SSE retry loops with one HTTPX authentication flow.

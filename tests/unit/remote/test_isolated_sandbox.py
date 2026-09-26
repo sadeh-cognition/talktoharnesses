@@ -1,14 +1,17 @@
 import json
+import subprocess
 from pathlib import Path
 from typing import Any
 from unittest.mock import Mock, PropertyMock
 from uuid import uuid4
 
 import pytest
-from docker.errors import ImageNotFound, NotFound
-from tth_types.enums import HarnessKind
+from docker.errors import APIError, ImageNotFound, NotFound
+from tth_types.enums import ErrorCode, HarnessKind
+from tth_types.errors import DomainError, public_message
 from tth_types.sandbox import SandboxPolicy, SandboxPolicyRef, SandboxPolicyRevision
 
+from talktoharnesses.remote import docker_ops
 from talktoharnesses.remote.isolated_sandbox import IsolatedSandbox
 from talktoharnesses.remote.sandbox import SandboxConfig
 
@@ -219,3 +222,106 @@ def test_launch_keeps_secrets_and_public_network_outside_agent(
         name="scope",
         environment=sandbox["environment"],
     )
+
+
+def _returning(client: Any) -> Any:
+    def docker_client(kind: HarnessKind) -> Any:
+        del kind
+        return client
+
+    return docker_client
+
+
+def _image_present(kind: HarnessKind) -> None:
+    del kind
+
+
+def _docker_cli(kind: HarnessKind | None = None) -> str:
+    del kind
+    return "docker"
+
+
+def _scope(tmp_path: Path) -> IsolatedSandbox:
+    root = tmp_path / "project"
+    root.mkdir()
+    revision = SandboxPolicyRevision(
+        ref=SandboxPolicyRef(id=uuid4(), revision=1),
+        policy=SandboxPolicy(project_root=str(root)),
+    )
+    auth = tmp_path / "auth.json"
+    auth.write_text('{"tokens":{"access_token":"real-secret"}}')
+    return IsolatedSandbox(
+        SandboxConfig(auth_files={HarnessKind.CODEX: str(auth)}),
+        store=None,
+        revision=revision,
+        name="scope",
+        roots=(str(root),),
+        state_root=tmp_path / "private",
+    )
+
+
+@pytest.mark.parametrize(
+    ("error_message", "reason"),
+    [
+        (
+            "all predefined address pools have been fully subnetted",
+            "network_pool_exhausted",
+        ),
+        ("driver failed: port is already allocated", "port_conflict"),
+        ("invalid network options", "container_start_failed"),
+    ],
+)
+async def test_docker_failures_become_sandbox_unavailable_reasons(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error_message: str, reason: str
+) -> None:
+    manager = _scope(tmp_path)
+    client: Any = Mock()
+    client.networks.get.side_effect = NotFound("scope-network")
+    client.networks.create.side_effect = APIError(error_message)
+    monkeypatch.setattr(manager, "_docker_client", _returning(client))
+    monkeypatch.setattr(manager, "_ensure_image", _image_present)
+
+    with pytest.raises(DomainError) as excinfo:
+        await manager._prepare(HarnessKind.CODEX)  # pyright: ignore[reportPrivateUsage]
+
+    assert excinfo.value.code is ErrorCode.SANDBOX_UNAVAILABLE
+    assert excinfo.value.details == {"kind": "codex", "reason": reason}
+
+
+def test_exhausted_network_pools_have_an_actionable_public_message() -> None:
+    message = public_message(
+        ErrorCode.SANDBOX_UNAVAILABLE, details={"reason": "network_pool_exhausted"}
+    )
+
+    assert "no free network address ranges" in message
+    assert "subnetted" not in message
+
+
+def test_failed_gateway_image_build_logs_its_output_and_keeps_it_from_clients(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    manager = _scope(tmp_path)
+    client: Any = Mock()
+    client.images.get.side_effect = ImageNotFound("tth-policy-gateway")
+    monkeypatch.setattr(manager, "_docker_client", _returning(client))
+    monkeypatch.setattr(docker_ops, "ensure_docker_cli_available", _docker_cli)
+
+    def failing_build(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(command, 1, stdout="", stderr="private output")
+
+    monkeypatch.setattr("talktoharnesses.remote.docker_ops.subprocess.run", failing_build)
+
+    with pytest.raises(DomainError) as excinfo:
+        manager._ensure_container(HarnessKind.CODEX, "control")  # pyright: ignore[reportPrivateUsage]
+
+    failure = excinfo.value
+    assert failure.code is ErrorCode.SANDBOX_UNAVAILABLE
+    assert failure.details == {
+        "kind": "codex",
+        "reason": "image_build_failed",
+        "build_tail": "private output",
+    }
+    assert "private output" not in failure.message
+    assert "private output" not in public_message(failure.code, details=failure.details)
+    # The operator reads the build output in the server log.
+    assert "private output" in caplog.text

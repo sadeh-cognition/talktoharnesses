@@ -978,6 +978,11 @@ async def test_turn_control_and_interactions(handler: RecordingHandler) -> None:
             assert handler.requests[-1].url.path.endswith(
                 f"/conversations/{_CONV_ID}/runtime/close"
             )
+            assert handler.requests[-1].url.params["release_sandbox"] == "false"
+
+            handler.respond(204)
+            await client.close_runtime(_CONV_ID, release_sandbox=True)
+            assert handler.requests[-1].url.params["release_sandbox"] == "true"
 
             handler.respond(200, Page[InteractionProjection](items=(_interaction(),)))
             interactions = await client.list_interactions(_CONV_ID)

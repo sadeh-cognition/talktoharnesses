@@ -133,6 +133,13 @@ Runtime tuning (all optional):
   address the close is also refused (same code, `reason:
   runtime_owned_by_other_worker`) when it lands on a worker that does not
   hold the conversation; retry, or let the idle reap release it.
+  `?release_sandbox=true` also stops the conversation's sandbox scope: its
+  containers and network go unless another runtime in this process uses
+  them. This works even after the idle reap closed the runtime. The volumes
+  stay, so the conversation still resumes; the next session recreates the
+  containers. A stop cannot see another proxy process using the same state
+  root, so with several processes it removes that process's containers too.
+  The Python client exposes it as `close_runtime(..., release_sandbox=True)`.
 
 The host control token is stored in the proxy database and differs from the
 split token inside the scope. Gateway control authenticates the host token and
@@ -156,6 +163,14 @@ per Agentbahn workflow run) adds a scope. The proxy reclaims them in two tiers:
   natively. They are purged when a host path the scope mounts no longer exists
   (its worktree was deleted), or after `TTH_SANDBOX_PURGE_IDLE_SECONDS`
   (default 7776000, 90 days; `0` keeps them).
+
+Each scope needs its own Docker network, and Docker's default address pools
+allow only about 30 bridge networks. Keep the container idle period short, or
+close finished runs with `release_sandbox`, when many worktrees get a scope;
+otherwise preparation fails with `sandbox_unavailable` (reason
+`network_pool_exhausted`).
+A longer-term fix is a wider `default-address-pools` in the Docker daemon
+settings, for example `{"base": "10.200.0.0/16", "size": 24}`.
 
 Scopes with a live harness runtime in this process are never reclaimed. The
 reaper passes every `TTH_SANDBOX_REAP_INTERVAL_SECONDS` (default 600, and

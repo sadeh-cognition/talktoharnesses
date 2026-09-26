@@ -743,6 +743,66 @@ async def test_close_runtime_releases_idle_runtime_and_keeps_history(tmp_path: P
     await service.close_runtime("owner", cid)
 
 
+class _RecordingStopper:
+    """Stands in for the sandbox layer's stop; records what it was asked to stop."""
+
+    def __init__(self, result: bool | Exception = True) -> None:
+        self.configurations: list[HarnessConfiguration] = []
+        self._result = result
+
+    async def __call__(self, configuration: HarnessConfiguration) -> bool:
+        self.configurations.append(configuration)
+        if isinstance(self._result, Exception):
+            raise self._result
+        return self._result
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("release_sandbox", [False, True])
+async def test_close_runtime_stops_the_sandbox_only_when_asked(
+    tmp_path: Path, release_sandbox: bool
+) -> None:
+    service, persistence, runtime, _adapter, cid = await _live_runtime_service(tmp_path)
+    stopper = _RecordingStopper()
+    service._stop_sandbox = stopper  # pyright: ignore[reportPrivateUsage]
+    state = await persistence.get_snapshot(cid, "owner")
+    assert state.binding is not None
+
+    await service.close_runtime("owner", cid, release_sandbox=release_sandbox)
+
+    assert runtime.get_runtime(cid) is None
+    assert stopper.configurations == ([state.binding.configuration] if release_sandbox else [])
+
+
+@pytest.mark.asyncio
+async def test_close_runtime_stops_the_sandbox_after_the_runtime_is_already_gone(
+    tmp_path: Path,
+) -> None:
+    # The idle reap, or an earlier close, released the runtime first; the
+    # sandbox is keyed by the binding, so asking for it still stops it.
+    service, _persistence, runtime, _adapter, cid = await _live_runtime_service(tmp_path)
+    stopper = _RecordingStopper()
+    service._stop_sandbox = stopper  # pyright: ignore[reportPrivateUsage]
+    await service.close_runtime("owner", cid)
+    assert runtime.get_runtime(cid) is None
+
+    await service.close_runtime("owner", cid, release_sandbox=True)
+
+    assert len(stopper.configurations) == 1
+
+
+@pytest.mark.asyncio
+async def test_close_runtime_survives_a_failed_sandbox_stop(tmp_path: Path) -> None:
+    service, _persistence, runtime, _adapter, cid = await _live_runtime_service(tmp_path)
+    stopper = _RecordingStopper(RuntimeError("docker unreachable"))
+    service._stop_sandbox = stopper  # pyright: ignore[reportPrivateUsage]
+
+    await service.close_runtime("owner", cid, release_sandbox=True)
+
+    assert runtime.get_runtime(cid) is None
+    assert len(stopper.configurations) == 1
+
+
 @pytest.mark.asyncio
 async def test_close_runtime_refuses_while_turn_is_active(tmp_path: Path) -> None:
     service, persistence, runtime, _adapter, cid = await _live_runtime_service(tmp_path)

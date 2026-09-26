@@ -11,7 +11,7 @@ import logging
 import os
 import shutil
 import subprocess
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
@@ -79,27 +79,55 @@ def ensure_docker_cli_available(kind: HarnessKind | None = None) -> str:
     return docker_bin
 
 
-def docker_client(kind: HarnessKind) -> Any:
-    """Blocking docker-py client factory with actionable failures."""
+def docker_client(kind: HarnessKind | None = None) -> Any:
+    """Blocking docker-py client factory with actionable failures.
+
+    ``kind`` names the sandbox that needs Docker in the failure details;
+    scope-wide work such as reclaiming has none.
+    """
+    details: dict[str, str] = {"reason": "docker_unavailable"}
+    if kind is not None:
+        details["kind"] = kind.value
     try:
         import docker
     except ImportError as exc:  # pragma: no cover - dependency is declared
         raise DomainError(
-            ErrorCode.SANDBOX_UNAVAILABLE,
-            "docker SDK is not installed",
-            details={"kind": kind.value, "reason": "docker_unavailable"},
+            ErrorCode.SANDBOX_UNAVAILABLE, "docker SDK is not installed", details=details
         ) from exc
     from docker.errors import DockerException
 
     try:
         return docker.from_env()
     except DockerException as exc:
-        logger.warning("docker daemon is unreachable for %s sandbox: %s", kind.value, exc)
+        logger.warning("docker daemon is unreachable (%s): %s", details.get("kind", "scope"), exc)
         raise DomainError(
             ErrorCode.SANDBOX_UNAVAILABLE,
             f"docker daemon is unreachable: {exc}",
-            details={"kind": kind.value, "reason": "docker_unavailable"},
+            details=details,
         ) from exc
+
+
+def docker_failure(exc: Exception, *, name: str, kind: HarnessKind) -> DomainError:
+    """Classify a docker-py failure while preparing sandbox ``name``.
+
+    The daemon's text stays in the internal message and the log; clients get
+    only the fixed wording of the ``reason``.
+    """
+    from docker.errors import APIError
+
+    logger.warning("docker failed to prepare sandbox %s: %s", name, exc)
+    reason = "container_start_failed"
+    if isinstance(exc, APIError):
+        message = str(exc).lower()
+        if "port is already allocated" in message or "address already in use" in message:
+            reason = "port_conflict"
+        elif "all predefined address pools have been fully subnetted" in message:
+            reason = "network_pool_exhausted"
+    return DomainError(
+        ErrorCode.SANDBOX_UNAVAILABLE,
+        f"docker failed to prepare sandbox {name}: {exc}",
+        details={"kind": kind.value, "reason": reason},
+    )
 
 
 def container_running(container_name: str) -> bool:
@@ -161,11 +189,28 @@ def build_image(kind: HarnessKind, image: str, *, root: Path, timeout: float) ->
         slug,
     ]
     env = {**os.environ, "HOST_UID": str(os.getuid()), "HOST_GID": str(os.getgid())}
+    run_image_build(command, kind=kind, image=image, cwd=root, timeout=timeout, env=env)
+
+
+def run_image_build(
+    command: Sequence[str],
+    *,
+    kind: HarnessKind,
+    image: str,
+    cwd: Path,
+    timeout: float,
+    env: Mapping[str, str] | None = None,
+) -> None:
+    """Blocking; run a docker CLI build of ``image``, logging its output on failure.
+
+    Failures become ``sandbox_unavailable`` with reason ``image_build_failed``;
+    the output's tail goes into the details, never into the message.
+    """
     logger.info("building sandbox image %s", image)
     try:
         result = subprocess.run(
-            command,
-            cwd=root,
+            list(command),
+            cwd=cwd,
             env=env,
             capture_output=True,
             text=True,
@@ -175,7 +220,7 @@ def build_image(kind: HarnessKind, image: str, *, root: Path, timeout: float) ->
     except subprocess.TimeoutExpired as exc:
         raise DomainError(
             ErrorCode.SANDBOX_UNAVAILABLE,
-            f"sandbox image build for {kind.value} timed out",
+            f"sandbox image build for {image} timed out",
             details={"kind": kind.value, "reason": "image_build_failed"},
         ) from exc
     if result.returncode != 0:
@@ -184,7 +229,7 @@ def build_image(kind: HarnessKind, image: str, *, root: Path, timeout: float) ->
         tail = "\n".join(output.splitlines()[-20:])
         raise DomainError(
             ErrorCode.SANDBOX_UNAVAILABLE,
-            f"sandbox image build failed for {kind.value}",
+            f"sandbox image build failed for {image}",
             details={
                 "kind": kind.value,
                 "reason": "image_build_failed",

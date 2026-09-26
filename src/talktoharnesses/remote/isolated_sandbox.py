@@ -7,7 +7,6 @@ import json
 import os
 import secrets
 import shutil
-import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -19,7 +18,7 @@ from tth_types.sandbox import SandboxPolicyRevision
 
 from talktoharnesses.gateway.credentials import CredentialVault, UnsupportedCredential, atomic_json
 from talktoharnesses.gateway.routes import GATEWAY_HOST
-from talktoharnesses.remote import sandbox_auth, sandbox_rtk
+from talktoharnesses.remote import docker_ops, sandbox_auth, sandbox_rtk
 from talktoharnesses.remote.mcp_relay import ROUTES_FILE, ensure_mcp_relay, register_mcp_servers
 from talktoharnesses.remote.sandbox import (
     SandboxConfig,
@@ -129,16 +128,15 @@ class IsolatedSandbox(SandboxManager):
     def _base_url(self, kind: HarnessKind) -> str:
         return f"http://127.0.0.1:{self.gateway_port}/split"
 
-    def _ensure_gateway_image(self, client: Any) -> None:
+    def _ensure_gateway_image(self, client: Any, kind: HarnessKind) -> None:
         from docker.errors import ImageNotFound
 
         try:
             client.images.get(self.gateway_image)
         except ImageNotFound:
-            root = Path(__file__).resolve().parents[3]
-            subprocess.run(
+            docker_ops.run_image_build(
                 [
-                    "docker",
+                    docker_ops.ensure_docker_cli_available(kind),
                     "build",
                     "-f",
                     "deploy/gateway.Dockerfile",
@@ -150,9 +148,9 @@ class IsolatedSandbox(SandboxManager):
                     f"GID={os.getgid()}",
                     ".",
                 ],
-                cwd=root,
-                check=True,
-                capture_output=True,
+                kind=kind,
+                image=self.gateway_image,
+                cwd=Path(__file__).resolve().parents[3],
                 timeout=self.config.build_timeout,
             )
 
@@ -163,7 +161,7 @@ class IsolatedSandbox(SandboxManager):
         with self.layout.locked():
             self.state.mkdir(parents=True, exist_ok=True, mode=0o700)
             client = self._docker_client(kind)
-            self._ensure_gateway_image(client)
+            self._ensure_gateway_image(client, kind)
             identity_path = self.state / "identity.json"
             if not identity_path.exists():
                 atomic_json(

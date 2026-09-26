@@ -531,6 +531,63 @@ async def test_sdk_client_is_closed_when_start_fails(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("candidate", [False, True])
+@pytest.mark.parametrize(
+    "failure",
+    [
+        RuntimeError("private startup detail"),
+        DomainError(ErrorCode.PROTOCOL_ERROR, "split refused the session"),
+    ],
+)
+async def test_unexpected_start_failures_become_runtime_start_failed(
+    candidate: bool,
+    failure: Exception,
+    short_policy: RuntimePolicy,
+    owned_python: Path,
+    workdir: Path,
+    now: datetime,
+) -> None:
+    class FailingSdkAdapter(FakeAdapter):
+        sdk_managed = True
+
+        async def start(self, request: StartSessionRequest):
+            del request
+            raise failure
+
+    store = MemoryPersistence()
+    state = make_state(now=now, workdir=workdir)
+    store.seed(state)
+    assert state.binding is not None
+    registry = AdapterRegistry()
+    registry.register(HarnessKind.OPENCODE, FailingSdkAdapter)
+    manager = RuntimeManager(store, registry, policy=short_policy)
+
+    with pytest.raises(DomainError) as exc_info:
+        if candidate:
+            await manager.start_candidate(
+                conversation_id=state.conversation.id,
+                owner_id="owner-1",
+                binding_id=uuid4(),
+                configuration=state.binding.configuration,
+            )
+        else:
+            await manager.start(
+                conversation_id=state.conversation.id,
+                owner_id="owner-1",
+                configuration=state.binding.configuration,
+            )
+
+    # Classified domain failures pass through; anything else is named here,
+    # so callers' catch-alls never have to guess that startup failed.
+    if isinstance(failure, DomainError):
+        assert exc_info.value is failure
+    else:
+        assert exc_info.value.code is ErrorCode.RUNTIME_START_FAILED
+        assert exc_info.value.__cause__ is failure
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_shutdown_cancels_overlapping_start(
     short_policy: RuntimePolicy,
     owned_python: Path,

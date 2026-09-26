@@ -116,12 +116,6 @@ def decide(scope: ScopeFacts, *, now: float, policy: ScopeReaperPolicy) -> Actio
     return None
 
 
-def _docker_client() -> Any:
-    import docker
-
-    return docker.from_env()
-
-
 class ScopeReaper:
     """Periodically reclaims idle and dead scopes of one scoped sandbox manager."""
 
@@ -130,12 +124,10 @@ class ScopeReaper:
         sandboxes: ScopedSandboxManager,
         policy: ScopeReaperPolicy,
         *,
-        client_factory: Callable[[], Any] = _docker_client,
         clock: Callable[[], float] = time.time,
     ) -> None:
         self.sandboxes = sandboxes
         self.policy = policy
-        self._client_factory = client_factory
         self._clock = clock
         self._task: asyncio.Task[None] | None = None
 
@@ -167,7 +159,7 @@ class ScopeReaper:
 
     async def reap_once(self) -> ReapReport:
         try:
-            client = await asyncio.to_thread(self._client_factory)
+            client = await asyncio.to_thread(self.sandboxes.client_factory)
         except Exception as exc:
             logger.warning("sandbox scope reaping skipped: docker is unreachable: %s", exc)
             return ReapReport()
@@ -181,7 +173,7 @@ class ScopeReaper:
                 continue
             try:
                 # Refused while this process uses the scope.
-                if not await self.sandboxes.reclaim(scope.name, client, purge=action == "purge"):
+                if not await self.sandboxes.reclaim(scope.name, purge=action == "purge"):
                     continue
             except Exception:
                 logger.warning("could not reclaim sandbox scope %s", scope.name, exc_info=True)

@@ -486,9 +486,17 @@ async def interrupt(request: HttpRequest, conversation_id: UUID) -> tuple[int, C
 
 
 @router.post("/conversations/{conversation_id}/runtime/close", response={204: None})
-async def close_runtime(request: HttpRequest, conversation_id: UUID) -> tuple[int, None]:
-    """Release the idle conversation's harness process; history is retained."""
-    await get_service().close_runtime(_owner(request), conversation_id)
+async def close_runtime(
+    request: HttpRequest, conversation_id: UUID, release_sandbox: bool = False
+) -> tuple[int, None]:
+    """Release the idle conversation's harness process; history is retained.
+
+    ``?release_sandbox=true`` also stops the conversation's sandbox scope once
+    no other runtime uses it: containers and network go, volumes stay.
+    """
+    await get_service().close_runtime(
+        _owner(request), conversation_id, release_sandbox=release_sandbox
+    )
     return 204, None
 
 

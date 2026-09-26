@@ -189,6 +189,7 @@ class ErrorCode(StrEnum):
     INVALID_EXECUTABLE = "invalid_executable"
     EXECUTABLE_OWNER_MISMATCH = "executable_owner_mismatch"
     RUNTIME_TIMEOUT = "runtime_timeout"
+    RUNTIME_START_FAILED = "runtime_start_failed"
     INVALID_STATE = "invalid_state"
     INTERACTION_ALREADY_RESOLVED = "interaction_already_resolved"
     QUEUED_PROMPT_NOT_EDITABLE = "queued_prompt_not_editable"

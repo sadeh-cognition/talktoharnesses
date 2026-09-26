@@ -929,13 +929,19 @@ class AsyncTalkToHarnessesClient:
         self,
         conversation_id: UUID,
         *,
+        release_sandbox: bool = False,
         timeout: _Timeout = _UNSET,
     ) -> None:
-        """Release the conversation's idle harness process; the next turn resumes it."""
+        """Release the conversation's idle harness process; the next turn resumes it.
+
+        ``release_sandbox`` also stops the conversation's sandbox once no other
+        runtime uses it; its volumes stay, so the conversation still resumes.
+        """
         await self._request(
             "POST",
             f"conversations/{conversation_id}/runtime/close",
             accepted=204,
+            params={"release_sandbox": release_sandbox},
             timeout=timeout,
         )
 

@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import os
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,7 @@ from tth_types.enums import ErrorCode
 from tth_types.errors import DomainError
 from tth_types.harness import HarnessConfiguration
 
+from talktoharnesses.remote import docker_ops
 from talktoharnesses.remote.isolated_sandbox import IsolatedSandbox
 from talktoharnesses.remote.sandbox import SandboxConfig, SandboxStore, SplitEndpoint
 from talktoharnesses.remote.sandbox_paths import repository_directory
@@ -28,10 +30,13 @@ class ScopedSandboxManager:
         store: SandboxStore,
         policies: SandboxPolicyStore,
         state_root: Path | None = None,
+        client_factory: Callable[[], Any] = docker_ops.docker_client,
     ) -> None:
         self.config = config
         self.store = store
         self.policies = policies
+        # Blocking; how reclaiming and the reaper reach Docker.
+        self.client_factory = client_factory
         self.state_root = (
             state_root
             or Path(
@@ -146,7 +151,20 @@ class ScopedSandboxManager:
         for layout in in_use:
             await asyncio.to_thread(layout.touch)
 
-    async def reclaim(self, name: str, client: Any, *, purge: bool) -> bool:
+    async def stop(self, configuration: HarnessConfiguration) -> bool:
+        """Remove the configuration's scope containers and network now; its session state stays.
+
+        The on-demand form of the reaper's stop: preparing the scope again
+        recreates the containers against the kept volumes, so native sessions
+        resume. Returns ``False`` while this process uses the scope; the reaper
+        then stops it once it has been idle long enough. Use by another proxy
+        process sharing this state root is not visible here, so its containers
+        are removed too.
+        """
+        scope = await self.for_configuration(configuration)
+        return await self.reclaim(scope.name, purge=False)
+
+    async def reclaim(self, name: str, *, purge: bool) -> bool:
         """Remove a scope's containers, and with ``purge`` its session state and row.
 
         Returns ``False`` without removing anything while this process uses
@@ -162,7 +180,7 @@ class ScopedSandboxManager:
         self._retiring[name] = done
         try:
             layout = ScopeLayout(name, self.state_root)
-            await asyncio.to_thread(layout.remove, client, purge=purge)
+            await asyncio.to_thread(lambda: layout.remove(self.client_factory(), purge=purge))
             if purge:
                 await self.store.delete(name)
         finally:

@@ -12,6 +12,7 @@ from talktoharnesses.application.recovery import (
     RecoveryDecisionKind,
     classify_command,
     classify_conversation,
+    resume_support_matters,
 )
 from talktoharnesses.domain.enums import (
     ActivityStatus,
@@ -381,3 +382,24 @@ def test_classify_conversation_live_without_command_resumes() -> None:
     assert len(decisions) == 1
     assert decisions[0].kind is RecoveryDecisionKind.NATIVE_RESUME
     assert decisions[0].turn_id == turn.id
+
+
+@pytest.mark.parametrize(
+    ("state_options", "matters"),
+    [
+        ({}, False),
+        ({"status": ConversationStatus.RUNNING}, True),
+        ({"status": ConversationStatus.RUNNING, "native_session_id": None}, False),
+        ({"status": ConversationStatus.RUNNING, "requires_recreation": True}, False),
+    ],
+)
+def test_resume_support_matters_only_for_live_work_with_a_native_session(
+    state_options: dict[str, Any], matters: bool
+) -> None:
+    state = _state(**state_options)
+
+    assert resume_support_matters(state) is matters
+    supported = classify_conversation(state, now=_now(), supports_resume=True)
+    unsupported = classify_conversation(state, now=_now(), supports_resume=False)
+    # Where it does not matter, recovery can skip asking the harness.
+    assert (supported != unsupported) is matters
