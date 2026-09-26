@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 from uuid import UUID
 
@@ -34,7 +35,7 @@ from talktoharnesses.domain.events import (
     TurnOutcomeUnknownPayload,
     UsageUpdatedPayload,
 )
-from talktoharnesses.domain.models import Command, PendingInteraction
+from talktoharnesses.domain.models import Command, PendingInteraction, SplitStreamCursor
 from talktoharnesses.domain.transitions import (
     ConversationState,
     TransitionResult,
@@ -66,21 +67,31 @@ class DispatchResult:
         self.terminal = terminal
 
 
+@dataclass(frozen=True, slots=True)
+class EventOrigin:
+    """Where a harness event came from, committed together with the event.
+
+    The native ids and stream offsets dedupe a replayed native history; the
+    split frame lets a reattach replay only the split frames not committed.
+    """
+
+    native_ids: tuple[str, ...] = ()
+    stream_offsets: tuple[str, ...] = ()
+    split_stream: SplitStreamCursor | None = None
+
+
+NO_ORIGIN = EventOrigin()
+
+
 def dispatch_harness_event(
     state: ConversationState,
     event: HarnessEvent,
     *,
     now: datetime,
-    native_ids: tuple[str, ...] = (),
-    stream_offsets: tuple[str, ...] = (),
+    origin: EventOrigin = NO_ORIGIN,
 ) -> DispatchResult:
     """Apply one harness event; returns updated state and durable envelopes."""
-    if native_ids or stream_offsets:
-        state = remember_native_ids(
-            state,
-            native_ids=native_ids,
-            stream_offsets=stream_offsets,
-        )
+    state = _remember_origin(state, origin)
 
     if isinstance(event, ConversationTitleUpdatedPayload):
         result = apply_native_title(state, title_native=event.title_native, now=now)
@@ -220,6 +231,18 @@ def apply_outcome_unknown(
         delivery_phase=delivery_phase,
         message=message,
     )
+
+
+def _remember_origin(state: ConversationState, origin: EventOrigin) -> ConversationState:
+    if origin.split_stream is not None and origin.split_stream != state.split_stream:
+        state = state.model_copy(update={"split_stream": origin.split_stream})
+    if origin.native_ids or origin.stream_offsets:
+        state = remember_native_ids(
+            state,
+            native_ids=origin.native_ids,
+            stream_offsets=origin.stream_offsets,
+        )
+    return state
 
 
 def _settled_commands(

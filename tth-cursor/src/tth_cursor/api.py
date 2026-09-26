@@ -7,6 +7,7 @@ python-mode strict validation would not).
 
 from __future__ import annotations
 
+from functools import partial
 from importlib.metadata import version as package_version
 from uuid import UUID
 
@@ -60,15 +61,14 @@ async def create_session_route(request: HttpRequest) -> tuple[int, SessionCreate
 
 
 @router.get("/sessions/{session_id}/events")
-async def session_events(request: HttpRequest, session_id: UUID) -> StreamingHttpResponse:
+async def session_events(
+    request: HttpRequest, session_id: UUID, after: int | None = None
+) -> StreamingHttpResponse:
+    """Stream the session's frames; ``after`` reattaches and replays from a frame id."""
     store = get_session_store()
-    entry = store.attach_stream(session_id)
-
-    async def close_stream() -> None:
-        await store.close(session_id, reason="stream_ended")
-
+    entry, replay = store.attach_stream(session_id, after=after)
     response = StreamingHttpResponse(
-        stream_frames(entry, close_stream),
+        stream_frames(entry, partial(store.release_stream, session_id), replay=replay),
         content_type="text/event-stream",
     )
     response["Cache-Control"] = "no-cache"

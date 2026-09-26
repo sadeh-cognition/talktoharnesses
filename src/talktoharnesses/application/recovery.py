@@ -30,6 +30,7 @@ class RecoveryDecisionKind(StrEnum):
     RECLAIM = "reclaim"
     OUTCOME_UNKNOWN = "outcome_unknown"
     NATIVE_RESUME = "native_resume"
+    REATTACH = "reattach"
     HANDOFF_FALLBACK = "handoff_fallback"
     INVARIANT_FAILURE = "invariant_failure"
     NO_ACTION = "no_action"
@@ -91,13 +92,65 @@ def _resumable_native(state: ConversationState, *, supports_resume: bool) -> boo
     return not binding.requires_session_recreation
 
 
-def resume_support_matters(state: ConversationState) -> bool:
-    """True when classifying ``state`` depends on whether its harness supports resume.
+def _reattachable(state: ConversationState) -> bool:
+    """A split cursor for the current binding exists, so the turn may still run."""
+    cursor = state.split_stream
+    binding = state.binding
+    return cursor is not None and binding is not None and cursor.binding_id == binding.id
 
-    Only live work with a native session to resume can resume natively, so
-    every other conversation classifies the same either way.
+
+def _continue_live_work(
+    state: ConversationState,
+    *,
+    supports_resume: bool,
+    phase: ObservedDeliveryPhase,
+    command_id: UUID | None,
+    turn_id: UUID | None,
+) -> RecoveryDecision:
+    """How recovery continues the live work a lost worker left behind.
+
+    A turn in flight survives only on the split session that outlived the
+    proxy: a native resume opens a fresh split session, which never runs it,
+    so without a reattach the turn is settled as lost.
     """
-    return _has_live_work(state) and _resumable_native(state, supports_resume=True)
+
+    def decide(
+        kind: RecoveryDecisionKind, action: RecoveryAction, reason: RecoveryReasonCode
+    ) -> RecoveryDecision:
+        return RecoveryDecision(
+            kind=kind,
+            action=action,
+            reason_code=reason,
+            observed_delivery_phase=phase,
+            command_id=command_id,
+            turn_id=turn_id,
+        )
+
+    resumable = _resumable_native(state, supports_resume=supports_resume)
+    if turn_needs_interrupt_messages(state, turn_id):
+        if _reattachable(state):
+            return decide(
+                RecoveryDecisionKind.REATTACH,
+                RecoveryAction.REATTACH,
+                RecoveryReasonCode.SESSION_REATTACHED,
+            )
+        if resumable:
+            return decide(
+                RecoveryDecisionKind.OUTCOME_UNKNOWN,
+                RecoveryAction.OUTCOME_UNKNOWN,
+                RecoveryReasonCode.TURN_LOST_ON_RESTART,
+            )
+    elif resumable:
+        return decide(
+            RecoveryDecisionKind.NATIVE_RESUME,
+            RecoveryAction.NATIVE_RESUME,
+            RecoveryReasonCode.UNCHANGED_LAUNCH,
+        )
+    return decide(
+        RecoveryDecisionKind.HANDOFF_FALLBACK,
+        RecoveryAction.HANDOFF_FALLBACK,
+        RecoveryReasonCode.RECOVERY_FALLBACK,
+    )
 
 
 def _ambiguous_delivery(command: Command) -> bool:
@@ -178,20 +231,10 @@ def classify_command(
                 command_id=command.id,
                 turn_id=turn_id,
             )
-        if _resumable_native(state, supports_resume=supports_resume):
-            return RecoveryDecision(
-                kind=RecoveryDecisionKind.NATIVE_RESUME,
-                action=RecoveryAction.NATIVE_RESUME,
-                reason_code=RecoveryReasonCode.UNCHANGED_LAUNCH,
-                observed_delivery_phase=phase,
-                command_id=command.id,
-                turn_id=turn_id,
-            )
-        return RecoveryDecision(
-            kind=RecoveryDecisionKind.HANDOFF_FALLBACK,
-            action=RecoveryAction.HANDOFF_FALLBACK,
-            reason_code=RecoveryReasonCode.RECOVERY_FALLBACK,
-            observed_delivery_phase=phase,
+        return _continue_live_work(
+            state,
+            supports_resume=supports_resume,
+            phase=phase,
             command_id=command.id,
             turn_id=turn_id,
         )
@@ -261,26 +304,15 @@ def classify_conversation(
 
     if not decisions and _has_live_work(state):
         # Live conversation without a claimable command still needs inspection.
-        if _resumable_native(state, supports_resume=supports_resume):
-            decisions.append(
-                RecoveryDecision(
-                    kind=RecoveryDecisionKind.NATIVE_RESUME,
-                    action=RecoveryAction.NATIVE_RESUME,
-                    reason_code=RecoveryReasonCode.UNCHANGED_LAUNCH,
-                    observed_delivery_phase=ObservedDeliveryPhase.NONE,
-                    turn_id=state.active_turn.id if state.active_turn else None,
-                )
+        decisions.append(
+            _continue_live_work(
+                state,
+                supports_resume=supports_resume,
+                phase=ObservedDeliveryPhase.NONE,
+                command_id=None,
+                turn_id=state.active_turn.id if state.active_turn else None,
             )
-        else:
-            decisions.append(
-                RecoveryDecision(
-                    kind=RecoveryDecisionKind.HANDOFF_FALLBACK,
-                    action=RecoveryAction.HANDOFF_FALLBACK,
-                    reason_code=RecoveryReasonCode.RECOVERY_FALLBACK,
-                    observed_delivery_phase=ObservedDeliveryPhase.NONE,
-                    turn_id=state.active_turn.id if state.active_turn else None,
-                )
-            )
+        )
     elif not decisions:
         decisions.append(
             RecoveryDecision(

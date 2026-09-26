@@ -15,6 +15,27 @@ verified_against_commit: 78003994d9fe93108ce5a6bc3591ab2e2ef904d9
 
 Entries are appended using `## [YYYY-MM-DD] operation | Title`.
 
+## [2026-09-27] implement | Reattach to split sessions that outlive a proxy restart
+
+- A dropped proxy event stream detaches the split session instead of closing
+  it; frames get ids when queued and sent frames are retained, and
+  `GET /v1/sessions/{sid}/events?after=<id>` replays them. Detached sessions
+  close after `TTH_SPLIT_DETACH_GRACE_SECONDS` (default 120).
+- The proxy commits `ConversationState.split_stream` (binding, split session,
+  last frame) with every event batch. Recovery classifies a turn in flight as
+  `reattach` when that cursor matches the binding and continues it on the
+  surviving split session (reason `session_reattached`). A turn that cannot be
+  reattached is settled at once as `outcome_unknown` with reason
+  `turn_lost_on_restart` rather than native-resumed. See ADR 0008.
+- The proxy's reattach opens the replay stream itself, so the split's cursor
+  check is the only one; there is no separate session status route. The
+  split session lifecycle tests are one vendored module,
+  `tests/test_split_sessions.py`, checked by `scripts/check_split_drift.py`.
+- The split's session store decides what a departing subscriber means: a
+  session whose end frame was sent closes, any other detaches with a retained
+  expiry task. A failed reattach still closes its split session, and recovery
+  then clears the dead cursor and classifies again.
+
 ## [2026-09-26] implement | Stop sandbox scopes on runtime close and keep recovery leases alive
 
 - `POST /conversations/{id}/runtime/close?release_sandbox=true` also stops the

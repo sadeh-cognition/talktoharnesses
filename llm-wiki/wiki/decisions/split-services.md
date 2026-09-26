@@ -49,8 +49,13 @@ The monolith was split at the `HarnessAdapter` seam in commit `4764402`.
 - The split's supervised process is mirrored by `RemoteProcessHandle`
   (process SSE frames; terminate over HTTP), keeping the runtime manager's
   lifecycle pump and process-record persistence.
-- The split event stream has no replay: a dropped stream ends the runtime and
-  the proxy recovers by native resume against a fresh split session.
+- A dropped event stream detaches the split session for
+  `TTH_SPLIT_DETACH_GRACE_SECONDS` (default 120) with its sent frames retained.
+  A restarted proxy reattaches with `GET /v1/sessions/{sid}/events?after=<id>`
+  from the frame cursor committed with its events, and the turn continues
+  ([ADR 0008](../../../docs/adr/0008-split-session-reattach.md)). When that
+  fails, recovery settles the turn as `turn_lost_on_restart`: a fresh split
+  session from a native resume never continues a turn begun before it.
 - Split sessions are in-memory; a split restart loses them by design.
 - The proxy↔split link uses a shared-secret header (`X-TTH-Split-Token`),
   not JWT; the proxy is a trusted client and receives raw error messages.

@@ -125,9 +125,10 @@ class SplitError(BaseModel):
 # SSE frames (GET /v1/sessions/{sid}/events)
 #
 # Frame `event:` names are the FRAME_* constants; `data:` is the JSON dump of
-# the matching model. `id:` is a per-session monotonic counter with no replay
-# semantics — the proxy is the sole client and reconnection means the harness
-# stream ended.
+# the matching model. `id:` is a per-session monotonic counter assigned when the
+# frame is queued. A dropped stream detaches the session instead of closing it:
+# `GET .../events?after=<id>` reattaches the single subscriber and replays the
+# retained frames after that id (INVALID_CURSOR when they are gone).
 # ---------------------------------------------------------------------------
 
 FRAME_HARNESS_EVENT = "harness_event"

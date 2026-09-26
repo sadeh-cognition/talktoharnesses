@@ -16,6 +16,11 @@ verified_against_commit: bb3d2b755500fc663816d6cbd1a7cd7947a8920b
 
 `HarnessAdapter` is a fixed asynchronous protocol: `probe`, `start`, `resume`, `submit`, `steer`, `interrupt`, `answer_interaction`, `events`, and `close`. Request and session types are frozen Pydantic models with no live process objects.
 
+Remote adapters also implement `SplitStreamAdapter` (`providers/adapter.py`):
+`import_seen`/`export_seen` for the native-replay dedupe sets, `split_cursor`
+for the frame cursor committed with each event batch, and `reattach` for
+taking over a split session that outlived the proxy from that cursor.
+
 `HarnessSession` is an opaque handle (`conversation_id`, `binding_id`, `kind`, `native_session_id`, model/mode/effort, metadata). Interaction requests carry a canonical payload plus provider correlation.
 
 Provider-specific types must not leak through this protocol.

@@ -1,7 +1,9 @@
 """In-memory session store: one adapter, optional supervised process, one stream.
 
-Sessions do not survive a service restart — the proxy detects the dropped SSE
-stream and recovers through native session resume against a fresh session.
+Sessions do not survive a service restart. A dropped SSE stream only detaches
+its session: the harness keeps running and its frames stay retained, so a
+restarted proxy can reattach and replay from its last committed frame. A
+session left detached longer than the grace period is closed.
 """
 
 from __future__ import annotations
@@ -9,9 +11,11 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Literal, cast
+from typing import Literal, NamedTuple, cast
 from uuid import UUID, uuid4
 
 from tth_types.adapter import HarnessAdapter, HarnessInteractionRequest, HarnessSession
@@ -38,6 +42,16 @@ logger = logging.getLogger(__name__)
 # Bounded so a proxy that never drains cannot grow memory without limit; the
 # pumps block on a full queue, which backpressures the harness stream.
 _FRAME_QUEUE_MAXSIZE = 4096
+# Sent frames kept for a reattaching proxy to replay.
+_RETAINED_FRAMES = 4096
+_DETACH_GRACE_ENV = "TTH_SPLIT_DETACH_GRACE_SECONDS"
+
+
+class Frame(NamedTuple):
+    id: int
+    event: str
+    data: str
+
 
 SeenExport = Callable[[], tuple[frozenset[str], frozenset[str]]]
 
@@ -68,17 +82,65 @@ class SessionEntry:
     session: HarnessSession
     launch: LaunchSnapshot
     handle: ProcessHandle | None = None
-    queue: asyncio.Queue[tuple[str, str] | None] = field(
+    queue: asyncio.Queue[Frame | None] = field(
         default_factory=lambda: asyncio.Queue(maxsize=_FRAME_QUEUE_MAXSIZE)
     )
     pump_task: asyncio.Task[None] | None = None
     process_pump_task: asyncio.Task[None] | None = None
+    # Frame ids are assigned when a frame is queued, so they survive replay.
     next_frame_id: int = 1
+    # Frames already written to a subscriber, oldest first.
+    retained: deque[Frame] = field(default_factory=lambda: deque(maxlen=_RETAINED_FRAMES))
+    last_sent_id: int = 0
+    # Closes the session unless a subscriber reattaches; set while detached.
+    expiry: asyncio.Task[None] | None = None
     stream_attached: bool = False
     closed: bool = False
 
+    def frame(self, event_name: str, data_json: str) -> Frame:
+        frame_id = self.next_frame_id
+        self.next_frame_id += 1
+        return Frame(frame_id, event_name, data_json)
+
     async def enqueue(self, event_name: str, data_json: str) -> None:
-        await self.queue.put((event_name, data_json))
+        await self.queue.put(self.frame(event_name, data_json))
+
+    def sent(self, frame: Frame) -> None:
+        self.retained.append(frame)
+        self.last_sent_id = frame.id
+
+    @property
+    def ended(self) -> bool:
+        """Whether a subscriber was sent the end frame."""
+        return bool(self.retained) and self.retained[-1].event == FRAME_END
+
+    def frames_after(self, after: int) -> list[Frame]:
+        """The sent frames a reattaching subscriber has not committed.
+
+        Raises INVALID_CURSOR when frames after ``after`` are no longer retained
+        or ``after`` was never sent.
+        """
+        replay = [frame for frame in self.retained if frame.id > after]
+        # Sent frames carry consecutive ids, so the replay is complete exactly
+        # when it starts at the frame right after the cursor.
+        first = replay[0].id if replay else self.last_sent_id + 1
+        if not 0 <= after <= self.last_sent_id or first != after + 1:
+            raise DomainError(
+                ErrorCode.INVALID_CURSOR,
+                "split frames after this cursor are no longer retained",
+                details={
+                    "session_id": str(self.session_id),
+                    "after": after,
+                    "last_sent_id": self.last_sent_id,
+                },
+            )
+        return replay
+
+    def cancel_expiry(self) -> None:
+        """Stop a pending expiry, unless it is the task closing the session."""
+        if self.expiry is not None and self.expiry is not asyncio.current_task():
+            self.expiry.cancel()
+            self.expiry = None
 
 
 class SessionStore:
@@ -124,7 +186,13 @@ class SessionStore:
             )
         return entry
 
-    def attach_stream(self, session_id: UUID) -> SessionEntry:
+    def attach_stream(
+        self, session_id: UUID, *, after: int | None = None
+    ) -> tuple[SessionEntry, list[Frame]]:
+        """Attach the single subscriber and return the frames to replay first.
+
+        ``after`` reattaches from the last frame the subscriber committed.
+        """
         entry = self.get(session_id)
         if entry.stream_attached:
             raise DomainError(
@@ -132,8 +200,31 @@ class SessionStore:
                 "split session already has an event subscriber",
                 details={"session_id": str(session_id)},
             )
+        replay = entry.frames_after(after) if after is not None else []
         entry.stream_attached = True
-        return entry
+        entry.cancel_expiry()
+        return entry, replay
+
+    async def release_stream(self, session_id: UUID) -> None:
+        """Let the subscriber go.
+
+        A session whose end frame was sent closes. Any other keeps its harness
+        running for a reattach and closes after the detach grace period.
+        """
+        entry = self._entries.get(session_id)
+        if entry is None or entry.closed:
+            return
+        grace = self._policy.detach_grace
+        if entry.ended or grace <= 0:
+            await self.close(session_id, reason="stream_ended")
+            return
+        entry.stream_attached = False
+        logger.info("session %s detached; closing in %.0fs unless reattached", session_id, grace)
+        entry.expiry = asyncio.create_task(self._expire(session_id, grace))
+
+    async def _expire(self, session_id: UUID, grace: float) -> None:
+        await asyncio.sleep(grace)
+        await self.close(session_id, reason="stream_ended")
 
     async def close_binding(self, conversation_id: UUID, binding_id: UUID) -> None:
         for entry in tuple(self._entries.values()):
@@ -163,6 +254,7 @@ class SessionStore:
         if entry is None or entry.closed:
             return
         entry.closed = True
+        entry.cancel_expiry()
         try:
             await asyncio.wait_for(
                 entry.adapter.close(entry.session),
@@ -190,7 +282,7 @@ class SessionStore:
         )
         for _ in range(drop_count):
             entry.queue.get_nowait()
-        entry.queue.put_nowait((FRAME_END, EndFrame(reason=reason).model_dump_json()))
+        entry.queue.put_nowait(entry.frame(FRAME_END, EndFrame(reason=reason).model_dump_json()))
         entry.queue.put_nowait(None)
 
     async def terminate(self, session_id: UUID, *, reason: str | None) -> None:
@@ -285,7 +377,9 @@ _store: SessionStore | None = None
 def get_session_store() -> SessionStore:
     global _store
     if _store is None:
-        _store = SessionStore()
+        grace = os.environ.get(_DETACH_GRACE_ENV)
+        policy = RuntimePolicy(detach_grace=float(grace)) if grace else RuntimePolicy()
+        _store = SessionStore(policy=policy)
     return _store
 
 

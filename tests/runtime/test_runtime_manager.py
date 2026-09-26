@@ -34,6 +34,7 @@ from talktoharnesses.domain.models import (
     Command,
     HarnessCapabilities,
     HarnessConfiguration,
+    SplitStreamCursor,
     SwitchHarnessPayload,
 )
 from talktoharnesses.domain.transitions import ConversationState, start_turn
@@ -1687,3 +1688,117 @@ async def test_close_idle_forces_process_when_adapter_close_times_out(
     assert forced.await_args_list[0].kwargs["reason"] == "graceful_close_timeout"
     assert mgr.get_runtime(cid) is None
     await mgr.shutdown()
+
+
+class _ReattachingAdapter(ResumingSdkAdapter):
+    """An adapter whose split session outlived the proxy."""
+
+    reattached: list[SplitStreamCursor] = []
+    fail = False
+
+    def import_seen(self, native_ids: frozenset[str], stream_offsets: frozenset[str]) -> None:
+        pass
+
+    def export_seen(self) -> tuple[frozenset[str], frozenset[str]]:
+        return frozenset(), frozenset()
+
+    def split_cursor(self) -> SplitStreamCursor | None:
+        return None
+
+    async def reattach(
+        self,
+        session: HarnessSession,
+        *,
+        configuration: HarnessConfiguration,
+        cursor: SplitStreamCursor,
+    ) -> None:
+        if type(self).fail:
+            raise DomainError(ErrorCode.NOT_FOUND, "split session not found")
+        type(self).reattached.append(cursor)
+
+
+def _reattach_setup(
+    store: MemoryPersistence, workdir: Path, now: datetime
+) -> tuple[UUID, HarnessConfiguration, SplitStreamCursor]:
+    from datetime import UTC, timedelta
+
+    from talktoharnesses.domain.models import LaunchSnapshot
+
+    state = make_state(now=now, workdir=workdir)
+    assert state.binding is not None
+    launch = LaunchSnapshot(
+        harness_version="test-1",
+        working_directory=str(workdir),
+        adapter_version="0",
+        capabilities=HarnessCapabilities(
+            kind=HarnessKind.OPENCODE, version="test-1", supports_resume=True
+        ),
+    )
+    binding = state.binding.model_copy(
+        update={"native_session_id": "native-1", "launch_snapshot": launch}
+    )
+    store.seed(state.model_copy(update={"binding": binding}))
+    cid = state.conversation.id
+    store.ownership[cid] = ("worker-a", 3, datetime.now(UTC) + timedelta(hours=1))
+    cursor = SplitStreamCursor(binding_id=binding.id, session_id=uuid4(), frame_id=9)
+    return cid, binding.configuration, cursor
+
+
+@pytest.mark.asyncio
+async def test_reattach_for_recovery_installs_a_runtime_on_the_surviving_session(
+    short_policy: RuntimePolicy, workdir: Path, now: datetime
+) -> None:
+    store = MemoryPersistence()
+    cid, configuration, cursor = _reattach_setup(store, workdir, now)
+    registry = AdapterRegistry()
+    registry.register(HarnessKind.OPENCODE, _ReattachingAdapter)
+    _ReattachingAdapter.reattached = []
+    _ReattachingAdapter.fail = False
+    mgr = RuntimeManager(store, registry, policy=short_policy)
+
+    managed = await mgr.reattach_for_recovery(
+        cid,
+        "owner-1",
+        configuration,
+        cursor,
+        worker_id="worker-a",
+        fence=3,
+        expected_binding_kind=HarnessKind.OPENCODE,
+    )
+
+    assert mgr.get_runtime(cid) is managed
+    assert managed.session.native_session_id == "native-1"
+    assert _ReattachingAdapter.reattached == [cursor]
+    assert [p.status for p in store.processes.values()] == [ProcessStatus.RUNNING]
+    # The harness never stopped, so no session event is committed.
+    assert "session_resumed" not in {e.type for e in store.events.get(cid, [])}
+    await mgr.close(cid, reason="test")
+
+
+@pytest.mark.asyncio
+async def test_failed_reattach_installs_nothing_and_closes_the_adapter(
+    short_policy: RuntimePolicy, workdir: Path, now: datetime
+) -> None:
+    store = MemoryPersistence()
+    cid, configuration, cursor = _reattach_setup(store, workdir, now)
+    registry = AdapterRegistry()
+    registry.register(HarnessKind.OPENCODE, _ReattachingAdapter)
+    _ReattachingAdapter.fail = True
+    FakeAdapter.instances.clear()
+    mgr = RuntimeManager(store, registry, policy=short_policy)
+
+    with pytest.raises(DomainError) as exc:
+        await mgr.reattach_for_recovery(
+            cid,
+            "owner-1",
+            configuration,
+            cursor,
+            worker_id="worker-a",
+            fence=3,
+            expected_binding_kind=HarnessKind.OPENCODE,
+        )
+
+    assert exc.value.code is ErrorCode.NOT_FOUND
+    assert mgr.get_runtime(cid) is None
+    assert store.processes == {}
+    _ReattachingAdapter.fail = False

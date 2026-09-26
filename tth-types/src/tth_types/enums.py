@@ -123,6 +123,8 @@ class RecoveryAction(StrEnum):
     RECLAIM = "reclaim"
     OUTCOME_UNKNOWN = "outcome_unknown"
     NATIVE_RESUME = "native_resume"
+    # Took over a split session that outlived the previous proxy process.
+    REATTACH = "reattach"
     HANDOFF_FALLBACK = "handoff_fallback"
     INVARIANT_FAILURE = "invariant_failure"
 
@@ -138,6 +140,13 @@ class RecoveryResultCode(StrEnum):
 class RecoveryReasonCode(StrEnum):
     WORKER_LOST = "worker_lost"
     DELIVERY_AMBIGUOUS = "delivery_ambiguous"
+    # A native resume after a proxy restart cannot continue the turn that was
+    # in flight: the old split session and its harness process ended with the
+    # proxy's event stream.
+    TURN_LOST_ON_RESTART = "turn_lost_on_restart"
+    # The split session outlived the proxy; the turn continues where the
+    # committed events left off.
+    SESSION_REATTACHED = "session_reattached"
     RESUME_UNSUPPORTED = "resume_unsupported"
     RESUME_REJECTED = "resume_rejected"
     PROVIDER_INCOMPATIBLE = "provider_incompatible"

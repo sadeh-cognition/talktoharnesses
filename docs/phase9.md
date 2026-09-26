@@ -596,7 +596,10 @@ resources stop within the shared ten-second budget.
 - Manual retry/replay of `outcome_unknown` commands, a recovery admin API, public recovery records,
   or an operator command that overrides the decision table.
 - Transfer or adoption of a failed worker's live stdio connection, SDK object, HTTP stream, process
-  handle, PID, or uncommitted provider events; zero-loss takeover is not promised.
+  handle, PID, or uncommitted provider events; zero-loss takeover is not promised. (Since
+  [ADR 0008](adr/0008-split-session-reattach.md) the proxy may reattach to a *split session* that
+  outlived it, replaying from the committed frame cursor; process and PID adoption remain out of
+  scope.)
 - Provider-side deletion of abandoned native sessions or PID-based cleanup of processes no longer
   owned by this supervisor.
 - Persisted/distributed trace context, prompt tracing, dynamic telemetry attributes, automatic

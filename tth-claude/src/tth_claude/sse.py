@@ -7,13 +7,24 @@ from collections.abc import AsyncIterator, Callable, Coroutine
 
 from tth_types.split_api import FRAME_END
 
-from tth_claude.sessions import SessionEntry
+from tth_claude.sessions import Frame, SessionEntry
 
 _KEEPALIVE_INTERVAL_S = 15.0
 
 
-async def _frames(entry: SessionEntry) -> AsyncIterator[bytes]:
-    """Yield SSE-encoded frames until the end frame or queue sentinel."""
+def _encode(frame: Frame) -> bytes:
+    return f"event: {frame.event}\nid: {frame.id}\ndata: {frame.data}\n\n".encode()
+
+
+async def _frames(entry: SessionEntry, replay: list[Frame]) -> AsyncIterator[bytes]:
+    """Yield SSE-encoded frames until the end frame or queue sentinel.
+
+    A reattaching subscriber first gets the retained frames after its cursor.
+    """
+    for frame in replay:
+        yield _encode(frame)
+        if frame.event == FRAME_END:
+            return
     while True:
         try:
             item = await asyncio.wait_for(entry.queue.get(), timeout=_KEEPALIVE_INTERVAL_S)
@@ -22,11 +33,11 @@ async def _frames(entry: SessionEntry) -> AsyncIterator[bytes]:
             continue
         if item is None:
             return
-        event_name, data_json = item
-        frame_id = entry.next_frame_id
-        entry.next_frame_id += 1
-        yield f"event: {event_name}\nid: {frame_id}\ndata: {data_json}\n\n".encode()
-        if event_name == FRAME_END:
+        # Retained before it is written: a subscriber that drops mid-write
+        # gets it again on reattach, and its cursor dedupes the repeat.
+        entry.sent(item)
+        yield _encode(item)
+        if item.event == FRAME_END:
             return
 
 
@@ -34,9 +45,13 @@ class SessionFrameStream:
     """Async frame iterator with a synchronous Django response closer."""
 
     def __init__(
-        self, entry: SessionEntry, close_session: Callable[[], Coroutine[object, object, None]]
+        self,
+        entry: SessionEntry,
+        close_session: Callable[[], Coroutine[object, object, None]],
+        *,
+        replay: list[Frame],
     ) -> None:
-        self._iterator = _frames(entry)
+        self._iterator = _frames(entry, replay)
         self._close_session = close_session
         self._loop = asyncio.get_running_loop()
         self._close_task: asyncio.Task[None] | None = None
@@ -60,6 +75,9 @@ class SessionFrameStream:
 
 
 def stream_frames(
-    entry: SessionEntry, close_session: Callable[[], Coroutine[object, object, None]]
+    entry: SessionEntry,
+    close_session: Callable[[], Coroutine[object, object, None]],
+    *,
+    replay: list[Frame],
 ) -> SessionFrameStream:
-    return SessionFrameStream(entry, close_session)
+    return SessionFrameStream(entry, close_session, replay=replay)

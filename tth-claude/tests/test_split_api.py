@@ -148,7 +148,7 @@ async def test_close_finishes_when_frame_queue_is_full(
     created = await _create_session(client, str(tmp_path))
     entry = get_session_store().get(created.session_id)
     while not entry.queue.full():
-        entry.queue.put_nowait((FRAME_HARNESS_EVENT, "{}"))
+        entry.queue.put_nowait(entry.frame(FRAME_HARNESS_EVENT, "{}"))
 
     response = await asyncio.wait_for(
         client.delete(f"/v1/sessions/{created.session_id}"), timeout=1
@@ -171,50 +171,6 @@ async def test_second_event_subscriber_is_rejected(
 
     assert excinfo.value.code is ErrorCode.CONVERSATION_BUSY
     await store.close(created.session_id)
-
-
-async def test_event_disconnect_closes_split_session(
-    fake_adapter: FakeAdapter, tmp_path: Any
-) -> None:
-    client = AsyncClient()
-    created = await _create_session(client, str(tmp_path))
-    entry = get_session_store().get(created.session_id)
-    entry.queue.put_nowait((FRAME_HARNESS_EVENT, "{}"))
-    response: Any = await client.get(f"/v1/sessions/{created.session_id}/events")
-    content: AsyncIterator[bytes] = response.streaming_content
-
-    await anext(content)
-    response.close()
-    for _ in range(3):
-        await asyncio.sleep(0)
-
-    assert len(get_session_store()) == 0
-    assert fake_adapter.closed
-
-
-async def test_new_session_for_same_binding_replaces_orphan(
-    fake_adapter: FakeAdapter, tmp_path: Any
-) -> None:
-    client = AsyncClient()
-    request = CreateSessionRequest(
-        mode="start",
-        conversation_id=uuid4(),
-        binding_id=uuid4(),
-        configuration=_config(str(tmp_path)),
-        adapter_version="test",
-    )
-    first_response = await _post(client, "/v1/sessions", request)
-    first = SessionCreated.model_validate_json(first_response.content)
-    second_request = request.model_copy(update={"session_id": uuid4()})
-
-    second_response = await _post(client, "/v1/sessions", second_request)
-    second = SessionCreated.model_validate_json(second_response.content)
-
-    assert second.session_id == second_request.session_id
-    assert len(get_session_store()) == 1
-    missing = await client.delete(f"/v1/sessions/{first.session_id}")
-    assert missing.status_code == 404
-    await get_session_store().close(second.session_id)
 
 
 async def test_steer_interrupt_answers(fake_adapter: FakeAdapter, tmp_path: Any) -> None:

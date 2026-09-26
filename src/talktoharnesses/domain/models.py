@@ -507,6 +507,20 @@ class ProcessRecord(BaseModel):
     redacted_stderr_tail: str = ""
 
 
+class SplitStreamCursor(BaseModel):
+    """Where a remote runtime's split event stream was last committed.
+
+    Saved with each event batch, so a restarted proxy can reattach to a split
+    session that outlived it and replay only the frames it never committed.
+    """
+
+    model_config = FROZEN
+
+    binding_id: UUID
+    session_id: UUID
+    frame_id: int = 0
+
+
 class UsageRecord(BaseModel):
     model_config = FROZEN
 

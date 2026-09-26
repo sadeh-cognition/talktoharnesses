@@ -17,7 +17,7 @@ One managed runtime per active conversation holds native session state. HTTP han
 
 The runtime's process lives in the kind's split service: the proxy's `RemoteProcessHandle` mirrors it from process SSE frames and terminates it over HTTP. The split's own supervisor keeps the previous guarantees (no shell, session groups, Windows job objects, capped redacted stderr). This runs inside the split's proxy-managed container. Its immutable project policy revision, provider, and writable mounts determine the scope. Existing sessions resume in their original scope; policy changes apply to new sessions.
 
-SQLite deployments must run a single live proxy supervisor. PostgreSQL workers claim conversations with leases and notifications. A live split session is not transferred between workers. API and worker execution may share a process.
+SQLite deployments must run a single live proxy supervisor. PostgreSQL workers claim conversations with leases and notifications. A live split session is not transferred between running workers; a proxy that restarts may reattach to a split session that outlived it, from the committed frame cursor ([ADR 0008](../../../docs/adr/0008-split-session-reattach.md)). API and worker execution may share a process.
 
 A worker that loses its lease, typically because the host slept past it,
 stops claims and closes its runtimes without shutting the runtime manager

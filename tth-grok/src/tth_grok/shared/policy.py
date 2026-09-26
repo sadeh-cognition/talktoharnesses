@@ -23,3 +23,6 @@ class RuntimePolicy(BaseModel):
     lease_renewal_interval: float = Field(default=10.0, gt=0)
     # Live runtimes plus transient switch/rotation candidates.
     max_runtimes: int = Field(default=20, gt=0)
+    # How long a split session whose proxy stream dropped waits for the proxy to
+    # reattach before it is closed; 0 closes it at once.
+    detach_grace: float = Field(default=120.0, ge=0)

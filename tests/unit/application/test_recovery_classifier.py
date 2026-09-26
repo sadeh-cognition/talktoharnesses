@@ -12,7 +12,6 @@ from talktoharnesses.application.recovery import (
     RecoveryDecisionKind,
     classify_command,
     classify_conversation,
-    resume_support_matters,
 )
 from talktoharnesses.domain.enums import (
     ActivityStatus,
@@ -29,6 +28,7 @@ from talktoharnesses.domain.models import (
     Command,
     ConversationHarnessBinding,
     HarnessConfiguration,
+    SplitStreamCursor,
     SubmitTurnPayload,
     SwitchHarnessPayload,
     Turn,
@@ -154,12 +154,13 @@ def _command(
             RecoveryReasonCode.DELIVERY_AMBIGUOUS,
         ),
         (
+            # A native resume never continues the turn in flight.
             CommandStatus.DELIVERED,
             {"delivered_at": _now()},
             True,
             True,
-            RecoveryDecisionKind.NATIVE_RESUME,
-            RecoveryReasonCode.UNCHANGED_LAUNCH,
+            RecoveryDecisionKind.OUTCOME_UNKNOWN,
+            RecoveryReasonCode.TURN_LOST_ON_RESTART,
         ),
         (
             CommandStatus.DELIVERED,
@@ -365,7 +366,7 @@ def test_classify_conversation_idle_is_no_action() -> None:
     assert decisions[0].kind is RecoveryDecisionKind.NO_ACTION
 
 
-def test_classify_conversation_live_without_command_resumes() -> None:
+def test_classify_conversation_live_turn_without_command_is_lost() -> None:
     from talktoharnesses.application.recovery import classify_conversation
 
     turn = Turn(
@@ -380,7 +381,8 @@ def test_classify_conversation_live_without_command_resumes() -> None:
     )
     decisions = classify_conversation(state, now=_now(), supports_resume=True)
     assert len(decisions) == 1
-    assert decisions[0].kind is RecoveryDecisionKind.NATIVE_RESUME
+    assert decisions[0].kind is RecoveryDecisionKind.OUTCOME_UNKNOWN
+    assert decisions[0].reason_code is RecoveryReasonCode.TURN_LOST_ON_RESTART
     assert decisions[0].turn_id == turn.id
 
 
@@ -398,8 +400,52 @@ def test_resume_support_matters_only_for_live_work_with_a_native_session(
 ) -> None:
     state = _state(**state_options)
 
-    assert resume_support_matters(state) is matters
     supported = classify_conversation(state, now=_now(), supports_resume=True)
     unsupported = classify_conversation(state, now=_now(), supports_resume=False)
     # Where it does not matter, recovery can skip asking the harness.
     assert (supported != unsupported) is matters
+
+
+def _running_turn_state(*, cursor_binding: str) -> Any:
+    turn = Turn(
+        conversation_id=uuid4(),
+        status=TurnStatus.RUNNING,
+        created_at=_now(),
+        started_at=_now(),
+    )
+    state = _state(status=ConversationStatus.RUNNING, active_turn=turn)
+    assert state.binding is not None
+    if cursor_binding == "none":
+        return state
+    binding_id = state.binding.id if cursor_binding == "current" else uuid4()
+    cursor = SplitStreamCursor(binding_id=binding_id, session_id=uuid4(), frame_id=3)
+    return state.model_copy(update={"split_stream": cursor})
+
+
+def test_turn_in_flight_with_a_split_cursor_reattaches() -> None:
+    from talktoharnesses.application.recovery import classify_conversation
+
+    state = _running_turn_state(cursor_binding="current")
+
+    (decision,) = classify_conversation(state, now=_now(), supports_resume=False)
+    assert decision.kind is RecoveryDecisionKind.REATTACH
+    assert decision.reason_code is RecoveryReasonCode.SESSION_REATTACHED
+    # Reattaching needs no resume support, so the sandbox need not be probed.
+    assert classify_conversation(state, now=_now(), supports_resume=True) == (decision,)
+
+    # A failed reattach clears the cursor, and the turn is then lost.
+    cleared = state.model_copy(update={"split_stream": None})
+    (retry,) = classify_conversation(cleared, now=_now(), supports_resume=True)
+    assert retry.kind is RecoveryDecisionKind.OUTCOME_UNKNOWN
+    assert retry.reason_code is RecoveryReasonCode.TURN_LOST_ON_RESTART
+
+
+@pytest.mark.parametrize("cursor_binding", ["none", "other"])
+def test_turn_in_flight_without_a_cursor_for_this_binding_is_lost(cursor_binding: str) -> None:
+    from talktoharnesses.application.recovery import classify_conversation
+
+    state = _running_turn_state(cursor_binding=cursor_binding)
+
+    (decision,) = classify_conversation(state, now=_now(), supports_resume=True)
+    assert decision.kind is RecoveryDecisionKind.OUTCOME_UNKNOWN
+    assert decision.reason_code is RecoveryReasonCode.TURN_LOST_ON_RESTART

@@ -36,6 +36,7 @@ from tth_types.split_api import (
     SplitError,
 )
 
+from talktoharnesses.domain.models import SplitStreamCursor
 from talktoharnesses.providers.adapter import (
     HarnessInteractionRequest,
     ResumeSessionRequest,
@@ -60,6 +61,10 @@ class FakeSplit:
         self.sse_frames: list[tuple[str, str]] = []
         self.event_stream: httpx.AsyncByteStream | None = None
         self.headers_seen: list[dict[str, str]] = []
+        # The event stream's refusal (HTTP status, split error code), if any.
+        self.events_error: tuple[int, str] | None = None
+        # Query parameters of each event stream request.
+        self.event_params: list[dict[str, str]] = []
 
     def capabilities(self) -> HarnessCapabilities:
         return HarnessCapabilities(kind=self.kind, version="1.2.3", supports_resume=True)
@@ -108,13 +113,19 @@ class FakeSplit:
             )
             return httpx.Response(201, content=created.model_dump_json())
         if path.endswith("/events"):
+            self.event_params.append(dict(request.url.params))
+            if self.events_error is not None:
+                status, code = self.events_error
+                error = SplitError(code=code, message="refused")
+                return httpx.Response(status, content=error.model_dump_json())
             if self.event_stream is not None:
                 return httpx.Response(
                     200, stream=self.event_stream, headers={"Content-Type": "text/event-stream"}
                 )
+            first_id = int(request.url.params.get("after", "0")) + 1
             payload = b"".join(
                 f"event: {name}\nid: {i}\ndata: {data}\n\n".encode()
-                for i, (name, data) in enumerate(self.sse_frames, start=1)
+                for i, (name, data) in enumerate(self.sse_frames, start=first_id)
             )
             return httpx.Response(
                 200, content=payload, headers={"Content-Type": "text/event-stream"}
@@ -369,6 +380,85 @@ async def test_broken_event_stream_preserves_delivered_frames_and_closes_process
         assert sum(path.endswith("/events") for _, path, _ in split.requests) == 1
     finally:
         await adapter.close(session)
+
+
+def _event_frames(*items: object) -> list[tuple[str, str]]:
+    return [
+        ("harness_event", HarnessEventFrame(item=item).model_dump_json())  # type: ignore[arg-type]
+        for item in items
+    ]
+
+
+async def test_split_cursor_follows_the_frames_read() -> None:
+    split = FakeSplit()
+    turn_id = uuid4()
+    split.sse_frames = _event_frames(
+        TurnStartedPayload(turn_id=turn_id), TurnStartedPayload(turn_id=turn_id)
+    )
+    adapter = _adapter(split)
+    session = await adapter.start(_start_request())
+    cursor = SplitStreamCursor(binding_id=session.binding_id, session_id=split.session_id)
+    assert adapter.split_cursor() == cursor
+
+    items = [item async for item in adapter.events(session)]
+
+    assert len(items) == 2
+    assert adapter.split_cursor() == cursor.model_copy(update={"frame_id": 2})
+    assert split.event_params == [{}]
+
+
+async def test_reattach_streams_only_the_frames_after_the_cursor() -> None:
+    split = FakeSplit()
+    turn_id = uuid4()
+    split.sse_frames = _event_frames(TurnStartedPayload(turn_id=turn_id))
+    split_session_id = uuid4()
+    split.session_id = split_session_id
+    adapter = _adapter(split)
+    session = WireSession(
+        conversation_id=uuid4(), binding_id=uuid4(), kind=split.kind, native_session_id="n"
+    )
+    cursor = SplitStreamCursor(
+        binding_id=session.binding_id, session_id=split_session_id, frame_id=5
+    )
+
+    await adapter.reattach(session, configuration=_config(), cursor=cursor)
+    # Reattach opens the replay stream itself; the event pump then reads it.
+    assert split.event_params == [{"after": "5"}]
+    assert adapter.split_cursor() == cursor
+    items = [item async for item in adapter.events(session)]
+
+    assert len(items) == 1
+    assert split.event_params == [{"after": "5"}]
+    # No session was created: the split session that outlived the proxy is reused.
+    assert ("POST", "/v1/sessions") not in [(m, p) for m, p, _ in split.requests]
+    assert adapter.split_cursor() == cursor.model_copy(update={"frame_id": 6})
+
+
+@pytest.mark.parametrize(
+    ("status", "code"),
+    [(404, ErrorCode.NOT_FOUND), (409, ErrorCode.INVALID_CURSOR)],
+    ids=["session-gone", "cursor-not-replayable"],
+)
+async def test_reattach_refuses_a_missing_or_stale_split_session(
+    status: int, code: ErrorCode
+) -> None:
+    split = FakeSplit()
+    split_session_id = uuid4()
+    split.session_id = split_session_id
+    split.events_error = (status, code.value)
+    adapter = _adapter(split)
+    session = WireSession(conversation_id=uuid4(), binding_id=uuid4(), kind=split.kind)
+    cursor = SplitStreamCursor(
+        binding_id=session.binding_id, session_id=split_session_id, frame_id=5
+    )
+
+    with pytest.raises(DomainError) as exc:
+        await adapter.reattach(session, configuration=_config(), cursor=cursor)
+
+    assert exc.value.code is code
+    # The rollback still closes the split session, so its harness stops.
+    await adapter.close(session)
+    assert ("DELETE", f"/v1/sessions/{split_session_id}") in [(m, p) for m, p, _ in split.requests]
 
 
 async def test_unary_operations_round_trip() -> None:

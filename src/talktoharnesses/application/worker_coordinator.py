@@ -6,7 +6,7 @@ import asyncio
 import contextlib
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 from enum import Enum
 from typing import Literal
@@ -28,7 +28,6 @@ from talktoharnesses.application.recovery import (
     RecoveryDecisionKind,
     classify_conversation,
     is_switch_command,
-    resume_support_matters,
     turn_needs_interrupt_messages,
 )
 from talktoharnesses.domain.enums import (
@@ -53,6 +52,7 @@ from talktoharnesses.runtime.manager import RuntimeManager
 from talktoharnesses.runtime.policy import RuntimePolicy
 
 logger = logging.getLogger(__name__)
+
 
 DatabaseSystem = Literal["sqlite", "postgresql"]
 
@@ -474,26 +474,15 @@ class WorkerCoordinator:
         ) as span:
             try:
                 state = await self._persistence.get_worker_snapshot(conversation_id)
-                # Probing prepares the conversation's sandbox, starting its
-                # containers when they are stopped; skip it when the answer
-                # cannot change the decision.
-                supports_resume = resume_support_matters(state) and (
-                    await self._probe_supports_resume(state)
-                )
-                decisions = classify_conversation(
+                decision = await self._classify(state)
+                state = await self._persistence.get_worker_snapshot(conversation_id)
+                await self._apply_decision(
                     state,
-                    now=self._clock(),
-                    supports_resume=supports_resume,
+                    decision,
+                    fence=fence,
+                    attempt_id=attempt_id,
+                    trigger=trigger,
                 )
-                for decision in decisions[:1]:
-                    state = await self._persistence.get_worker_snapshot(conversation_id)
-                    await self._apply_decision(
-                        state,
-                        decision,
-                        fence=fence,
-                        attempt_id=attempt_id,
-                        trigger=trigger,
-                    )
             except Exception:
                 logger.error(
                     "recovery_failed code=%s",
@@ -517,6 +506,22 @@ class WorkerCoordinator:
                 with contextlib.suppress(Exception):
                     await self._runtime.close(conversation_id, reason="recovery_failed")
                 self._attempt_ids.pop(conversation_id, None)
+
+    async def _classify(self, state: ConversationState) -> RecoveryDecision:
+        """The first recovery decision for ``state``.
+
+        Probing prepares the conversation's sandbox, starting its containers
+        when they are stopped, so it runs only when the answer can change the
+        decision.
+        """
+        now = self._clock()
+        unsupported, supported = (
+            classify_conversation(state, now=now, supports_resume=supports_resume)[0]
+            for supports_resume in (False, True)
+        )
+        if unsupported == supported:
+            return supported
+        return supported if await self._probe_supports_resume(state) else unsupported
 
     async def _probe_supports_resume(self, state: ConversationState) -> bool:
         if state.binding is None:
@@ -576,6 +581,28 @@ class WorkerCoordinator:
             await self._apply_outcome_unknown(
                 state,
                 decision,
+                fence=fence,
+                attempt_id=attempt_id,
+                trigger=trigger,
+            )
+            return
+
+        if kind is RecoveryDecisionKind.REATTACH:
+            if await self._apply_reattach(
+                state,
+                decision,
+                fence=fence,
+                attempt_id=attempt_id,
+                trigger=trigger,
+            ):
+                return
+            # The failed reattach closed the split session, so its cursor names
+            # nothing any more: decide without it.
+            state = await self._persistence.get_worker_snapshot(state.conversation.id)
+            state = state.model_copy(update={"split_stream": None})
+            await self._apply_decision(
+                state,
+                await self._classify(state),
                 fence=fence,
                 attempt_id=attempt_id,
                 trigger=trigger,
@@ -766,41 +793,106 @@ class WorkerCoordinator:
         trigger: RecoveryTrigger,
     ) -> bool:
         assert self._worker_id is not None
+        worker_id = self._worker_id
         binding = state.binding
         if binding is None or not binding.native_session_id:
             return False
-        try:
-            managed, reason = await self._runtime.resume_for_recovery(
+        native_session_id = binding.native_session_id
+
+        async def resume() -> RecoveryReasonCode:
+            _, reason = await self._runtime.resume_for_recovery(
                 state.conversation.id,
                 state.conversation.owner_id,
                 binding.configuration,
-                binding.native_session_id,
-                worker_id=self._worker_id,
+                native_session_id,
+                worker_id=worker_id,
                 fence=fence,
                 expected_binding_kind=binding.kind,
                 previous_launch=binding.launch_snapshot,
             )
+            return reason
+
+        return await self._adopt_recovered_runtime(
+            state,
+            decision,
+            resume,
+            failure="native_resume_failed",
+            fence=fence,
+            attempt_id=attempt_id,
+            trigger=trigger,
+        )
+
+    async def _apply_reattach(
+        self,
+        state: ConversationState,
+        decision: RecoveryDecision,
+        *,
+        fence: int,
+        attempt_id: UUID | None,
+        trigger: RecoveryTrigger,
+    ) -> bool:
+        """Continue the turn in flight on the split session that outlived the proxy.
+
+        Returns False when the split session, its sandbox or the frames after
+        the committed cursor are gone; the caller then decides without it.
+        """
+        assert self._worker_id is not None
+        worker_id = self._worker_id
+        binding, cursor = state.binding, state.split_stream
+        assert binding is not None and cursor is not None
+
+        async def reattach() -> RecoveryReasonCode:
+            await self._runtime.reattach_for_recovery(
+                state.conversation.id,
+                state.conversation.owner_id,
+                binding.configuration,
+                cursor,
+                worker_id=worker_id,
+                fence=fence,
+                expected_binding_kind=binding.kind,
+            )
+            return decision.reason_code
+
+        return await self._adopt_recovered_runtime(
+            state,
+            decision,
+            reattach,
+            failure="reattach_failed",
+            fence=fence,
+            attempt_id=attempt_id,
+            trigger=trigger,
+        )
+
+    async def _adopt_recovered_runtime(
+        self,
+        state: ConversationState,
+        decision: RecoveryDecision,
+        start: Callable[[], Awaitable[RecoveryReasonCode]],
+        *,
+        failure: str,
+        fence: int,
+        attempt_id: UUID | None,
+        trigger: RecoveryTrigger,
+    ) -> bool:
+        """Pump the runtime ``start`` recovers and complete the attempt.
+
+        Returns False when ``start`` fails, so the caller falls back; a lost
+        lease hands the conversation over instead and counts as handled.
+        """
+        conversation_id = state.conversation.id
+        try:
+            reason = await start()
         except DomainError as exc:
             if exc.code is ErrorCode.STALE_OWNER:
-                await self._on_lost_lease(state.conversation.id)
+                await self._on_lost_lease(conversation_id)
                 return True
-            logger.warning(
-                "native_resume_failed conversation=%s code=%s",
-                state.conversation.id,
-                RecoveryReasonCode.RESUME_REJECTED.value,
-            )
+            logger.warning("%s conversation=%s code=%s", failure, conversation_id, exc.code.value)
             return False
         except Exception:
-            logger.warning(
-                "native_resume_failed conversation=%s code=%s",
-                state.conversation.id,
-                RecoveryReasonCode.RESUME_REJECTED.value,
-            )
+            logger.warning("%s conversation=%s", failure, conversation_id, exc_info=True)
             return False
-
-        self._processor.set_fence(state.conversation.id, fence)
-        self._processor.ensure_pump(state.conversation.id)
-        _ = managed
+        self._processor.set_fence(conversation_id, fence)
+        self._processor.ensure_pump(conversation_id)
         await self._complete_attempt(
             attempt_id,
             result=RecoveryResultCode.SUCCESS.value,

@@ -46,6 +46,7 @@ from talktoharnesses.domain.models import (
     ConversationHarnessBinding,
     EditQueuedPayload,
     InterruptPayload,
+    SplitStreamCursor,
 )
 from talktoharnesses.providers.adapter import HarnessSession, SteerRequest, TurnRequest
 
@@ -83,6 +84,18 @@ class _Adapter:
 
     def export_seen(self) -> tuple[frozenset[str], frozenset[str]]:
         return frozenset({"native-1"}), frozenset({"session-1:1"})
+
+    def split_cursor(self) -> SplitStreamCursor | None:
+        return None
+
+    async def reattach(
+        self,
+        session: HarnessSession,
+        *,
+        configuration: HarnessConfiguration,
+        cursor: SplitStreamCursor,
+    ) -> None:
+        raise NotImplementedError
 
     def events(self, session: HarnessSession) -> AsyncIterator[HarnessEvent]:
         async def gen() -> AsyncIterator[HarnessEvent]:

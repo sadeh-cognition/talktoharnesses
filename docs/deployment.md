@@ -157,5 +157,14 @@ Document these plainly to operators:
 - A failed worker's live process/stdio is not adopted by another worker.
 - Uncommitted provider bytes may be lost.
 - Native resume may fall back to a canonical retained handoff.
+- A turn in flight when the proxy dies continues if the proxy comes back
+  within `TTH_SPLIT_DETACH_GRACE_SECONDS` (default 120, set in the split
+  container environment): the split keeps the detached session and recovery
+  reattaches from the committed frame cursor. Otherwise, or when the sandbox
+  is gone, recovery fails the turn at once as `outcome_unknown` with reason
+  `turn_lost_on_restart`: a native resume opens a fresh split session, which
+  never continues a turn begun before it. The next turn resumes natively.
+  Stop the proxy gracefully (give it more than a few seconds) so shutdown
+  settles in-flight turns itself.
 - SQLite has no multi-worker takeover.
 - Abandoned provider-native sessions are not deleted remotely.

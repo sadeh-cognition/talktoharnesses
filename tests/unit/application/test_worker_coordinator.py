@@ -38,6 +38,7 @@ from talktoharnesses.domain.models import (
     HarnessCapabilities,
     HarnessConfiguration,
     LaunchSnapshot,
+    SplitStreamCursor,
     SubmitTurnPayload,
     Turn,
 )
@@ -106,7 +107,9 @@ def _seed_live_state(
     native_session_id: str | None = "native-1",
     requires_recreation: bool = False,
     with_binding: bool = True,
+    turn_in_flight: bool = True,
 ) -> tuple[UUID, UUID, UUID]:
+    """A live conversation; without a turn in flight only the command stays live."""
     turn_id = uuid4()
     command_id = uuid4()
     conversation_id = uuid4()
@@ -153,14 +156,14 @@ def _seed_live_state(
     conversation = state.conversation.model_copy(
         update={
             "status": ConversationStatus.RUNNING,
-            "active_turn_id": turn_id,
+            "active_turn_id": turn_id if turn_in_flight else None,
         }
     )
     persistence.seed(
         state.model_copy(
             update={
                 "conversation": conversation,
-                "active_turn": turn,
+                "active_turn": turn if turn_in_flight else None,
                 "commands": {command_id: command},
             }
         )
@@ -327,7 +330,7 @@ async def test_heartbeat_waits_for_other_worker_lease_before_reacquiring() -> No
 @pytest.mark.asyncio
 async def test_apply_native_resume_success() -> None:
     persistence = MemoryPersistence()
-    cid, command_id, turn_id = _seed_live_state(persistence)
+    cid, command_id, _ = _seed_live_state(persistence, turn_in_flight=False)
     coordinator, _, runtime = _coordinator(persistence)
     fence = _own(coordinator, persistence, cid)
     runtime.prepare_launch_snapshot = AsyncMock(return_value=_launch())  # type: ignore[method-assign]
@@ -348,17 +351,86 @@ async def test_apply_native_resume_success() -> None:
     assert resume_await is not None
     assert resume_await.kwargs["fence"] == fence
     assert cid in coordinator.owned_fences
-    # Delivered live turn remains delivered after successful resume.
+    # Live work without a turn in flight stays delivered after the resume.
     assert persistence.states[cid].commands[command_id].status is CommandStatus.DELIVERED
-    active_turn = persistence.states[cid].active_turn
-    assert active_turn is not None
-    assert active_turn.id == turn_id
+
+
+async def _recover_with_cursor(
+    *,
+    cursor_binding: str,
+    reattach_error: BaseException | None = None,
+) -> tuple[MemoryPersistence, AsyncMock, AsyncMock, UUID, UUID]:
+    """Recover a turn in flight; returns the reattach and probe mocks."""
+    persistence = MemoryPersistence()
+    cid, command_id, _ = _seed_live_state(persistence)
+    state = persistence.states[cid]
+    assert state.binding is not None
+    if cursor_binding != "none":
+        binding_id = state.binding.id if cursor_binding == "current" else uuid4()
+        cursor = SplitStreamCursor(binding_id=binding_id, session_id=uuid4(), frame_id=4)
+        persistence.states[cid] = state.model_copy(update={"split_stream": cursor})
+    coordinator, _, runtime = _coordinator(persistence)
+    fence = _own(coordinator, persistence, cid)
+    probe = AsyncMock(return_value=_launch())
+    runtime.prepare_launch_snapshot = probe  # type: ignore[method-assign]
+    reattach = AsyncMock(side_effect=reattach_error)
+    runtime.reattach_for_recovery = reattach  # type: ignore[method-assign]
+    runtime.resume_for_recovery = AsyncMock()  # type: ignore[method-assign]
+    await coordinator._recover_owned(  # pyright: ignore[reportPrivateUsage]
+        cid, fence, attempt_id=None, trigger=RecoveryTrigger.STARTUP
+    )
+    # A turn in flight is never resumed natively: a fresh split session never runs it.
+    runtime.resume_for_recovery.assert_not_awaited()
+    return persistence, reattach, probe, cid, command_id
+
+
+@pytest.mark.asyncio
+async def test_recovery_reattaches_the_split_session_that_outlived_the_proxy() -> None:
+    persistence, reattach, probe, cid, command_id = await _recover_with_cursor(
+        cursor_binding="current"
+    )
+
+    reattach.assert_awaited_once()
+    # Reattaching needs no resume support, so the sandbox is not probed.
+    probe.assert_not_awaited()
+    assert reattach.await_args is not None
+    cursor = cast(SplitStreamCursor, reattach.await_args.args[3])
+    assert cursor.frame_id == 4
+    # The turn keeps running: its remaining frames replay from the split.
+    state = persistence.states[cid]
+    assert state.active_turn is not None
+    assert state.commands[command_id].status is CommandStatus.DELIVERED
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("cursor_binding", "reattach_error"),
+    [
+        ("current", DomainError(ErrorCode.NOT_FOUND, "split session not found")),
+        ("none", None),
+        ("other", None),
+    ],
+    ids=["reattach-failed", "no-cursor", "cursor-of-another-binding"],
+)
+async def test_a_turn_that_cannot_be_reattached_is_settled_as_lost(
+    cursor_binding: str, reattach_error: BaseException | None
+) -> None:
+    persistence, reattach, _, cid, command_id = await _recover_with_cursor(
+        cursor_binding=cursor_binding, reattach_error=reattach_error
+    )
+
+    assert reattach.await_count == (1 if reattach_error is not None else 0)
+    state = persistence.states[cid]
+    assert state.active_turn is None
+    assert state.commands[command_id].status is CommandStatus.OUTCOME_UNKNOWN
+    lost = [e for e in persistence.events[cid] if e.type == "turn_outcome_unknown"]
+    assert [e.payload.message for e in lost] == ["turn_lost_on_restart"]  # type: ignore[union-attr]
 
 
 @pytest.mark.asyncio
 async def test_native_resume_failure_falls_through_to_handoff() -> None:
     persistence = MemoryPersistence()
-    cid, _, _ = _seed_live_state(persistence)
+    cid, _, _ = _seed_live_state(persistence, turn_in_flight=False)
     coordinator, _, runtime = _coordinator(persistence)
     fence = _own(coordinator, persistence, cid)
     runtime.prepare_launch_snapshot = AsyncMock(return_value=_launch())  # type: ignore[method-assign]
@@ -493,7 +565,7 @@ async def test_handoff_fallback_with_binding_rotates_session() -> None:
 @pytest.mark.asyncio
 async def test_native_resume_stale_owner_drops_lease() -> None:
     persistence = MemoryPersistence()
-    cid, _, _ = _seed_live_state(persistence)
+    cid, _, _ = _seed_live_state(persistence, turn_in_flight=False)
     coordinator, _, runtime = _coordinator(persistence)
     fence = _own(coordinator, persistence, cid)
     runtime.prepare_launch_snapshot = AsyncMock(return_value=_launch())  # type: ignore[method-assign]
@@ -658,7 +730,7 @@ async def test_probe_failure_and_resume_generic_exception_fall_to_handoff() -> N
     runtime.recovery_handoff_fallback.assert_awaited_once()
 
     persistence2 = MemoryPersistence()
-    cid2, _, _ = _seed_live_state(persistence2)
+    cid2, _, _ = _seed_live_state(persistence2, turn_in_flight=False)
     coordinator2, _, runtime2 = _coordinator(persistence2)
     fence2 = _own(coordinator2, persistence2, cid2)
     runtime2.prepare_launch_snapshot = AsyncMock(return_value=_launch())  # type: ignore[method-assign]

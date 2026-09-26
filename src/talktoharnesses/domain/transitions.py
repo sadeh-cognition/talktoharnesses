@@ -64,6 +64,7 @@ from talktoharnesses.domain.models import (
     InteractionAnswer,
     LaunchSnapshot,
     PendingInteraction,
+    SplitStreamCursor,
     SteerPayload,
     StructuredQuestionPayload,
     SubmitTurnPayload,
@@ -92,6 +93,8 @@ class ConversationState(BaseModel):
     # Native provider identity / stream-offset dedupe (Phase 4).
     seen_native_ids: frozenset[str] = Field(default_factory=frozenset)
     seen_stream_offsets: frozenset[str] = Field(default_factory=frozenset)
+    # The split session and frame the committed events came from (Phase B).
+    split_stream: SplitStreamCursor | None = None
 
 
 @dataclass(frozen=True, slots=True)

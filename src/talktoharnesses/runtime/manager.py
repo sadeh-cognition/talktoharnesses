@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Literal, Protocol, cast
@@ -34,6 +34,7 @@ from talktoharnesses.domain.models import (
     HarnessConfiguration,
     LaunchSnapshot,
     ProcessRecord,
+    SplitStreamCursor,
 )
 from talktoharnesses.domain.transitions import (
     ConversationState,
@@ -50,6 +51,7 @@ from talktoharnesses.providers.adapter import (
     HarnessInteractionRequest,
     HarnessSession,
     ResumeSessionRequest,
+    SplitStreamAdapter,
     StartSessionRequest,
     TurnRequest,
 )
@@ -149,20 +151,13 @@ def _import_remote_seen(
     seen_native_ids: frozenset[str],
     seen_stream_offsets: frozenset[str],
 ) -> None:
-    """Seed a remote adapter's dedupe state before session create.
+    """Seed a split adapter's dedupe state before session create.
 
     The split must import seen sets before ``resume`` so replayed native events
-    are deduplicated at the source; local adapters keep today's pump-time
-    import untouched.
+    are deduplicated at the source.
     """
-    if getattr(adapter, "remote", False) is not True:
-        return
-    import_seen = getattr(adapter, "import_seen", None)
-    if callable(import_seen):
-        cast(
-            Callable[[frozenset[str], frozenset[str]], None],
-            import_seen,
-        )(seen_native_ids, seen_stream_offsets)
+    if isinstance(adapter, SplitStreamAdapter):
+        adapter.import_seen(seen_native_ids, seen_stream_offsets)
 
 
 def _map_resume_reason(exc: DomainError) -> RecoveryReasonCode:
@@ -320,6 +315,30 @@ class RuntimeManager:
         Never attaches to a prior PID. Commits lifecycle under the fence before
         installing the runtime into the live map.
         """
+        async with self._recovery_slot(conversation_id, configuration, expected_binding_kind):
+            return await self._resume_for_recovery_locked(
+                conversation_id=conversation_id,
+                owner_id=owner_id,
+                configuration=configuration,
+                native_session_id=native_session_id,
+                worker_id=worker_id,
+                fence=fence,
+                previous_launch=previous_launch,
+                adapter_version=adapter_version,
+            )
+
+    @contextlib.asynccontextmanager
+    async def _recovery_slot(
+        self,
+        conversation_id: UUID,
+        configuration: HarnessConfiguration,
+        expected_binding_kind: HarnessKind,
+    ) -> AsyncGenerator[None]:
+        """Hold a startup slot and the conversation lock for one recovery runtime.
+
+        Refuses during shutdown, at capacity, when the conversation already has
+        a runtime, or when the binding changed harness kind.
+        """
         task = asyncio.current_task()
         assert task is not None
         async with self._global_lock:
@@ -342,19 +361,120 @@ class RuntimeManager:
                         RecoveryReasonCode.INVARIANT_FAILURE.value,
                         details={"conversation_id": str(conversation_id)},
                     )
-                return await self._resume_for_recovery_locked(
-                    conversation_id=conversation_id,
-                    owner_id=owner_id,
-                    configuration=configuration,
-                    native_session_id=native_session_id,
-                    worker_id=worker_id,
-                    fence=fence,
-                    previous_launch=previous_launch,
-                    adapter_version=adapter_version,
-                )
+                yield
         finally:
             async with self._global_lock:
                 self._startup_tasks.discard(task)
+
+    async def reattach_for_recovery(
+        self,
+        conversation_id: UUID,
+        owner_id: str,
+        configuration: HarnessConfiguration,
+        cursor: SplitStreamCursor,
+        *,
+        worker_id: str,
+        fence: int,
+        expected_binding_kind: HarnessKind,
+    ) -> ManagedRuntime:
+        """Take over the split session that outlived the previous proxy process.
+
+        The harness never stopped, so nothing is resumed and no session event
+        is committed: a new process row records this incarnation, and the event
+        pump replays the split frames after ``cursor``. A failure closes the
+        split session, so a following native resume starts clean.
+        """
+        async with self._recovery_slot(conversation_id, configuration, expected_binding_kind):
+            return await self._reattach_for_recovery_locked(
+                conversation_id=conversation_id,
+                owner_id=owner_id,
+                configuration=configuration,
+                cursor=cursor,
+                worker_id=worker_id,
+                fence=fence,
+            )
+
+    async def _reattach_for_recovery_locked(
+        self,
+        *,
+        conversation_id: UUID,
+        owner_id: str,
+        configuration: HarnessConfiguration,
+        cursor: SplitStreamCursor,
+        worker_id: str,
+        fence: int,
+    ) -> ManagedRuntime:
+        state = await self._persistence.get_worker_snapshot(conversation_id)
+        binding = state.binding
+        if binding is None or binding.id != cursor.binding_id:
+            raise DomainError(
+                ErrorCode.INVALID_STATE,
+                "split cursor belongs to another binding",
+                details={"conversation_id": str(conversation_id)},
+            )
+        launch = binding.launch_snapshot
+        if launch is None:
+            raise DomainError(
+                ErrorCode.INVALID_STATE,
+                "binding has no launch snapshot",
+                details={"conversation_id": str(conversation_id)},
+            )
+        plan = self._plan_launch(configuration=configuration)
+        if not isinstance(plan.adapter, SplitStreamAdapter):
+            raise DomainError(
+                ErrorCode.INVALID_STATE,
+                "adapter cannot reattach a split session",
+                details={"conversation_id": str(conversation_id)},
+            )
+        plan.adapter.import_seen(state.seen_native_ids, state.seen_stream_offsets)
+        session = HarnessSession(
+            conversation_id=conversation_id,
+            binding_id=binding.id,
+            kind=binding.kind,
+            native_session_id=binding.native_session_id,
+            model=configuration.model,
+            mode=configuration.mode,
+            effort=configuration.effort,
+        )
+        try:
+            await plan.adapter.reattach(session, configuration=configuration, cursor=cursor)
+            process_record = ProcessRecord(
+                conversation_id=conversation_id,
+                binding_id=binding.id,
+                status=ProcessStatus.RUNNING,
+                started_at=self._clock(),
+            )
+            await self._persistence.commit_runtime_lifecycle(
+                conversation_id,
+                state.conversation.version,
+                state,
+                process_record,
+                launch,
+                (),
+                worker_id=worker_id,
+                fence=fence,
+            )
+            return self._install_runtime(
+                ManagedRuntime(
+                    conversation_id=conversation_id,
+                    owner_id=owner_id,
+                    adapter=plan.adapter,
+                    session=session,
+                    process=None,
+                    process_record=process_record,
+                    launch=launch,
+                    worker_id=worker_id,
+                    fence=fence,
+                )
+            )
+        except BaseException:
+            await self._rollback_adapter_startup(
+                plan.adapter,
+                conversation_id=conversation_id,
+                binding_id=binding.id,
+                configuration=configuration,
+            )
+            raise
 
     async def _resume_for_recovery_locked(
         self,
@@ -521,25 +641,19 @@ class RuntimeManager:
             get_observability().observe_committed_events(result.events, state=result.state)
             await checkpoint(self._fault_callback, FaultPoint.AFTER_NATIVE_RESUME_COMMIT)
 
-            managed = ManagedRuntime(
-                conversation_id=conversation_id,
-                owner_id=owner_id,
-                adapter=plan.adapter,
-                session=session,
-                process=handle,
-                process_record=process_record,
-                launch=launch,
-                worker_id=worker_id,
-                fence=fence,
-            )
-            if handle is not None:
-                pump = asyncio.create_task(
-                    self._lifecycle_pump(managed),
-                    name=f"lifecycle-{conversation_id}",
+            managed = self._install_runtime(
+                ManagedRuntime(
+                    conversation_id=conversation_id,
+                    owner_id=owner_id,
+                    adapter=plan.adapter,
+                    session=session,
+                    process=handle,
+                    process_record=process_record,
+                    launch=launch,
+                    worker_id=worker_id,
+                    fence=fence,
                 )
-                managed.tasks.append(pump)
-            self._runtimes[conversation_id] = managed
-            self._arm_idle_timer(conversation_id)
+            )
             return managed, reason
         except BaseException:
             if handle is not None:
@@ -792,25 +906,19 @@ class RuntimeManager:
             get_observability().observe_committed_events(result.events, state=result.state)
             state = await self._persistence.get_snapshot(conversation_id, owner_id)
 
-            managed = ManagedRuntime(
-                conversation_id=conversation_id,
-                owner_id=owner_id,
-                adapter=adapter,
-                session=session,
-                process=handle,
-                process_record=process_record,
-                launch=launch,
-                worker_id=worker_id,
-                fence=fence,
-            )
-            if handle is not None:
-                pump = asyncio.create_task(
-                    self._lifecycle_pump(managed),
-                    name=f"lifecycle-{conversation_id}",
+            self._install_runtime(
+                ManagedRuntime(
+                    conversation_id=conversation_id,
+                    owner_id=owner_id,
+                    adapter=adapter,
+                    session=session,
+                    process=handle,
+                    process_record=process_record,
+                    launch=launch,
+                    worker_id=worker_id,
+                    fence=fence,
                 )
-                managed.tasks.append(pump)
-            self._runtimes[conversation_id] = managed
-            self._arm_idle_timer(conversation_id)
+            )
             return session
 
         except asyncio.CancelledError:
@@ -1239,16 +1347,7 @@ class RuntimeManager:
                     "no candidate runtime for binding",
                     details={"binding_id": str(binding_id)},
                 )
-            self._runtimes[conversation_id] = managed
-            if managed.process is not None:
-                managed.tasks.append(
-                    asyncio.create_task(
-                        self._lifecycle_pump(managed),
-                        name=f"lifecycle-{conversation_id}",
-                    )
-                )
-            self._arm_idle_timer(conversation_id)
-            return managed
+            return self._install_runtime(managed)
 
     async def close_candidate(self, binding_id: UUID) -> None:
         """Shut a rejected candidate down; it owns no durable rows to settle."""
@@ -1782,6 +1881,23 @@ class RuntimeManager:
             if prior_events:
                 managed.stderr_truncation_persisted = True
             return
+
+    def _install_runtime(self, managed: ManagedRuntime) -> ManagedRuntime:
+        """Make ``managed`` its conversation's live runtime.
+
+        Supervises its process, when it has one, and arms the idle reap.
+        """
+        conversation_id = managed.conversation_id
+        if managed.process is not None:
+            managed.tasks.append(
+                asyncio.create_task(
+                    self._lifecycle_pump(managed),
+                    name=f"lifecycle-{conversation_id}",
+                )
+            )
+        self._runtimes[conversation_id] = managed
+        self._arm_idle_timer(conversation_id)
+        return managed
 
     def _arm_idle_timer(self, conversation_id: UUID) -> None:
         existing = self._idle_tasks.pop(conversation_id, None)

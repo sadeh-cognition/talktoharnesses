@@ -101,6 +101,7 @@ VENDORED_TESTS: dict[str, bool] = {
     "test_logging_config.py": False,
     "test_private_env.py": False,
     "test_process_bound.py": False,
+    "test_split_sessions.py": False,
     "test_telemetry.py": False,
 }
 

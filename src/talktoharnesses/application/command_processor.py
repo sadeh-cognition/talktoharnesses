@@ -7,11 +7,13 @@ import contextlib
 import logging
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
-from typing import Protocol, TypedDict, runtime_checkable
+from typing import TypedDict
 from uuid import UUID, uuid4
 
 from talktoharnesses.application.delta_batcher import DeltaBatcher
 from talktoharnesses.application.event_dispatcher import (
+    NO_ORIGIN,
+    EventOrigin,
     apply_outcome_unknown,
     dispatch_harness_event,
     mark_command_delivered,
@@ -54,6 +56,7 @@ from talktoharnesses.providers.adapter import (
     HarnessAdapter,
     HarnessInteractionRequest,
     HarnessSession,
+    SplitStreamAdapter,
     SteerRequest,
     TurnRequest,
 )
@@ -100,23 +103,20 @@ class _FenceCommitKwargs(TypedDict, total=False):
     fence: int
 
 
-@runtime_checkable
-class _NativeDedupeAdapter(Protocol):
-    def import_seen(
-        self,
-        native_ids: frozenset[str],
-        stream_offsets: frozenset[str],
-    ) -> None: ...
-
-    def export_seen(self) -> tuple[frozenset[str], frozenset[str]]: ...
+_PendingHarnessInput = tuple[HarnessEvent, datetime, EventOrigin]
 
 
-_PendingHarnessInput = tuple[
-    HarnessEvent,
-    datetime,
-    tuple[str, ...],
-    tuple[str, ...],
-]
+def _event_origin(managed: ManagedRuntime | None, state: ConversationState) -> EventOrigin:
+    """Where the adapter's current event came from, relative to committed state."""
+    adapter = managed.adapter if managed is not None else None
+    if not isinstance(adapter, SplitStreamAdapter):
+        return NO_ORIGIN
+    seen_native, seen_offsets = adapter.export_seen()
+    return EventOrigin(
+        tuple(seen_native - state.seen_native_ids),
+        tuple(seen_offsets - state.seen_stream_offsets),
+        adapter.split_cursor(),
+    )
 
 
 class CommandProcessor:
@@ -1084,14 +1084,8 @@ class CommandProcessor:
                     base_version = state.conversation.version
                     rebased_events: list[ConversationEvent] = []
                     rebased_commands: list[Command] = []
-                    for source_event, now, native_ids, stream_offsets in source_inputs:
-                        result = dispatch_harness_event(
-                            state,
-                            source_event,
-                            now=now,
-                            native_ids=native_ids,
-                            stream_offsets=stream_offsets,
-                        )
+                    for source_event, now, origin in source_inputs:
+                        result = dispatch_harness_event(state, source_event, now=now, origin=origin)
                         state = result.state
                         rebased_events.extend(result.events)
                         rebased_commands.extend(result.commands)
@@ -1105,7 +1099,7 @@ class CommandProcessor:
         batcher = DeltaBatcher(conversation_id=conversation_id, flush=flush)
         self._batchers[conversation_id] = batcher
 
-        if isinstance(managed.adapter, _NativeDedupeAdapter):
+        if isinstance(managed.adapter, SplitStreamAdapter):
             snapshot = await self._persistence.get_worker_snapshot(conversation_id)
             managed.adapter.import_seen(snapshot.seen_native_ids, snapshot.seen_stream_offsets)
 
@@ -1264,19 +1258,8 @@ class CommandProcessor:
 
             now = self._clock()
             try:
-                native_ids: tuple[str, ...] = ()
-                stream_offsets: tuple[str, ...] = ()
-                if managed is not None and isinstance(managed.adapter, _NativeDedupeAdapter):
-                    seen_native, seen_offsets = managed.adapter.export_seen()
-                    native_ids = tuple(seen_native - state.seen_native_ids)
-                    stream_offsets = tuple(seen_offsets - state.seen_stream_offsets)
-                result = dispatch_harness_event(
-                    state,
-                    event,
-                    now=now,
-                    native_ids=native_ids,
-                    stream_offsets=stream_offsets,
-                )
+                origin = _event_origin(managed, state)
+                result = dispatch_harness_event(state, event, now=now, origin=origin)
             except DomainError as exc:
                 logger.warning("dispatch failed code=%s", exc.code.value)
                 await self._mark_active_turn_outcome_unknown(
@@ -1288,7 +1271,7 @@ class CommandProcessor:
                 return True
 
             if pending_inputs is not None:
-                source = (event, now, native_ids, stream_offsets)
+                source = (event, now, origin)
                 for pending_event in result.events:
                     pending_inputs[pending_event.event_id] = source
             await batcher.add(

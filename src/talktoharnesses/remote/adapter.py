@@ -7,6 +7,7 @@ split service this adapter talks to.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from collections.abc import AsyncIterator, Callable
 from typing import Protocol, runtime_checkable
@@ -50,6 +51,7 @@ from tth_types.split_api import (
 
 from talktoharnesses._sse import SseDecoder
 from talktoharnesses.domain.events import HarnessEvent
+from talktoharnesses.domain.models import SplitStreamCursor
 from talktoharnesses.remote.handle import RemoteProcessHandle
 from talktoharnesses.remote.isolated_sandbox import IsolatedSandbox
 from talktoharnesses.remote.sandbox import SplitEndpoint, rewrite_loopback_url
@@ -148,10 +150,9 @@ def _raise_split_error(response: httpx.Response) -> None:
 class RemoteHarnessAdapter:
     """HarnessAdapter implementation proxying to one split service session."""
 
-    # Duck-typed markers read by RuntimeManager: no local executable, no local
-    # spawn (the split owns the process), remote seen-import before start.
+    # Duck-typed marker read by RuntimeManager: no local executable, no local
+    # spawn (the split owns the process).
     sdk_managed = True
-    remote = True
 
     def __init__(
         self,
@@ -178,6 +179,12 @@ class RemoteHarnessAdapter:
         # The policy scope this adapter holds in use until it closes.
         self._scope: IsolatedSandbox | None = None
         self._closed = False
+        # Where the split stream stands: the binding it serves and the last
+        # frame read. ``reattach`` opens the replay stream the next
+        # ``events`` call consumes.
+        self._binding_id: UUID | None = None
+        self._last_frame_id = 0
+        self._replay: httpx.Response | None = None
 
     async def _bind_policy(self, configuration: HarnessConfiguration) -> None:
         if isinstance(self._endpoints, ScopedSandboxManager):
@@ -263,6 +270,22 @@ class RemoteHarnessAdapter:
                 details={"kind": self.kind.value, "path": path},
             ) from exc
         if response.status_code >= 400:
+            _raise_split_error(response)
+        return response
+
+    async def _open_event_stream(self, sid: UUID, *, after: int | None) -> httpx.Response:
+        """Open the split session's frame stream; ``after`` replays from a cursor."""
+        client = await self._client_for_split()
+        request = client.build_request(
+            "GET",
+            f"/v1/sessions/{sid}/events",
+            params={"after": after} if after is not None else None,
+            timeout=_STREAM_TIMEOUT,
+        )
+        response = await client.send(request, stream=True)
+        if response.status_code >= 400:
+            await response.aread()
+            await response.aclose()
             _raise_split_error(response)
         return response
 
@@ -387,6 +410,8 @@ class RemoteHarnessAdapter:
         # budgets. Keep the proxy request alive across the whole sequence and
         # retain its client-chosen id so rollback can always address it.
         self._session_id = body.session_id
+        self._binding_id = body.binding_id
+        self._last_frame_id = 0
         response = await self._post(
             "/v1/sessions",
             body.model_dump_json(),
@@ -432,6 +457,53 @@ class RemoteHarnessAdapter:
         await self._post(f"/v1/sessions/{sid}/interrupt")
         logger.info("split interrupt accepted kind=%s session=%s", self.kind.value, sid)
 
+    def split_cursor(self) -> SplitStreamCursor | None:
+        """The split session and the last frame read from it."""
+        if self._session_id is None or self._binding_id is None:
+            return None
+        return SplitStreamCursor(
+            binding_id=self._binding_id, session_id=self._session_id, frame_id=self._last_frame_id
+        )
+
+    async def reattach(
+        self,
+        session: HarnessSession,
+        *,
+        configuration: HarnessConfiguration,
+        cursor: SplitStreamCursor,
+    ) -> None:
+        """Take over a split session that outlived the proxy, resuming after ``cursor``.
+
+        Uses only a sandbox that is already running: nothing is prepared or
+        booted. Opens the replay stream at once, so the split's cursor check is
+        the one that counts: raises NOT_FOUND when the sandbox or the session is
+        gone and INVALID_CURSOR when the split no longer holds the frames after
+        the cursor. The next ``events`` call consumes the open stream.
+        """
+        if isinstance(self._endpoints, ScopedSandboxManager):
+            endpoint = await self._endpoints.running_endpoint(configuration)
+            if endpoint is None:
+                raise DomainError(
+                    ErrorCode.NOT_FOUND,
+                    "sandbox is not running",
+                    details={"kind": self.kind.value},
+                )
+            await self._bind_policy(configuration)
+            self._endpoint = endpoint
+        # Addressable before the stream opens, so a failed reattach's rollback
+        # still closes the split session.
+        self._session_id = cursor.session_id
+        self._binding_id = cursor.binding_id
+        self._last_frame_id = cursor.frame_id
+        self._replay = await self._open_event_stream(cursor.session_id, after=cursor.frame_id)
+        logger.info(
+            "split session reattached kind=%s session=%s conversation=%s after=%s",
+            self.kind.value,
+            cursor.session_id,
+            session.conversation_id,
+            cursor.frame_id,
+        )
+
     async def answer_interaction(
         self,
         session: HarnessSession,
@@ -447,7 +519,6 @@ class RemoteHarnessAdapter:
         sid = self._require_session_id()
 
         async def _gen() -> AsyncIterator[HarnessEvent | HarnessInteractionRequest]:
-            client = await self._client_for_split()
             decoder = SseDecoder()
             frames: dict[str, int] = {}
             outcome = "generator closed"
@@ -457,19 +528,17 @@ class RemoteHarnessAdapter:
                 sid,
                 session.conversation_id,
             )
+            response, self._replay = self._replay, None
             try:
-                async with client.stream(
-                    "GET",
-                    f"/v1/sessions/{sid}/events",
-                    timeout=_STREAM_TIMEOUT,
-                ) as response:
-                    if response.status_code >= 400:
-                        await response.aread()
-                        _raise_split_error(response)
+                if response is None:
+                    response = await self._open_event_stream(sid, after=None)
+                try:
                     async for chunk in response.aiter_bytes():
                         for sse in decoder.feed(chunk):
                             name = sse.event or "?"
                             frames[name] = frames.get(name, 0) + 1
+                            if sse.id is not None and sse.id.isdigit():
+                                self._last_frame_id = int(sse.id)
                             item = self._decode_frame(sse.event, sse.data)
                             if item is _STREAM_END:
                                 outcome = "end frame"
@@ -484,6 +553,8 @@ class RemoteHarnessAdapter:
                             if item is not None:
                                 yield item  # type: ignore[misc]
                     outcome = "response ended"
+                finally:
+                    await response.aclose()
             except httpx.HTTPError as exc:
                 outcome = f"http error: {exc!r}"
                 logger.warning(
@@ -576,6 +647,10 @@ class RemoteHarnessAdapter:
         """
         if self._scope is not None:
             self._scope.release(self)
+        if self._replay is not None:
+            replay, self._replay = self._replay, None
+            with contextlib.suppress(Exception):
+                await replay.aclose()
         if self._client is None:
             return
         client = self._client

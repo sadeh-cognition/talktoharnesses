@@ -24,6 +24,8 @@ from tth_types.split_api import (
     SplitError,
 )
 
+from tth_muse.sessions import get_session_store
+
 
 def _config(tmp_path_str: str) -> HarnessConfiguration:
     return HarnessConfiguration(
@@ -226,8 +228,6 @@ async def test_capacity_refusal_closes_started_session(
 ) -> None:
     """store.add raising CONVERSATION_BUSY must not orphan the started session."""
     from tth_types.enums import ErrorCode
-
-    from tth_muse.sessions import get_session_store
 
     store = get_session_store()
     monkeypatch.setattr(

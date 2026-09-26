@@ -148,7 +148,7 @@ async def test_close_finishes_when_frame_queue_is_full(
     created = await _create_session(client, str(tmp_path))
     entry = get_session_store().get(created.session_id)
     while not entry.queue.full():
-        entry.queue.put_nowait((FRAME_HARNESS_EVENT, "{}"))
+        entry.queue.put_nowait(entry.frame(FRAME_HARNESS_EVENT, "{}"))
 
     response = await asyncio.wait_for(
         client.delete(f"/v1/sessions/{created.session_id}"), timeout=1
