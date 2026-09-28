@@ -155,8 +155,8 @@ The existing tests also cover:
 
 - `tests/unit/remote/test_isolated_sandbox.py`: recreating a stopped gateway
 - `tests/live/test_sandbox_docker.py`: with real Docker, a stopped gateway is
-  replaced by a new running container on the scope network, and the agent
-  container is kept
+  replaced by a new running container attached to the scope network with its
+  alias, and the agent container is kept (verified on `ef27349`)
 - `tests/unit/remote/test_remote_adapter.py`: acquire and release, and MCP
   relay URLs through a bound scope
 - `tests/unit/remote/test_mcp_relay.py`: stopping a relay

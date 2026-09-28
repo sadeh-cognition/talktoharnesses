@@ -34,6 +34,7 @@ async def test_gateway_boot_reuse_network_denials_and_command_guard(
 ) -> None:
     import docker
     from docker.errors import NotFound
+    from docker.models.containers import Container
 
     root = tmp_path / "workspace"
     root.mkdir()
@@ -74,28 +75,41 @@ async def test_gateway_boot_reuse_network_denials_and_command_guard(
             )
             assert denied_control.status_code == 403
         container = client.containers.get(name)
+        token = endpoint.token
+        assert token is not None
+
+        async def prepare() -> None:
+            # Retry the blocking step of preparation. A recreated gateway is
+            # published on a new host port, so from here on it is reached
+            # through the manager's base URL, never `endpoint.base_url`.
+            await asyncio.to_thread(manager._ensure_container, HarnessKind.CODEX, token)  # pyright: ignore[reportPrivateUsage]
+            await manager._wait_healthy(HarnessKind.CODEX, manager._base_url(HarnessKind.CODEX))  # pyright: ignore[reportPrivateUsage]
+
+        def private_aliases(target: Container) -> list[str]:
+            attachment = target.attrs["NetworkSettings"]["Networks"].get(name + "-network")
+            if attachment is None:
+                return []
+            # Docker reports null aliases for an endpoint without any.
+            return attachment.get("Aliases") or []
+
         # Reconcile a gateway left without its private attachment. Retrying
         # preparation must repair an existing container, not only fresh ones.
         gateway = client.containers.get(name + "-gateway")
         network = client.networks.get(name + "-network")
         network.disconnect(gateway)
-        assert endpoint.token is not None
-        await asyncio.to_thread(manager._ensure_container, HarnessKind.CODEX, endpoint.token)  # pyright: ignore[reportPrivateUsage]
-        await manager._wait_healthy(HarnessKind.CODEX, manager._base_url(HarnessKind.CODEX))  # pyright: ignore[reportPrivateUsage]
+        await prepare()
         gateway.reload()
-        attachment = gateway.attrs["NetworkSettings"]["Networks"].get(name + "-network")
-        assert attachment is not None and GATEWAY_HOST in attachment["Aliases"]
+        assert GATEWAY_HOST in private_aliases(gateway)
         assert client.containers.get(name).id == container.id
         # A stopped gateway is recreated rather than restarted, since a Docker
         # Desktop restart can leave its bind-mount sources invalid.
         gateway.stop()
-        await asyncio.to_thread(manager._ensure_container, HarnessKind.CODEX, endpoint.token)  # pyright: ignore[reportPrivateUsage]
-        await manager._wait_healthy(HarnessKind.CODEX, manager._base_url(HarnessKind.CODEX))  # pyright: ignore[reportPrivateUsage]
+        await prepare()
         with pytest.raises(NotFound):
             gateway.reload()
         gateway = client.containers.get(name + "-gateway")
         assert gateway.status == "running"
-        assert name + "-network" in gateway.attrs["NetworkSettings"]["Networks"]
+        assert GATEWAY_HOST in private_aliases(gateway)
         assert client.containers.get(name).id == container.id
         original_gateway_id = gateway.id
         replacement = tmp_path / "replacement-login" / auth.name
@@ -104,8 +118,7 @@ async def test_gateway_boot_reuse_network_denials_and_command_guard(
         manager.config = manager.config.model_copy(
             update={"auth_files": {HarnessKind.CODEX: str(replacement)}}
         )
-        await asyncio.to_thread(manager._ensure_container, HarnessKind.CODEX, endpoint.token)  # pyright: ignore[reportPrivateUsage]
-        await manager._wait_healthy(HarnessKind.CODEX, manager._base_url(HarnessKind.CODEX))  # pyright: ignore[reportPrivateUsage]
+        await prepare()
         gateway = client.containers.get(name + "-gateway")
         assert gateway.id != original_gateway_id
         assert client.containers.get(name).id == container.id

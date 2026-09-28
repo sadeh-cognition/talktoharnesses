@@ -15,6 +15,20 @@ verified_against_commit: 78003994d9fe93108ce5a6bc3591ab2e2ef904d9
 
 Entries are appended using `## [YYYY-MM-DD] operation | Title`.
 
+## [2026-09-28] repair | Check the recreated gateway's alias in the live Docker gate
+
+Review follow-up to the reattachment fix, against baseline `ef27349`.
+`tests/live/test_sandbox_docker.py` now asserts the `tth-gateway.invalid`
+alias on the recreated gateway as well as the reattached one, and reads a
+null alias list as empty so a missing alias fails the assertion instead of
+raising `TypeError`. After the initial health checks it keeps only the split
+token, since each gateway recreation publishes a new host port. One helper
+runs the three preparation retries. The test passes with a gateway image built
+from `ef27349`. Clarified the gap sentence in
+[Project sandbox policies](requirements/project-sandbox-policies.md), which
+now records `ef27349` as its verified commit, and noted that baseline on the
+live evidence in [Reclaim sandbox scopes](requirements/reclaim-sandbox-scopes.md).
+
 ## [2026-09-28] repair | Reuse upstream connections on gateway keep-alive tunnels
 
 - `npm ci` in a repository's `.tth/setup.sh` stalled behind the policy gateway
