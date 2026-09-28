@@ -112,6 +112,13 @@ API URL to reach a fixed private reverse proxy because its native inference
 transport does not trust the interception CA; the upstream origin remains fixed
 and verified.
 
+Each denial appears in the scope gateway's log (`docker logs
+<scope>-gateway`) as `sandbox_policy_denied` with the policy id, revision,
+reason and host. `egress_denied` means the host is not allowed, `port_denied`
+an allowed host reached other than over HTTPS on port 443, and
+`private_address` an allowed host whose DNS answers include a non-public
+address. Paths, query strings, bodies and headers are never logged.
+
 Defaults allow provider operations and read-only PyPI/npm downloads. Additional
 HTTPS access requires exact host/path/method rules in the policy. Interpreter
 downloads from GitHub need explicit rules for the release and asset hosts.

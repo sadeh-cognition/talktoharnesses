@@ -125,6 +125,13 @@ async def test_gateway_boot_reuse_network_denials_and_command_guard(
             ["curl", "-fsS", "--max-time", "20", "-o", "/dev/null", "https://pypi.org/simple/pip/"]
         )
         assert allowed.exit_code == 0, allowed.output
+        # One curl sends these through one keep-alive tunnel, as npm does per
+        # pooled socket. The sixth request once stalled in the gateway.
+        reused = container.exec_run(
+            ["curl", "-fsS", "--max-time", "20"]
+            + ["-o", "/dev/null", "https://pypi.org/simple/pip/"] * 8
+        )
+        assert reused.exit_code == 0, reused.output
         denied = container.exec_run(
             ["curl", "-sS", "--max-time", "5", "https://unapproved.example/"]
         )

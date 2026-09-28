@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import fcntl
 import hmac
+import ipaddress
 import json
 import logging
 import socket
@@ -16,7 +17,7 @@ from urllib.parse import parse_qs, urlencode
 from mitmproxy import http, options
 from mitmproxy.proxy import server_hooks
 from mitmproxy.tools.dump import DumpMaster
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from tth_types.enums import HarnessKind
 from tth_types.sandbox import CommandCheck, SandboxPolicyRevision
 
@@ -45,6 +46,9 @@ logger.addHandler(logging.StreamHandler())
 logger.setLevel(logging.WARNING)
 logger.propagate = False
 
+CONNECTION_DENIED = "Sandbox policy denied this connection."
+PRIVATE_ADDRESS_DENIED = "Sandbox policy denied this address."
+
 
 class GatewayConfig(BaseModel):
     revision: SandboxPolicyRevision
@@ -59,10 +63,28 @@ class GatewayConfig(BaseModel):
     api_keys: dict[str, str] = Field(default_factory=dict, repr=False)
     cursor_login_file: str = "/state/cursor-login.json"
 
+    @field_validator("split_address")
+    @classmethod
+    def split_ip_literal(cls, value: str) -> str:
+        # The split route skips the public-address check only because
+        # GatewayEventLoop never resolves an IP literal.
+        if "%" in value:
+            raise ValueError("The split address must be an IP address without a zone.")
+        ipaddress.ip_address(value)
+        return value
+
 
 class PolicyGateway:
     def __init__(self, config: GatewayConfig) -> None:
         self.config = config
+        self.admitted_hosts = frozenset(
+            {rule.host for rule in config.revision.policy.egress}
+            | {
+                route.rule.host
+                for route in PROVIDER_ROUTES
+                if route.provider in KIND_PROVIDERS[config.kind]
+            }
+        )
         self.vault = CredentialVault(
             kind=config.kind,
             seed=config.seed,
@@ -73,15 +95,20 @@ class PolicyGateway:
             else None,
         )
 
-    def _deny(self, flow: http.HTTPFlow, reason: str = "egress_denied") -> None:
-        # Do not record paths, query strings, bodies or headers. They can contain
-        # credentials or arbitrary text even when a request was denied.
+    def _log_denial(self, reason: str, host: str) -> None:
+        # Record the host so denials can be diagnosed. Do not record paths, query
+        # strings, bodies or headers. They can contain credentials or arbitrary
+        # text even when a request was denied.
         logger.warning(
-            "sandbox_policy_denied policy=%s revision=%s reason=%s",
+            "sandbox_policy_denied policy=%s revision=%s reason=%s host=%s",
             self.config.revision.ref.id,
             self.config.revision.ref.revision,
             reason,
+            host,
         )
+
+    def _deny(self, flow: http.HTTPFlow, reason: str = "egress_denied") -> None:
+        self._log_denial(reason, flow.request.host)
         flow.response = http.Response.make(
             403,
             json.dumps(
@@ -95,15 +122,10 @@ class PolicyGateway:
         )
 
     def http_connect(self, flow: http.HTTPFlow) -> None:
-        host = flow.request.host.lower().rstrip(".")
-        hosts = {rule.host for rule in self.config.revision.policy.egress}
-        hosts.update(
-            route.rule.host
-            for route in PROVIDER_ROUTES
-            if route.provider in KIND_PROVIDERS[self.config.kind]
-        )
-        if flow.request.port != 443 or host not in hosts:
+        if flow.request.host.lower().rstrip(".") not in self.admitted_hosts:
             self._deny(flow)
+        elif flow.request.port != 443:
+            self._deny(flow, "port_denied")
 
     async def _refresh_lock(self, flow: http.HTTPFlow, exchange: TokenExchange) -> None:
         stream = self.vault.exchange_file(exchange).with_suffix(".tth-refresh.lock").open("a")
@@ -177,7 +199,8 @@ class PolicyGateway:
             request.stream = True
             return
         if request.scheme != "https" or request.port != 443:
-            self._deny(flow)
+            admitted = request.host.lower().rstrip(".") in self.admitted_hosts
+            self._deny(flow, "port_denied" if admitted else "egress_denied")
             return
         # Inside a CONNECT tunnel request.host is the tunnel's address, but the
         # agent's Host headers and request-target authority (absolute-form or
@@ -259,34 +282,38 @@ class PolicyGateway:
             self._unlock(flow)
             self._deny(flow, "credential_proxy_unsupported")
 
-    async def server_connect(self, data: server_hooks.ServerConnectionHookData) -> None:
+    def server_connect(self, data: server_hooks.ServerConnectionHookData) -> None:
         address = data.server.address
         if address in ((self.config.split_address, 8010), ("127.0.0.1", MCP_RELAY_PORT)):
             return
-        hosts = {rule.host for rule in self.config.revision.policy.egress}
-        hosts.update(
-            route.rule.host
-            for route in PROVIDER_ROUTES
-            if route.provider in KIND_PROVIDERS[self.config.kind]
-        )
-        if address is None or address[1] != 443 or address[0].lower().rstrip(".") not in hosts:
-            data.server.error = "Sandbox policy denied this connection."
-            return
-        try:
-            # Pin the address at the connection hook. mitmproxy selects a fresh
-            # connection after requestheaders, so pinning there is too early.
-            addresses = await asyncio.get_running_loop().getaddrinfo(
-                address[0],
-                address[1],
-                type=socket.SOCK_STREAM,
-            )
-            if not addresses or any(not public_address(str(item[4][0])) for item in addresses):
-                data.server.error = "Sandbox policy denied this address."
-                return
-            data.server.address = (str(addresses[0][4][0]), 443)
+        if address is None or address[0].lower().rstrip(".") not in self.admitted_hosts:
+            reason = "egress_denied"
+        elif address[1] != 443:
+            reason = "port_denied"
+        elif data.server.transport_protocol != "tcp":
+            # Only TCP connections resolve through GatewayEventLoop.
+            reason = "egress_denied"
+        elif not isinstance(asyncio.get_running_loop(), GatewayEventLoop):
+            # Nothing would check the addresses this name resolves to.
+            reason = "resolver_unavailable"
+        else:
+            # Keep the host name as the address. mitmproxy reuses an upstream
+            # connection only while its address equals the next request's host
+            # and port; a pinned IP here made every request open another
+            # connection until mitmproxy's five-per-address limit stalled the
+            # keep-alive tunnel. GatewayEventLoop resolves the name to public
+            # addresses only.
             data.server.sni = address[0]
-        except (OSError, ValueError):
-            data.server.error = "Sandbox gateway could not resolve this address."
+            return
+        self._log_denial(reason, address[0] if address else "")
+        data.server.error = CONNECTION_DENIED
+
+    def server_connect_error(self, data: server_hooks.ServerConnectionHookData) -> None:
+        # GatewayEventLoop refused the name's DNS answers; mitmproxy passes on
+        # only the error text.
+        address = data.server.address
+        if address and (data.server.error or "").endswith(PRIVATE_ADDRESS_DENIED):
+            self._log_denial("private_address", address[0])
 
     def responseheaders(self, flow: http.HTTPFlow) -> None:
         if flow.response is None:
@@ -349,19 +376,61 @@ async def bridge_mcp_relay(
     await asyncio.gather(pipe(reader, upstream_writer), pipe(upstream_reader, writer))
 
 
-async def serve(config_path: Path) -> None:
-    config = GatewayConfig.model_validate_json(config_path.read_text())
-    # Loopback only: the agent reaches this solely through the MCP route above.
-    bridge = await asyncio.start_server(
-        lambda reader, writer: bridge_mcp_relay(reader, writer, MCP_RELAY_SOCKET),
-        "127.0.0.1",
-        MCP_RELAY_PORT,
-    )
-    opts = options.Options(
-        listen_host="0.0.0.0", listen_port=GATEWAY_PORT, confdir="/state/ca", ssl_insecure=False
-    )
+class GatewayEventLoop(asyncio.SelectorEventLoop):
+    """Event loop whose outbound name resolution only yields public addresses.
+
+    mitmproxy opens every TCP upstream connection through this loop's
+    ``getaddrinfo`` and tries only the addresses it returns, so the addresses
+    checked here are the ones connected to; ``server_connect`` refuses other
+    transports. IP literals are not resolved, and ``server_connect`` admits
+    none besides the split and MCP relay addresses. Passive lookups only bind
+    the gateway's own listening sockets and are left alone.
+    """
+
+    async def getaddrinfo(
+        self,
+        host: bytes | str | None,
+        port: bytes | str | int | None,
+        *,
+        family: int = 0,
+        type: int = 0,
+        proto: int = 0,
+        flags: int = 0,
+    ) -> list[
+        tuple[
+            socket.AddressFamily,
+            socket.SocketKind,
+            int,
+            str,
+            tuple[str, int] | tuple[str, int, int, int] | tuple[int, bytes],
+        ]
+    ]:
+        addresses = await super().getaddrinfo(
+            host, port, family=family, type=type, proto=proto, flags=flags
+        )
+        if flags & socket.AI_PASSIVE:
+            return addresses
+        try:
+            public = bool(addresses) and all(
+                public_address(str(item[4][0])) for item in addresses
+            )
+        except ValueError:
+            public = False
+        if not public:
+            raise socket.gaierror(socket.EAI_NONAME, PRIVATE_ADDRESS_DENIED)
+        return addresses
+
+
+def gateway_master(config: GatewayConfig, opts: options.Options) -> DumpMaster:
+    """The policy proxy, honoring ``opts`` except for the options set here.
+
+    Callers choose where it listens, its CA directory and the CAs it trusts
+    upstream; TLS verification and the connection options below always apply.
+    It must run on a ``GatewayEventLoop``, or it refuses every upstream host.
+    """
     master = DumpMaster(opts, with_termlog=False, with_dumper=False)
     cast(Any, master.options).update(
+        ssl_insecure=False,
         connection_strategy="lazy",
         upstream_cert=False,
         block_global=False,
@@ -370,9 +439,27 @@ async def serve(config_path: Path) -> None:
         anticomp=True,
     )
     cast(Any, master.addons).add(PolicyGateway(config))
+    return master
+
+
+async def _serve(config: GatewayConfig) -> None:
+    # Loopback only: the agent reaches this solely through the MCP route above.
+    bridge = await asyncio.start_server(
+        lambda reader, writer: bridge_mcp_relay(reader, writer, MCP_RELAY_SOCKET),
+        "127.0.0.1",
+        MCP_RELAY_PORT,
+    )
+    opts = options.Options(listen_host="0.0.0.0", listen_port=GATEWAY_PORT, confdir="/state/ca")
+    master = gateway_master(config, opts)
     async with bridge:
         await master.run()
 
 
+def serve(config_path: Path) -> None:
+    config = GatewayConfig.model_validate_json(config_path.read_text())
+    with asyncio.Runner(loop_factory=GatewayEventLoop) as runner:
+        runner.run(_serve(config))
+
+
 if __name__ == "__main__":
-    asyncio.run(serve(Path(sys.argv[1])))
+    serve(Path(sys.argv[1]))

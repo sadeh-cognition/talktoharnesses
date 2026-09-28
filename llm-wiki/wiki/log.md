@@ -15,6 +15,32 @@ verified_against_commit: 78003994d9fe93108ce5a6bc3591ab2e2ef904d9
 
 Entries are appended using `## [YYYY-MM-DD] operation | Title`.
 
+## [2026-09-28] repair | Reuse upstream connections on gateway keep-alive tunnels
+
+- `npm ci` in a repository's `.tth/setup.sh` stalled behind the policy gateway
+  after 75 tarballs and ran past the 900 s setup timeout. The gateway's
+  `server_connect` rewrote each upstream address to a pinned IP. mitmproxy
+  reuses a connection only while its address equals the next request's host
+  and port, so every request opened another upstream connection and left it
+  open. mitmproxy allows five open connections per address for each client
+  connection, so the sixth request on a tunnel waited for the registry to
+  close an idle one. npm's 15 pooled sockets therefore stalled together.
+- The gateway now runs on `GatewayEventLoop`, whose `getaddrinfo` refuses a
+  name when any answer is not a public address. mitmproxy connects only to
+  those answers, so pinning holds without rewriting the address.
+  `server_connect` keeps the host name and still sets it as the SNI.
+- Denial log lines now include the host, never the path, query, body or headers.
+  `server_connect` refusals and refused DNS answers (`private_address`) are
+  logged too, and a disallowed port on an allowed host is `port_denied`.
+- The gateway fails closed off `GatewayEventLoop`: `server_connect` refuses
+  every upstream host on another loop and any non-TCP transport. Passive
+  lookups for its own listening sockets skip the check. `GatewayConfig`
+  requires the split address to be an IP literal, since only literals skip
+  resolution.
+- Updated [Project sandbox policies](requirements/project-sandbox-policies.md)
+  and the deployment guide. A domain-fronting denial logs the tunnel's host,
+  never the Host value the agent sent.
+
 ## [2026-09-28] repair | Detach a running gateway in the live Docker gate
 
 Against baseline `247a3b0`, `tests/live/test_sandbox_docker.py` failed at

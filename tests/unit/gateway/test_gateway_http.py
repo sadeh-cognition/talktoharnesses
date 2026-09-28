@@ -1,7 +1,7 @@
 import json
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlsplit
 from uuid import uuid4
 
@@ -148,24 +148,249 @@ async def test_refresh_response_never_returns_tokens_or_unknown_secret_fields(
     assert "refresh_lock" not in request.metadata
 
 
-async def test_dns_private_results_fail_closed(
+def test_dns_private_results_fail_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    import asyncio
+    import socket
+
+    from talktoharnesses.gateway.server import GatewayEventLoop
+
+    answers = {
+        "pypi.org": ["151.101.0.223"],
+        "rebound.example": ["151.101.0.223", "169.254.169.254"],
+        "gateway.localhost": ["127.0.0.1"],
+    }
+
+    def resolve(host: str, port: int, *args: Any) -> list[Any]:
+        return [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", (address, port))
+            for address in answers[host]
+        ]
+
+    monkeypatch.setattr(socket, "getaddrinfo", resolve)
+    loop = GatewayEventLoop()
+    try:
+        admitted = loop.run_until_complete(loop.getaddrinfo("pypi.org", 443))
+        assert [item[4] for item in admitted] == [("151.101.0.223", 443)]
+        # mitmproxy opens upstream connections this way. One private answer
+        # denies the name rather than leaving it to connection order.
+        with pytest.raises(OSError, match="Sandbox policy denied this address."):
+            loop.run_until_complete(asyncio.open_connection("rebound.example", 443))
+        # Binding the gateway's own listening sockets is not an outbound connection.
+        listener = loop.run_until_complete(
+            asyncio.start_server(lambda reader, writer: None, "gateway.localhost", 0)
+        )
+        listener.close()
+        loop.run_until_complete(listener.wait_closed())
+    finally:
+        loop.run_until_complete(loop.shutdown_default_executor())
+        loop.close()
+
+
+def test_serve_runs_the_gateway_on_the_vetting_loop(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import asyncio
+
+    from talktoharnesses.gateway import server
+
+    loops: list[type[asyncio.AbstractEventLoop]] = []
+
+    async def run(config: GatewayConfig) -> None:
+        loops.append(type(asyncio.get_running_loop()))
+
+    monkeypatch.setattr(server, "_serve", run)
+    config = tmp_path / "config.json"
+    config.write_text(gateway(tmp_path).config.model_dump_json())
+    server.serve(config)
+    assert loops == [server.GatewayEventLoop]
+
+
+def test_split_address_must_be_an_ip_literal(tmp_path: Path) -> None:
+    from pydantic import ValidationError
+
+    config = gateway(tmp_path).config.model_dump()
+    # Only IP literals bypass the resolver; a name would resolve to a private address.
+    for address in ("split.internal", "fe80::1%eth0", ""):
+        with pytest.raises(ValidationError):
+            GatewayConfig.model_validate({**config, "split_address": address})
+
+
+def test_admitted_upstream_connection_stays_reusable_for_its_host(tmp_path: Path) -> None:
+    import asyncio
+
+    from mitmproxy.proxy.layers.http import GetHttpConnection
+    from mitmproxy.proxy.server_hooks import ServerConnectionHookData
+
+    from talktoharnesses.gateway.server import CONNECTION_DENIED, GatewayEventLoop
+
+    proxy = gateway(tmp_path)
+    address = ("registry.npmjs.org", 443)
+    client = flow("https://registry.npmjs.org/").client_conn
+
+    async def admit() -> connection.Server:
+        server = connection.Server(address=address, tls=True)
+        proxy.server_connect(ServerConnectionHookData(client=client, server=server))
+        return server
+
+    # On any other loop nothing would check the addresses the name resolves to.
+    with asyncio.Runner(loop_factory=asyncio.new_event_loop) as runner:
+        assert runner.run(admit()).error == CONNECTION_DENIED
+    with asyncio.Runner(loop_factory=GatewayEventLoop) as runner:
+        server = runner.run(admit())
+    assert server.error is None
+    assert server.sni == "registry.npmjs.org"
+    # mitmproxy hands the tunnel's next request this connection only while its
+    # address still matches. Otherwise each request opens another connection.
+    assert GetHttpConnection(address, True, None).connection_spec_matches(server)
+
+
+def test_keep_alive_tunnel_reuses_one_upstream_connection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """npm holds one tunnel per pooled socket; its sixth request once stalled."""
+    import asyncio
+    import http.client
+    import socket
+    import ssl
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import serialization
+    from mitmproxy import options
+    from mitmproxy.certs import CertStore
+
+    from talktoharnesses.gateway import server
+
+    host = "registry.npmjs.org"
+    confdir = tmp_path / "ca"
+    ca = confdir / "mitmproxy-ca-cert.pem"
+    leaf = CertStore.from_store(confdir, "mitmproxy", 2048).get_cert(host, [x509.DNSName(host)])
+    (tmp_path / "leaf.pem").write_bytes(leaf.cert.to_pem())
+    (tmp_path / "leaf.key").write_bytes(
+        leaf.privatekey.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+    )
+    handshakes: list[str | None] = []
+    registry_tls = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+    registry_tls.load_cert_chain(tmp_path / "leaf.pem", tmp_path / "leaf.key")
+    registry_tls.sni_callback = lambda _socket, name, _context: handshakes.append(name)
+
+    async def registry(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            while await reader.readuntil(b"\r\n\r\n"):
+                writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\ntarball")
+                await writer.drain()
+        except (asyncio.IncompleteReadError, OSError):
+            writer.close()
+
+    upstream_port = 0
+    real_getaddrinfo = socket.getaddrinfo
+
+    def resolve(name: str, port: int, *args: Any) -> list[Any]:
+        if name != host:
+            return real_getaddrinfo(name, port, *args)
+        assert port == 443
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", upstream_port))]
+
+    def loopback_is_public(address: str) -> bool:
+        # The local registry listens on loopback; every other address stays private.
+        return address == "127.0.0.1"
+
+    monkeypatch.setattr(socket, "getaddrinfo", resolve)
+    monkeypatch.setattr(server, "public_address", loopback_is_public)
+
+    def fetch(proxy_port: int) -> list[int]:
+        tunnel = http.client.HTTPSConnection(
+            "127.0.0.1", proxy_port, timeout=5, context=ssl.create_default_context(cafile=ca)
+        )
+        tunnel.set_tunnel(host, 443)
+        try:
+            statuses: list[int] = []
+            for index in range(12):
+                tunnel.request("GET", f"/package-{index}/-/package-{index}-1.0.0.tgz")
+                response = tunnel.getresponse()
+                response.read()
+                statuses.append(response.status)
+            return statuses
+        finally:
+            tunnel.close()
+
+    async def scenario() -> list[int]:
+        nonlocal upstream_port
+        upstream = await asyncio.start_server(registry, "127.0.0.1", 0, ssl=registry_tls)
+        upstream_port = upstream.sockets[0].getsockname()[1]
+        async with upstream:
+            master = server.gateway_master(
+                gateway(tmp_path).config,
+                options.Options(
+                    listen_host="127.0.0.1",
+                    listen_port=0,
+                    confdir=str(confdir),
+                    ssl_verify_upstream_trusted_ca=str(ca),
+                ),
+            )
+            running = asyncio.create_task(master.run())
+            try:
+                proxyserver = cast(Any, master.addons).get("proxyserver")
+                async with asyncio.timeout(10):
+                    while not proxyserver.listen_addrs():
+                        await asyncio.sleep(0.01)
+                proxy_port: int = proxyserver.listen_addrs()[0][1]
+                return await asyncio.wait_for(asyncio.to_thread(fetch, proxy_port), 30)
+            finally:
+                master.shutdown()
+                await running
+
+    # The production loop, so the connections go through its resolver.
+    with asyncio.Runner(loop_factory=server.GatewayEventLoop) as runner:
+        assert runner.run(scenario()) == [200] * 12
+    assert handshakes == [host]
+
+
+async def test_denials_log_the_host_but_not_the_path_or_query(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
     import socket
 
     from mitmproxy.proxy.server_hooks import ServerConnectionHookData
 
-    async def resolve(*args: Any, **kwargs: Any) -> list[Any]:
-        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("169.254.169.254", 443))]
+    from talktoharnesses.gateway import server
 
-    monkeypatch.setattr(asyncio.get_running_loop(), "getaddrinfo", resolve)
     proxy = gateway(tmp_path)
-    request = flow("https://pypi.org/simple/")
-    request.server_conn.address = ("pypi.org", 443)
-    data = ServerConnectionHookData(client=request.client_conn, server=request.server_conn)
-    await proxy.server_connect(data)
-    assert data.server.error == "Sandbox policy denied this address."
+    client = flow("https://pypi.org/").client_conn
+
+    def upstream(address: tuple[str, int], error: str | None = None) -> ServerConnectionHookData:
+        data = ServerConnectionHookData(client=client, server=connection.Server(address=address))
+        data.server.error = error
+        return data
+
+    # What mitmproxy records when GatewayEventLoop refuses the DNS answers.
+    private = str(socket.gaierror(socket.EAI_NONAME, server.PRIVATE_ADDRESS_DENIED))
+    server.logger.addHandler(caplog.handler)
+    try:
+        proxy.http_connect(flow("https://unapproved.example/", "CONNECT"))
+        proxy.http_connect(flow("https://pypi.org:8443/", "CONNECT"))
+        await proxy.requestheaders(flow("https://pypi.org:8443/hidden/path?token=secret"))
+        await proxy.requestheaders(flow("http://unapproved.example/hidden"))
+        proxy.server_connect(upstream(("unapproved.example", 443)))
+        proxy.server_connect(upstream(("pypi.org", 8443)))
+        proxy.server_connect_error(upstream(("pypi.org", 443), private))
+        proxy.server_connect_error(upstream(("pypi.org", 443), "Connection refused"))
+    finally:
+        server.logger.removeHandler(caplog.handler)
+    messages = [record.getMessage() for record in caplog.records]
+    assert [message.split(" reason=")[1] for message in messages] == [
+        "egress_denied host=unapproved.example",
+        "port_denied host=pypi.org",
+        "port_denied host=pypi.org",
+        "egress_denied host=unapproved.example",
+        "egress_denied host=unapproved.example",
+        "port_denied host=pypi.org",
+        "private_address host=pypi.org",
+    ]
+    assert not any("hidden" in message or "secret" in message for message in messages)
 
 
 async def test_split_event_stream_is_not_buffered(tmp_path: Path) -> None:
@@ -451,7 +676,7 @@ async def test_mcp_route_reaches_only_the_host_relay_without_agent_credentials(
     assert request.request.headers["Accept"] == "text/event-stream"
     request.server_conn.address = ("127.0.0.1", 8081)
     data = ServerConnectionHookData(client=request.client_conn, server=request.server_conn)
-    await proxy.server_connect(data)
+    proxy.server_connect(data)
     assert data.server.error is None
     # The prefix only matters on the gateway's own origin.
     elsewhere = flow("http://pypi.org/__tth/mcp/handle")
@@ -460,7 +685,7 @@ async def test_mcp_route_reaches_only_the_host_relay_without_agent_credentials(
     loopback = flow("https://example.org/")
     loopback.server_conn.address = ("127.0.0.1", 8082)
     data = ServerConnectionHookData(client=loopback.client_conn, server=loopback.server_conn)
-    await proxy.server_connect(data)
+    proxy.server_connect(data)
     assert data.server.error == "Sandbox policy denied this connection."
 
 

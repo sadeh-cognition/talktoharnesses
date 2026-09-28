@@ -8,8 +8,8 @@ audiences:
 tags:
   - type/requirement
   - status/implemented
-last_verified: 2026-09-22
-verified_against_commit: bd5ffc2c6887ee9ef6354d4d8d84254acd1d5be4
+last_verified: 2026-09-28
+verified_against_commit: 8bb9734d16af25b20760c5f3aedce4dc4d9a0724
 ---
 
 # Project sandbox policies
@@ -32,7 +32,18 @@ case, a trailing dot and port 443 may differ. Anything else is denied as
 `egress_denied` before credentials are substituted, so a request cannot reach
 another tenant of a CDN that routes by Host (domain fronting). The gateway's own
 routes (split control, MCP relay, command check, Muse rewrite) set their own
-Host header. Denial logs record only the policy, revision and reason.
+Host header. The denial log names the tunnel's host, never the Host value the
+agent sent.
+Its event loop refuses a host name when any DNS answer is not a public address,
+and mitmproxy connects only to the answers that were checked. The gateway
+refuses every upstream host when it runs on another event loop, admits only
+TCP upstream connections, and requires the split address to be an IP literal,
+the only form that skips resolution. An upstream connection keeps the host
+name as its address, so later requests on the same keep-alive tunnel reuse it
+instead of opening another connection. Every denial is logged as
+`sandbox_policy_denied` with the policy, revision, reason (`egress_denied`,
+`port_denied`, `private_address` and others) and host; paths, queries, bodies
+and headers are never logged.
 Native authentication files and environment keys are replaced with scoped handles.
 Only admitted authentication fields receive real credentials. Token refresh is
 serialized against the host file and responses return handles.
@@ -155,6 +166,19 @@ mismatched Host header, absolute-form target and HTTP/2 `:authority`, duplicate
 Host headers, a non-default port, and a provider route carrying a credential
 handle. They also check that case, trailing-dot and `:443` spellings are still
 admitted and that denial logs omit the path, query and Host value.
+`tests/unit/gateway/test_gateway_http.py` runs the real mitmproxy with the
+gateway addon on the production event loop against a local TLS registry:
+twelve requests through one keep-alive tunnel complete over a single upstream
+handshake whose SNI is the host. It also covers resolution with a private
+answer, `serve` choosing that loop, refusal on any other loop, the admitted
+connection's reusable address, the split address check, and the logged
+reason and host for each kind of denial. The live test sends eight requests
+through one curl tunnel. Before its reattachment fix it ran from a scratch
+copy, where that check passed on the fixed gateway image and timed out from
+the sixth request on the previous one. On `8bb9734` with this fix, the whole
+live test passes. In an isolated scope, `npm ci` of a
+620-package frontend through the fixed gateway finished in 17 seconds; before
+the fix it stalled after 75 tarballs. The proxy suite passes 976 tests (21 skipped).
 
 ## Related
 
