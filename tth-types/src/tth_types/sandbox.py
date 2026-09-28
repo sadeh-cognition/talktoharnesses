@@ -139,9 +139,12 @@ class SandboxPolicy(PolicyModel):
         return value
 
     @model_serializer(mode="wrap")
-    def omit_unset_image(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+    def omit_unset_image(self, handler: SerializerFunctionWrapHandler):
         # Left out rather than null, so readers built before the field existed
-        # (extra="forbid") still accept every policy that does not use it.
+        # (extra="forbid") still accept every policy that does not use it. No
+        # return annotation: pydantic then documents the serialized policy with
+        # the model's own JSON schema, where the field is optional, instead of
+        # a free-form object.
         data: dict[str, object] = handler(self)
         if self.image_dockerfile is None:
             data.pop("image_dockerfile", None)

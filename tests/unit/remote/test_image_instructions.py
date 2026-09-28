@@ -156,3 +156,6 @@ def test_policy_without_image_text_serializes_without_the_field() -> None:
     assert custom.model_dump(mode="json")["image_dockerfile"] == "RUN true"
     assert "image_dockerfile" not in custom.model_dump(mode="json", exclude={"image_dockerfile"})
     assert SandboxPolicy.model_validate(custom.model_dump(mode="json")) == custom
+    schema = SandboxPolicy.model_json_schema(mode="serialization")
+    assert "image_dockerfile" in schema["properties"]
+    assert "image_dockerfile" not in schema["required"]
