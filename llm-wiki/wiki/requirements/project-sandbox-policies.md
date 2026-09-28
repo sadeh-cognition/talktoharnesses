@@ -91,6 +91,9 @@ Command guards are best effort; scripts and unobserved execution paths can bypas
 them. The MCP relay is covered by unit tests and a real Unix socket crossing into
 a Docker Desktop container; no live provider gate exercises an MCP tool call
 through it yet, and the relay buffers each request body. Network and credential boundaries remain independent of command approvals.
+The live Docker gate stops the gateway with `docker stop` and detaches it with
+`docker network disconnect`. It does not reproduce the invalid bind-mount
+sources that a Docker Desktop restart can leave behind.
 
 ## Acceptance criteria
 
@@ -129,10 +132,18 @@ across provider/revision/mount identities, and failed network attachment and
 gateway replacement. The relevant tests are `tests/unit/gateway/test_gateway_http.py`,
 `tests/unit/remote/test_scoped_sandboxes.py`, and
 `tests/unit/remote/test_isolated_sandbox.py`.
-`tests/live/test_sandbox_docker.py` passes with the rebuilt gateway image,
-repairs a deliberately detached gateway network, switches credential directory
+`tests/live/test_sandbox_docker.py` detaches the running gateway from the
+scope network and checks that preparation reattaches that same container with
+its `tth-gateway.invalid` alias. It then stops the gateway and checks that
+preparation replaces it with a new running, attached container instead of
+restarting it. It switches credential directory
 through a gateway replacement, preserves the agent container,
 and verifies permitted package reads, denied direct egress, and command denial.
+From `37c8daf`, which recreates stopped gateways, until 2026-09-28 the test
+stopped the gateway before detaching it and then reloaded the removed
+container, so it failed with Docker `NotFound` on every gateway image. Against
+`247a3b0` it passes on gateway and Codex images whose Python sources match that
+commit. With the reattachment removed from preparation, it fails its readiness wait.
 `tests/unit/remote/test_readiness_sandbox.py` exercises the production probe
 factory after a restart with a changed image tag. Healthy, unhealthy and
 disappearing gateways never enter preparation, and probe clients are closed.

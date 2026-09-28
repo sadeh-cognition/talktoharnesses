@@ -15,6 +15,20 @@ verified_against_commit: 78003994d9fe93108ce5a6bc3591ab2e2ef904d9
 
 Entries are appended using `## [YYYY-MM-DD] operation | Title`.
 
+## [2026-09-28] repair | Detach a running gateway in the live Docker gate
+
+Against baseline `247a3b0`, `tests/live/test_sandbox_docker.py` failed at
+`gateway.reload()` with Docker `NotFound`, whatever the gateway image. It stopped
+the gateway before detaching it from the scope network. Since `37c8daf`,
+preparation recreates a stopped gateway instead of restarting it, so that
+container no longer existed. The test now detaches a running gateway, so
+preparation must reattach that container with its `tth-gateway.invalid` alias.
+A separate step stops the gateway and asserts that it is recreated. The
+credential directory replacement and egress checks are unchanged. Updated the
+test evidence and gap in
+[Project sandbox policies](requirements/project-sandbox-policies.md) and the
+test evidence in [Reclaim sandbox scopes](requirements/reclaim-sandbox-scopes.md).
+
 ## [2026-09-28] ingest | Snapshot ADR 0008 into the vault
 
 - Preserved `docs/adr/0008-split-session-reattach.md` verbatim as

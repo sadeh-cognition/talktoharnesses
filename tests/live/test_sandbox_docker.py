@@ -18,6 +18,7 @@ import pytest
 from tth_types.sandbox import SandboxPolicy, SandboxPolicyRef, SandboxPolicyRevision
 
 from talktoharnesses.domain.enums import HarnessKind
+from talktoharnesses.gateway.routes import GATEWAY_HOST
 from talktoharnesses.remote.isolated_sandbox import IsolatedSandbox
 from talktoharnesses.remote.sandbox import SandboxConfig
 
@@ -76,13 +77,24 @@ async def test_gateway_boot_reuse_network_denials_and_command_guard(
         # Reconcile a gateway left without its private attachment. Retrying
         # preparation must repair an existing container, not only fresh ones.
         gateway = client.containers.get(name + "-gateway")
-        gateway.stop()
         network = client.networks.get(name + "-network")
         network.disconnect(gateway)
         assert endpoint.token is not None
         await asyncio.to_thread(manager._ensure_container, HarnessKind.CODEX, endpoint.token)  # pyright: ignore[reportPrivateUsage]
         await manager._wait_healthy(HarnessKind.CODEX, manager._base_url(HarnessKind.CODEX))  # pyright: ignore[reportPrivateUsage]
         gateway.reload()
+        attachment = gateway.attrs["NetworkSettings"]["Networks"].get(name + "-network")
+        assert attachment is not None and GATEWAY_HOST in attachment["Aliases"]
+        assert client.containers.get(name).id == container.id
+        # A stopped gateway is recreated rather than restarted, since a Docker
+        # Desktop restart can leave its bind-mount sources invalid.
+        gateway.stop()
+        await asyncio.to_thread(manager._ensure_container, HarnessKind.CODEX, endpoint.token)  # pyright: ignore[reportPrivateUsage]
+        await manager._wait_healthy(HarnessKind.CODEX, manager._base_url(HarnessKind.CODEX))  # pyright: ignore[reportPrivateUsage]
+        with pytest.raises(NotFound):
+            gateway.reload()
+        gateway = client.containers.get(name + "-gateway")
+        assert gateway.status == "running"
         assert name + "-network" in gateway.attrs["NetworkSettings"]["Networks"]
         assert client.containers.get(name).id == container.id
         original_gateway_id = gateway.id
