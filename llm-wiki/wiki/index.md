@@ -80,6 +80,7 @@ Use this catalog to route into the maintained knowledge graph. Obsidian users sh
 - [Event sequencing decision](decisions/event-sequencing.md)
 - [Runtime isolation decision](decisions/runtime-isolation.md)
 - [Split services decision](decisions/split-services.md): proxy and per-kind runtime ownership.
+- [Split session reattach decision](decisions/split-session-reattach.md): a restarted proxy continues the turn on a split session that outlived it.
 - [Strict compatibility decision](decisions/strict-compatibility.md)
 - [JWT authentication decision](decisions/jwt-authentication.md)
 - [Retention decision](decisions/retention.md)

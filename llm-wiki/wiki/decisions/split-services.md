@@ -82,6 +82,7 @@ The monolith was split at the `HarnessAdapter` seam in commit `4764402`.
 ## Related
 
 - [Runtime isolation decision](runtime-isolation.md)
+- [Split session reattach decision](split-session-reattach.md)
 - [Sandbox toolchain hygiene decision](sandbox-toolchain-hygiene.md)
 - [Runtime isolation architecture](../architecture/runtime-isolation.md)
 - [System context](../architecture/system-context.md)

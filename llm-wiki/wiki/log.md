@@ -15,6 +15,17 @@ verified_against_commit: 78003994d9fe93108ce5a6bc3591ab2e2ef904d9
 
 Entries are appended using `## [YYYY-MM-DD] operation | Title`.
 
+## [2026-09-28] ingest | Add the split session reattach decision page
+
+- Added [Split Session Reattach Decision](decisions/split-session-reattach.md)
+  from `raw/engineering/adr-0008-split-session-reattach.md`, so ADR 0008 has a
+  decision page like ADRs 0001 to 0007, with code and test evidence verified
+  against `247a3b0`.
+- Linked it from the index, the [Developer overview](maps/developer-overview.md),
+  and the Related sections of
+  [Runtime Isolation Architecture](architecture/runtime-isolation.md) and
+  [Split Services Architecture](decisions/split-services.md).
+
 ## [2026-09-28] repair | Check the recreated gateway's alias in the live Docker gate
 
 Review follow-up to the reattachment fix, against baseline `ef27349`.

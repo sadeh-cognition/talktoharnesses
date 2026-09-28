@@ -42,6 +42,7 @@ implemented in the associated uncommitted worktree changes.
 
 - [Isolated harness runtimes](../capabilities/isolated-harness-runtimes.md)
 - [Runtime isolation decision](../decisions/runtime-isolation.md)
+- [Split session reattach decision](../decisions/split-session-reattach.md)
 - [Host Django ASGI with readiness](../requirements/host-django-asgi-with-readiness.md)
 
 - [Project sandbox policies](../requirements/project-sandbox-policies.md)

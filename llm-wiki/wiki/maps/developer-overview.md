@@ -45,6 +45,7 @@ Use this map to trace public contracts into layers, interfaces, decisions, and t
 - [Persistence decision](../decisions/persistence.md)
 - [Event sequencing decision](../decisions/event-sequencing.md)
 - [Runtime isolation decision](../decisions/runtime-isolation.md)
+- [Split session reattach decision](../decisions/split-session-reattach.md)
 - [JWT authentication decision](../decisions/jwt-authentication.md)
 - [Retention decision](../decisions/retention.md)
 - [Floor-and-probe compatibility decision](../decisions/floor-and-probe-compatibility.md)
