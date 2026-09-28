@@ -15,6 +15,25 @@ verified_against_commit: 78003994d9fe93108ce5a6bc3591ab2e2ef904d9
 
 Entries are appended using `## [YYYY-MM-DD] operation | Title`.
 
+## [2026-09-28] fix | Deny domain fronting through admitted gateway tunnels
+
+- Inside a CONNECT tunnel mitmproxy takes `request.host` from the tunnel and
+  forwards the agent's Host header, absolute-form target and HTTP/2
+  `:authority` unchanged. The policy gateway admitted requests by
+  `request.host` alone and pinned SNI to it. A request tunnelled to an allowed
+  host could therefore name another tenant of the same CDN, such as Fastly for
+  PyPI or Cloudflare for npm, if the CDN routes by Host. A matching provider
+  route would also have received real credentials. Unit tests and a manual
+  mitmproxy 12.2.3 probe confirmed all three request shapes were admitted.
+- `requestheaders` now denies with `egress_denied` unless every Host header and
+  any request-target authority names the admitted host. Only ASCII case, a
+  trailing dot and `:443` may differ (`same_host` in
+  `src/talktoharnesses/gateway/routes.py`). The check runs after the gateway's
+  own routes, which set their own Host header. Denial logs are unchanged and
+  still carry no path, query or header.
+- Updated [Project sandbox policies](requirements/project-sandbox-policies.md).
+  Inspected baseline: `247a3b0` plus the uncommitted gateway change.
+
 ## [2026-09-27] implement | Reattach to split sessions that outlive a proxy restart
 
 - A dropped proxy event stream detaches the split session instead of closing

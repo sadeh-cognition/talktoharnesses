@@ -175,6 +175,18 @@ def normalized_path(raw: str) -> str | None:
     return decoded
 
 
+def same_host(authority: str, host: str) -> bool:
+    """Whether a Host header or request-target authority names this HTTPS host.
+
+    Only ASCII case, a trailing dot and the default port may differ. CDNs route by
+    this name rather than by the connected address or SNI.
+    """
+    # str.lower() folds some non-ASCII letters (KELVIN SIGN) into ASCII ones.
+    return authority.isascii() and (
+        authority.lower().removesuffix(":443").rstrip(".") == host.lower().rstrip(".")
+    )
+
+
 def matches(rule: EgressRule, host: str, path: str, method: str) -> bool:
     prefix = rule.path.rstrip("/")
     return (

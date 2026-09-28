@@ -37,6 +37,7 @@ from talktoharnesses.gateway.routes import (
     permitted_request,
     provider_route,
     public_address,
+    same_host,
 )
 
 logger = logging.getLogger(__name__)
@@ -176,6 +177,16 @@ class PolicyGateway:
             request.stream = True
             return
         if request.scheme != "https" or request.port != 443:
+            self._deny(flow)
+            return
+        # Inside a CONNECT tunnel request.host is the tunnel's address, but the
+        # agent's Host headers and request-target authority (absolute-form or
+        # HTTP/2 :authority) are forwarded unchanged. A CDN routing by those would
+        # reach a tenant the policy never admitted (domain fronting).
+        names: list[str] = cast(Any, request.headers).get_all("Host")
+        if request.authority:
+            names.append(request.authority)
+        if not all(same_host(name, request.host) for name in names):
             self._deny(flow)
             return
         route = provider_route(self.config.kind, request.host, path, request.method)

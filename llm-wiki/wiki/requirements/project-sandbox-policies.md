@@ -26,6 +26,13 @@ The editable project policy contains an exact HTTPS host/path allowlist,
 provider selection, read-only dependency roots, and additional command prefixes.
 Defaults allow provider operation and Python/npm registry reads. The gateway
 rejects private DNS results, direct tunnels, unapproved redirects, and Git receive-pack.
+Inside an admitted tunnel, every Host header and any request-target authority
+(absolute-form or HTTP/2 `:authority`) must name the admitted host. Only ASCII
+case, a trailing dot and port 443 may differ. Anything else is denied as
+`egress_denied` before credentials are substituted, so a request cannot reach
+another tenant of a CDN that routes by Host (domain fronting). The gateway's own
+routes (split control, MCP relay, command check, Muse rewrite) set their own
+Host header. Denial logs record only the policy, revision and reason.
 Native authentication files and environment keys are replaced with scoped handles.
 Only admitted authentication fields receive real credentials. Token refresh is
 serialized against the host file and responses return handles.
@@ -131,6 +138,12 @@ factory after a restart with a changed image tag. Healthy, unhealthy and
 disappearing gateways never enter preparation, and probe clients are closed.
 The review pass used synthetic Cursor exchange credentials; it did not repeat
 the provider inference gates or the split test suites.
+Domain-fronting tests in `tests/unit/gateway/test_gateway_http.py` build flows
+the way mitmproxy's transparent layer does inside a tunnel. They cover a
+mismatched Host header, absolute-form target and HTTP/2 `:authority`, duplicate
+Host headers, a non-default port, and a provider route carrying a credential
+handle. They also check that case, trailing-dot and `:443` spellings are still
+admitted and that denial logs omit the path, query and Host value.
 
 ## Related
 

@@ -1,6 +1,8 @@
 import json
+import logging
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 import pytest
@@ -11,8 +13,10 @@ pytest.importorskip("mitmproxy")
 from mitmproxy import connection, http
 
 from talktoharnesses.gateway.credentials import atomic_json
-from talktoharnesses.gateway.routes import META_GATEWAY_BASE
+from talktoharnesses.gateway.routes import META_GATEWAY_BASE, same_host
 from talktoharnesses.gateway.server import GatewayConfig, PolicyGateway
+
+FRONTED = "attacker.example"
 
 
 def gateway(tmp_path: Path) -> PolicyGateway:
@@ -39,8 +43,45 @@ def flow(url: str, method: str = "GET", **headers: str) -> http.HTTPFlow:
         connection.Client(peername=("127.0.0.1", 12), sockname=("127.0.0.1", 8080)),
         connection.Server(address=None),
     )
+    # Like any HTTP/1.1 client, name the URL's origin in a Host header.
+    headers = {"Host": urlsplit(url).netloc, **headers}
     result.request = http.Request.make(
         method, url, headers=[(key.encode(), value.encode()) for key, value in headers.items()]
+    )
+    return result
+
+
+def tunnelled(
+    host: str,
+    path: str = "/simple/",
+    method: str = "GET",
+    *,
+    authority: str = "",
+    http2: bool = False,
+    headers: tuple[tuple[str, str], ...] = (),
+) -> http.HTTPFlow:
+    """A request as mitmproxy's transparent layer hands it on inside a CONNECT tunnel.
+
+    The tunnel supplies ``request.host``; Host headers and any request-target authority
+    (absolute-form, or HTTP/2 ``:authority``) arrive exactly as the agent sent them.
+    """
+    result = http.HTTPFlow(
+        connection.Client(peername=("127.0.0.1", 12), sockname=("127.0.0.1", 8080)),
+        connection.Server(address=(host, 443)),
+    )
+    result.request = http.Request(
+        host,
+        443,
+        method.encode(),
+        b"https",
+        authority.encode(),
+        path.encode(),
+        b"HTTP/2.0" if http2 else b"HTTP/1.1",
+        tuple((name.encode(), value.encode()) for name, value in headers),
+        b"",
+        None,
+        0.0,
+        None,
     )
     return result
 
@@ -158,6 +199,88 @@ async def test_command_endpoint_and_connect_fail_closed(tmp_path: Path) -> None:
     request.request.text = "invalid JSON"
     proxy.request(request)
     assert request.response is not None and request.response.status_code == 403
+
+
+@pytest.mark.parametrize(
+    ("authority", "http2", "headers"),
+    [
+        # HTTP/1 origin-form: the Host header alone names the virtual host.
+        ("", False, (("Host", FRONTED),)),
+        # An absolute-form target overrides Host at the origin (RFC 9112, section 3.2.2).
+        (FRONTED, False, (("Host", "pypi.org"),)),
+        # HTTP/2 :authority, alone or beside a Host header an HTTP/1 upstream would use.
+        (FRONTED, True, ()),
+        ("pypi.org", True, (("Host", FRONTED),)),
+        # A second Host header must not ride behind a matching first one.
+        ("", False, (("Host", "pypi.org"), ("Host", FRONTED))),
+        ("", False, (("Host", "pypi.org." + FRONTED),)),
+        ("", False, (("Host", "pypi.org:8443"),)),
+        ("", False, (("Host", ""),)),
+    ],
+)
+async def test_tunnel_host_and_authority_must_name_the_admitted_host(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    authority: str,
+    http2: bool,
+    headers: tuple[tuple[str, str], ...],
+) -> None:
+    from talktoharnesses.gateway import server
+
+    # A CDN routes by Host or :authority rather than by the tunnel address or SNI.
+    request = tunnelled(
+        "pypi.org", "/simple/?q=secret", authority=authority, http2=http2, headers=headers
+    )
+    monkeypatch.setattr(server.logger, "propagate", True)
+    with caplog.at_level(logging.WARNING, logger=server.logger.name):
+        await gateway(tmp_path).requestheaders(request)
+    assert request.response is not None and request.response.status_code == 403
+    assert request.response.json()["error"] == "egress_denied"
+    assert "sandbox_policy_denied" in caplog.text
+    assert FRONTED not in caplog.text and "simple" not in caplog.text
+    assert "secret" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("authority", "http2", "headers"),
+    [
+        ("", False, ()),
+        ("", False, (("Host", "PyPI.org"),)),
+        ("", False, (("Host", "pypi.org.:443"),)),
+        ("pypi.org", False, (("Host", "pypi.org"),)),
+        ("pypi.org", True, ()),
+        ("pypi.org:443", True, (("Host", "pypi.org"),)),
+    ],
+)
+async def test_tunnel_admits_spellings_of_the_admitted_host(
+    tmp_path: Path, authority: str, http2: bool, headers: tuple[tuple[str, str], ...]
+) -> None:
+    request = tunnelled("pypi.org", authority=authority, http2=http2, headers=headers)
+    await gateway(tmp_path).requestheaders(request)
+    assert request.response is None
+
+
+def test_host_comparison_folds_only_ascii_case() -> None:
+    assert same_host("KAFKA.example.org.:443", "kafka.example.org")
+    assert not same_host("\u212aafka.example.org", "kafka.example.org")
+
+
+async def test_fronted_provider_request_never_receives_host_credentials(tmp_path: Path) -> None:
+    proxy = gateway(tmp_path)
+    _, virtual = proxy.vault.snapshot()
+    assert virtual is not None
+    handle: str = virtual["tokens"]["access_token"]
+    request = tunnelled(
+        "api.openai.com",
+        "/v1/responses",
+        "POST",
+        headers=(("Host", FRONTED), ("Authorization", "Bearer " + handle)),
+    )
+    await proxy.requestheaders(request)
+    assert request.response is not None and request.response.status_code == 403
+    assert request.request.headers["Authorization"] == "Bearer " + handle
+    assert "provider_route" not in request.metadata
 
 
 async def test_successful_refresh_returns_handles_and_clears_secret_headers(tmp_path: Path) -> None:
@@ -288,6 +411,7 @@ async def test_muse_reverse_proxy_uses_fixed_tls_origin_and_the_same_route_polic
     assert request.response is None
     assert request.request.scheme == "https"
     assert request.request.host == "api.meta.ai" and request.request.port == 443
+    assert request.request.headers["Host"] == "api.meta.ai"
     assert request.request.headers["Authorization"] == "Bearer host-only-oauth"
     rejected = flow(
         META_GATEWAY_BASE + "/api-keys", "POST", Authorization="Bearer " + meta["access_token"]
@@ -320,6 +444,7 @@ async def test_mcp_route_reaches_only_the_host_relay_without_agent_credentials(
         8081,
     )
     assert request.request.path == "/__tth/mcp/handle/sub?cursor=1"
+    assert request.request.headers["Host"] == "127.0.0.1:8081"
     assert request.request.stream is True
     assert "Authorization" not in request.request.headers
     assert "Cookie" not in request.request.headers
