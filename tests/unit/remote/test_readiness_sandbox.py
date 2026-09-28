@@ -25,8 +25,9 @@ from talktoharnesses.remote.scoped_sandboxes import ScopedSandboxManager
 
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.parametrize("availability", ["ready", "unhealthy", "disappeared"])
+@pytest.mark.parametrize("image_dockerfile", [None, "USER root\nRUN true"])
 async def test_restart_readiness_never_enters_preparation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, availability: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, availability: str, image_dockerfile: str | None
 ) -> None:
     root = tmp_path / "project"
     root.mkdir()
@@ -34,7 +35,10 @@ async def test_restart_readiness_never_enters_preparation(
     revision = await policies.save(
         "owner",
         uuid4(),
-        SaveSandboxPolicy(policy=SandboxPolicy(project_root=str(root)), expected_revision=0),
+        SaveSandboxPolicy(
+            policy=SandboxPolicy(project_root=str(root), image_dockerfile=image_dockerfile),
+            expected_revision=0,
+        ),
     )
     store = DjangoSandboxStore()
     manager = ScopedSandboxManager(
@@ -47,6 +51,8 @@ async def test_restart_readiness_never_enters_preparation(
         kind=HarnessKind.CODEX, working_directory=str(root), sandbox_policy=revision.ref
     )
     sandbox = await manager.for_configuration(configuration)
+    # Stored revisions keep a policy's image text; readiness never builds it.
+    assert sandbox.revision.policy.image_dockerfile == image_dockerfile
     now = datetime.now(UTC)
     record = SandboxRecordData(
         kind=HarnessKind.CODEX,

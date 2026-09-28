@@ -14,6 +14,10 @@ Every scope keeps two tiers of state with different lifetimes:
 Only scopes whose state directory lives under this process's state root are
 considered (see :meth:`ScopedSandboxManager.owned_scopes`); legacy per-kind
 ``tth-<kind>`` sandboxes and other roots' scopes are out of reach.
+
+Each pass then removes harness images nothing needs any more: images derived
+from a policy's Dockerfile text that no container uses and no scope wants on
+today's base image, and base or gateway images left untagged by a rebuild.
 """
 
 from __future__ import annotations
@@ -24,7 +28,7 @@ import logging
 import os
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal, Self
 
@@ -102,6 +106,8 @@ class ScopeFacts:
 class ReapReport:
     stopped: tuple[str, ...] = ()
     purged: tuple[str, ...] = ()
+    # Removed image tags, or ids of untagged images.
+    images: tuple[str, ...] = ()
 
 
 def decide(scope: ScopeFacts, *, now: float, policy: ScopeReaperPolicy) -> Action | None:
@@ -155,13 +161,22 @@ class ScopeReaper:
     async def tick(self) -> ReapReport:
         """Record this process's use of its scopes, then reclaim unless disabled."""
         await self.sandboxes.touch_in_use()
-        return await self.reap_once() if self.policy.enabled else ReapReport()
-
-    async def reap_once(self) -> ReapReport:
+        if not self.policy.enabled:
+            return ReapReport()
+        client = await self._client()
+        if client is None:
+            return ReapReport()
+        report = await self.reap_once(client)
+        # After reaping, so images of containers removed just now go as well.
         try:
-            client = await asyncio.to_thread(self.sandboxes.client_factory)
-        except Exception as exc:
-            logger.warning("sandbox scope reaping skipped: docker is unreachable: %s", exc)
+            images = await self.sandboxes.collect_images(client)
+        except Exception:
+            logger.warning("sandbox image cleanup failed", exc_info=True)
+            return report
+        return replace(report, images=images)
+
+    async def reap_once(self, client: Any | None = None) -> ReapReport:
+        if client is None and (client := await self._client()) is None:
             return ReapReport()
         scopes = await asyncio.to_thread(self._survey, client)
         now = self._clock()
@@ -183,6 +198,13 @@ class ScopeReaper:
         if stopped or purged:
             logger.info("reclaimed sandbox scopes: stopped=%d purged=%d", len(stopped), len(purged))
         return report
+
+    async def _client(self) -> Any | None:
+        try:
+            return await asyncio.to_thread(self.sandboxes.client_factory)
+        except Exception as exc:
+            logger.warning("sandbox scope reaping skipped: docker is unreachable: %s", exc)
+            return None
 
     def _survey(self, client: Any) -> list[ScopeFacts]:
         """Blocking; gather the facts about every scope this process owns."""

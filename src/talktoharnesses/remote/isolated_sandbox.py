@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import secrets
@@ -18,7 +19,7 @@ from tth_types.sandbox import SandboxPolicyRevision
 
 from talktoharnesses.gateway.credentials import CredentialVault, UnsupportedCredential, atomic_json
 from talktoharnesses.gateway.routes import GATEWAY_HOST
-from talktoharnesses.remote import docker_ops, sandbox_auth, sandbox_rtk
+from talktoharnesses.remote import custom_images, docker_ops, sandbox_auth, sandbox_rtk
 from talktoharnesses.remote.mcp_relay import ROUTES_FILE, ensure_mcp_relay, register_mcp_servers
 from talktoharnesses.remote.sandbox import (
     SandboxConfig,
@@ -76,6 +77,9 @@ class IsolatedSandbox(SandboxManager):
         self.state = self.layout.state
         self.gateway_port = 0
         self.gateway_image = f"{GATEWAY_IMAGE}:{config.image_tag}"
+        # The image each kind's split container runs: its base image, or the
+        # image derived from it by the policy's Dockerfile text.
+        self._split_images: dict[HarnessKind, str] = {}
         self._users: set[object] = set()
 
     def acquire(self, user: object) -> None:
@@ -117,7 +121,48 @@ class IsolatedSandbox(SandboxManager):
         return virtual
 
     def _image(self, kind: HarnessKind) -> str:
-        return f"tth-{kind.value.replace('_', '-')}:{self.config.image_tag}"
+        return docker_ops.base_image(kind, self.config.image_tag)
+
+    def _ensure_image(self, kind: HarnessKind) -> None:
+        """Blocking; also builds the policy's derived image, before the scope lock is taken.
+
+        A derived build can take up to the build timeout, and the scope lock
+        would hold up the reaper and closes of this scope that long. Under the
+        lock, :meth:`_split_image` then finds the image built.
+        """
+        super()._ensure_image(kind)
+        if self.revision.policy.image_dockerfile is not None:
+            self.state.mkdir(parents=True, exist_ok=True, mode=0o700)
+            with self._split_image(self._docker_client(kind), kind):
+                pass
+
+    def _container_image(self, kind: HarnessKind) -> str:
+        return self._split_images.get(kind, self._image(kind))
+
+    def _split_image(
+        self, client: Any, kind: HarnessKind
+    ) -> contextlib.AbstractContextManager[str]:
+        """Blocking; the image the split runs, held until its container exists.
+
+        Without Dockerfile text in the policy that is the base image, which
+        :meth:`_ensure_image` has already ensured.
+        """
+        dockerfile = self.revision.policy.image_dockerfile
+        base_image = self._image(kind)
+        if dockerfile is None:
+            return contextlib.nullcontext(base_image)
+        # Written first, so garbage collection keeps the image once it exists.
+        atomic_json(
+            self.layout.image_file, custom_images.image_record(kind, base_image, dockerfile)
+        )
+        return custom_images.ensure_derived_image(
+            client,
+            kind,
+            base_tag=base_image,
+            dockerfile=dockerfile,
+            state_root=self.layout.state_root,
+            timeout=self.config.build_timeout,
+        )
 
     def _mount_roots(self) -> tuple[str, ...]:
         return (*self.roots, *self.revision.policy.read_only_roots)
@@ -142,6 +187,8 @@ class IsolatedSandbox(SandboxManager):
                     "deploy/gateway.Dockerfile",
                     "-t",
                     self.gateway_image,
+                    "--label",
+                    f"{custom_images.IMAGE_ROLE_LABEL}=gateway",
                     "--build-arg",
                     f"UID={os.getuid()}",
                     "--build-arg",
@@ -234,53 +281,54 @@ class IsolatedSandbox(SandboxManager):
             certificate = self.state / "ca-public.pem"
             shutil.copyfile(ca_file, certificate)
             certificate.chmod(0o644)
-            image = self._image(kind)
-            if virtual_auth is not None:
-                virtual_file = self.state / "virtual-auth.json"
-                atomic_json(virtual_file, virtual_auth)
-                sandbox_auth.seed_auth_file(
+            with self._split_image(client, kind) as image:
+                if virtual_auth is not None:
+                    virtual_file = self.state / "virtual-auth.json"
+                    atomic_json(virtual_file, virtual_auth)
+                    sandbox_auth.seed_auth_file(
+                        client,
+                        Mount,
+                        kind=kind,
+                        auth_file=str(virtual_file),
+                        image=image,
+                        home_volume=self.layout.home_volume,
+                    )
+                sandbox_rtk.seed_rtk_config(
+                    client, Mount, kind=kind, image=image, home_volume=self.layout.home_volume
+                )
+                environment = {
+                    **TOOLCHAIN_ENV,
+                    **virtual_env,
+                    "TTH_SPLIT_TOKEN": identity["split_token"],
+                    "HTTPS_PROXY": f"http://{GATEWAY_HOST}:8080",
+                    "https_proxy": f"http://{GATEWAY_HOST}:8080",
+                    "NO_PROXY": "localhost,127.0.0.1,::1",
+                    "no_proxy": "localhost,127.0.0.1,::1",
+                    "NODE_USE_ENV_PROXY": "1",
+                    "NODE_EXTRA_CA_CERTS": "/etc/tth/ca.pem",
+                    "npm_config_proxy": f"http://{GATEWAY_HOST}:8080",
+                    "npm_config_https_proxy": f"http://{GATEWAY_HOST}:8080",
+                    "npm_config_cafile": "/etc/tth/ca.pem",
+                    "SSL_CERT_FILE": "/etc/tth/ca.pem",
+                    "REQUESTS_CA_BUNDLE": "/etc/tth/ca.pem",
+                    "UV_NATIVE_TLS": "true",
+                    "OTEL_SDK_DISABLED": "true",
+                    "NODE_NO_WARNINGS": "1",
+                    "TTH_COMMAND_CHECK_URL": f"http://{GATEWAY_HOST}:8080/__tth/command-check",
+                }
+                if adapter_factory:
+                    environment["TTH_SPLIT_ADAPTER_FACTORY"] = adapter_factory
+                self._reconcile_container(
                     client,
                     Mount,
+                    NotFound,
                     kind=kind,
-                    auth_file=str(virtual_file),
+                    name=self.name,
                     image=image,
-                    home_volume=self.layout.home_volume,
+                    environment=environment,
+                    token=identity["split_token"],
                 )
-            sandbox_rtk.seed_rtk_config(
-                client, Mount, kind=kind, image=image, home_volume=self.layout.home_volume
-            )
-            environment = {
-                **TOOLCHAIN_ENV,
-                **virtual_env,
-                "TTH_SPLIT_TOKEN": identity["split_token"],
-                "HTTPS_PROXY": f"http://{GATEWAY_HOST}:8080",
-                "https_proxy": f"http://{GATEWAY_HOST}:8080",
-                "NO_PROXY": "localhost,127.0.0.1,::1",
-                "no_proxy": "localhost,127.0.0.1,::1",
-                "NODE_USE_ENV_PROXY": "1",
-                "NODE_EXTRA_CA_CERTS": "/etc/tth/ca.pem",
-                "npm_config_proxy": f"http://{GATEWAY_HOST}:8080",
-                "npm_config_https_proxy": f"http://{GATEWAY_HOST}:8080",
-                "npm_config_cafile": "/etc/tth/ca.pem",
-                "SSL_CERT_FILE": "/etc/tth/ca.pem",
-                "REQUESTS_CA_BUNDLE": "/etc/tth/ca.pem",
-                "UV_NATIVE_TLS": "true",
-                "OTEL_SDK_DISABLED": "true",
-                "NODE_NO_WARNINGS": "1",
-                "TTH_COMMAND_CHECK_URL": f"http://{GATEWAY_HOST}:8080/__tth/command-check",
-            }
-            if adapter_factory:
-                environment["TTH_SPLIT_ADAPTER_FACTORY"] = adapter_factory
-            self._reconcile_container(
-                client,
-                Mount,
-                NotFound,
-                kind=kind,
-                name=self.name,
-                image=image,
-                environment=environment,
-                token=identity["split_token"],
-            )
+                self._split_images[kind] = image
             sandbox = client.containers.get(self.name)
             sandbox.reload()
             address = sandbox.attrs["NetworkSettings"]["Networks"][network_name]["IPAddress"]
@@ -294,7 +342,11 @@ class IsolatedSandbox(SandboxManager):
                 )
                 gateway_auth = "/credentials/" + source.name
             gateway_config = {
-                "revision": self.revision.model_dump(mode="json"),
+                # The gateway never needs the image text, and older gateway
+                # images reject the field.
+                "revision": self.revision.model_dump(
+                    mode="json", exclude={"policy": {"image_dockerfile"}}
+                ),
                 "kind": kind.value,
                 "seed": identity["seed"],
                 "control_token": token,
@@ -367,7 +419,7 @@ class IsolatedSandbox(SandboxManager):
         environment: dict[str, str],
     ) -> bool:
         attrs = container.attrs
-        actual_env = dict(item.split("=", 1) for item in attrs["Config"]["Env"] if "=" in item)
+        actual_env = docker_ops.image_environment(attrs["Config"])
         mounts = {mount["Destination"]: mount for mount in attrs.get("Mounts", [])}
         expected_paths = {
             *self.roots,

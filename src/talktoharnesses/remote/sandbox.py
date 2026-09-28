@@ -402,7 +402,11 @@ class SandboxManager:
             await self._start_container(kind, token)
             base_url = self._base_url(kind)
             record = record.model_copy(
-                update={"base_url": base_url, "host_port": self._port_for(kind)}
+                update={
+                    "base_url": base_url,
+                    "host_port": self._port_for(kind),
+                    "image": self._container_image(kind),
+                }
             )
             await self._wait_healthy(kind, base_url)
         except BaseException:
@@ -481,7 +485,11 @@ class SandboxManager:
         return f"tth-{_kind_slug(kind)}"
 
     def _image(self, kind: HarnessKind) -> str:
-        return f"{self._container_name(kind)}:{self.config.image_tag}"
+        return docker_ops.base_image(kind, self.config.image_tag)
+
+    def _container_image(self, kind: HarnessKind) -> str:
+        """The image the kind's running container was created from."""
+        return self._image(kind)
 
     def _environment(self, kind: HarnessKind, token: str) -> dict[str, str]:
         # OTel vars are always managed (not via the per-kind passthrough
@@ -509,11 +517,7 @@ class SandboxManager:
             return False
 
         attrs: dict[str, Any] = container.attrs
-        actual_environment = {
-            item.split("=", 1)[0]: item.split("=", 1)[1]
-            for item in attrs.get("Config", {}).get("Env", [])
-            if "=" in item
-        }
+        actual_environment = docker_ops.image_environment(attrs.get("Config"))
         managed_environment = {
             *_MANAGED_ENV_KEYS,
             *self.config.env_passthrough.get(kind, ()),

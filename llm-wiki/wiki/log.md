@@ -15,6 +15,54 @@ verified_against_commit: 78003994d9fe93108ce5a6bc3591ab2e2ef904d9
 
 Entries are appended using `## [YYYY-MM-DD] operation | Title`.
 
+## [2026-09-28] repair | Render policy image instructions canonically and scope image cleanup
+
+- Code reviews found texts the image instruction scanner and BuildKit read
+  differently, false rejections, and image cleanup that reached other state
+  roots. The scanner is replaced by `tth_types.image_instructions`, whose
+  instructions the proxy renders again in a canonical form; derived images are
+  tagged and collected per state root, built before the scope lock by the
+  daemon's own builder, and rebuilt when the base changes during a build; the
+  environment check covers every variable the split service reads; a policy
+  without instructions serializes without the field.
+- Updated [Customize sandbox images](requirements/customize-sandbox-images.md)
+  (current behavior, gap, evidence),
+  [Reclaim sandbox scopes](requirements/reclaim-sandbox-scopes.md),
+  [Project sandbox policies](requirements/project-sandbox-policies.md) and
+  [Sandbox Toolchain Hygiene](decisions/sandbox-toolchain-hygiene.md), against
+  baseline `e908d9f` plus this working tree. Acceptance criteria are
+  unchanged.
+
+## [2026-09-28] repair | Stop harness image builds reading a shared cache mount
+
+- A code review showed that texts parsed differently by the instruction scanner
+  and BuildKit let a policy build run `RUN --mount=type=cache` on the
+  `/root/.cache/uv` cache the split images' `uv sync` steps read. The split
+  template now builds the service venv with `UV_NO_CACHE=1` and no cache mount.
+- Updated [Customize sandbox images](requirements/customize-sandbox-images.md)
+  (current behavior, gap, evidence) and
+  [Sandbox Toolchain Hygiene](decisions/sandbox-toolchain-hygiene.md)
+  (decision, rebuild cost), against baseline `e908d9f` plus this working tree.
+  The scanner divergences themselves remain open.
+
+## [2026-09-28] ingest | Customize sandbox images
+
+- Added the approved source
+  [sandbox image customization amendment](../raw/product/sandbox-image-customization-amendment.md):
+  Dockerfile instructions in a project's sandbox policy are the only way to
+  customize sandbox images, `.tth/setup.sh` covers workspace dependencies
+  only, derived images follow their harness image, and unused images are
+  removed automatically.
+- Added [Customize sandbox images](requirements/customize-sandbox-images.md)
+  against baseline `e908d9f` plus this working tree, and linked it from the
+  index and [Requirements by Status](maps/requirements-by-status.md).
+- Updated [Sandbox Toolchain Hygiene](decisions/sandbox-toolchain-hygiene.md),
+  [Provision Sandbox Workspaces](requirements/provision-sandbox-workspaces.md),
+  [Project sandbox policies](requirements/project-sandbox-policies.md),
+  [Reclaim sandbox scopes](requirements/reclaim-sandbox-scopes.md),
+  [Deployment](operations/deployment.md) and
+  [Isolated Harness Runtimes](capabilities/isolated-harness-runtimes.md).
+
 ## [2026-09-28] ingest | Add the split session reattach decision page
 
 - Added [Split Session Reattach Decision](decisions/split-session-reattach.md)

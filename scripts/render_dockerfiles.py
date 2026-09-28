@@ -135,15 +135,16 @@ SERVICE_VENV = "/opt/tth/venv"
 
 # uv settings for building the service venv. They are scoped to the two RUN
 # lines below instead of the image ENV so the agent's shell gets uv's dev-box
-# defaults (a .venv in the project, interpreter downloads allowed). The cache
-# dir is explicit because HOME is already /home/agent when root runs uv, and a
-# cache under the service user's home would be baked into the image and seeded
-# into the home volume.
-_SERVICE_UV_CACHE = "/root/.cache/uv"
+# defaults (a .venv in the project, interpreter downloads allowed).
+#
+# No BuildKit cache mount: policy image instructions (remote/custom_images.py)
+# are built on the same builder, and a cache mount is shared mutable state that
+# any build naming the same target can write. uv uses a throwaway cache instead,
+# so nothing a policy build leaves behind can reach a harness image.
 _SERVICE_UV_ENV = " ".join(
     (
         f"UV_PROJECT_ENVIRONMENT={SERVICE_VENV}",
-        f"UV_CACHE_DIR={_SERVICE_UV_CACHE}",
+        "UV_NO_CACHE=1",
         "UV_PYTHON=/usr/local/bin/python3",
         "UV_PYTHON_DOWNLOADS=never",
         "UV_LINK_MODE=copy",
@@ -157,11 +158,7 @@ def _run(steps: list[str]) -> str:
 
 def _uv_sync(*extra: str) -> str:
     args = " ".join(("uv sync --frozen --no-dev --no-editable", *extra))
-    return (
-        f"RUN --mount=type=cache,target={_SERVICE_UV_CACHE} \\\n"
-        f"    {_SERVICE_UV_ENV} \\\n"
-        f"    {args}"
-    )
+    return f"RUN {_SERVICE_UV_ENV} \\\n    {args}"
 
 
 def render_dockerfile(split: Split) -> str:

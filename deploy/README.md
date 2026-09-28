@@ -45,7 +45,11 @@ it, so an agent running `uv sync`, `uv run` or `pip` in a mounted project gets
 uv's ordinary behaviour (a `.venv` in the project) and cannot replace the
 runtime that serves `/v1/health`. The per-kind layers are ordered by change
 frequency (locked dependencies, tth-types, service source), so a source edit
-rebuilds only the last thin layer.
+rebuilds only the last thin layer. The `uv sync` steps use a throwaway uv
+cache, never a BuildKit cache mount: policy image instructions (see
+[Custom sandbox images](#custom-sandbox-images)) build on the same BuildKit,
+and nothing they leave behind may reach a harness image. A rebuild after a
+`uv.lock` change downloads the locked dependencies again.
 
 Every image also ships the agent-facing toolchain: `uv`, Node 22 with `npm`,
 and `corepack` (so `pnpm` and `yarn` resolve on first use). See
@@ -192,10 +196,27 @@ Processes touch it when a runtime binds to or leaves the scope, and on every
 pass while it is in use. Per-scope lock files live in the state root's
 `.locks` directory and are kept after a scope is purged.
 
+After reclaiming, each pass removes images nothing needs any more (see
+[Custom sandbox images](#custom-sandbox-images)): derived images this state
+directory built that no container of any state uses and that no scope under
+it wants on its current harness image, and untagged images labelled
+`tth.image=base` or `tth.image=gateway`, the leftovers of rebuilding the
+harness and gateway images, that no container uses. Derived images of other
+state directories on the same daemon are left alone. Images inherit labels, so
+an untagged image of your own built `FROM` a harness image counts as a
+leftover too. A pass never forces a removal, skips an image a preparation is
+using, deletes the lock files of derived images that are gone, and skips image
+cleanup when Docker is unreachable. Images rebuilt before the `tth.image`
+label existed are not recognized; remove those once with `docker image prune`.
+BuildKit's build cache is not touched; reclaim it with `docker builder prune`.
+
 ## Toolchains and caches
 
 Agents (and workspace setup scripts, below) work in bind-mounted projects with
-plain `uv`, `node`, `npm`, `pnpm` and `yarn`. The proxy injects these variables
+plain `uv`, `node`, `npm`, `pnpm` and `yarn`. Other tools a project needs in
+its image, such as system packages or compilers, come from its sandbox
+policy's image instructions (see [Custom sandbox images](#custom-sandbox-images)),
+not from workspace setup. The proxy injects these variables
 into every sandbox container so interpreter downloads and package caches land
 on the persistent scope-specific `tth-scope-<id>-data` volume instead of the container's
 writable layer or the project tree:
@@ -227,7 +248,10 @@ resolves its own settings.
 A repository declares how its environment is prepared in
 **`.tth/setup.sh`** at the working directory's root. Nothing is detected or
 inferred, and nothing about it crosses the API: TTH runs the file when it is
-there and does nothing when it is not. A Python backend with a Node frontend
+there and does nothing when it is not. It is for workspace dependencies only
+(installing into the mounted project); it runs as the unprivileged service
+user and cannot add system packages, which belong in the policy's image
+instructions. A Python backend with a Node frontend
 typically ships:
 
 ```sh
@@ -273,6 +297,93 @@ Tuning:
   switch; scripts are ignored).
 - `TTH_WORKSPACE_SETUP_TIMEOUT` — seconds a run may take before its process
   group is killed (default 900).
+
+## Custom sandbox images
+
+A project's sandbox policy may carry image instructions: Dockerfile text
+without `FROM` (field `image_dockerfile`, at most 16,384 characters). They are
+the only way to customize a sandbox image. TTH applies them to the harness
+image of every kind the policy's sandboxes run, for example:
+
+```dockerfile
+USER root
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends g++ rustc cargo \
+    && rm -rf /var/lib/apt/lists/*
+```
+
+Contract:
+
+- Allowed instructions: `RUN`, `ENV`, `ARG`, `USER`, `WORKDIR`, `COPY`, `ADD`
+  and `LABEL`. Saving a policy rejects `FROM`, every other instruction
+  (`CMD`, `ENTRYPOINT`, `HEALTHCHECK`, `VOLUME`, `EXPOSE`, `SHELL`, ...), any
+  option on `RUN` (`--mount`, `--network`, `--security`, `--device`, ...) or
+  on `ENV`, `ARG`, `USER`, `WORKDIR` and `LABEL`, and `COPY` and `ADD` options
+  other than `COPY --from`, `--chown`, `--chmod`, `--link`, `--parents`,
+  `--exclude` and `ADD --chown`, `--chmod`, `--link`, `--checksum`,
+  `--keep-git-dir`, `--exclude`, `--unpack`, written as plain `--name=value`.
+  It also rejects control characters and text ending inside a line
+  continuation or an open heredoc. Comments, line continuations (blank and
+  comment lines inside one are skipped, and the pieces are joined without a
+  space) and heredocs follow Docker's rules. Line endings are normalized and
+  blank text means no instructions.
+- TTH never builds the text as written. It builds a Dockerfile it writes from
+  what it parsed: every instruction on one line, `RUN` as a JSON exec form in
+  the harness image's shell (`RUN ["/bin/sh", "-c", "<command>"]`) with `<`
+  escaped and its heredoc bodies folded into the command, and `COPY` and `ADD`
+  without heredocs as JSON arrays. BuildKit therefore finds no option,
+  instruction or heredoc the check did not. A `COPY` or `ADD` heredoc is kept
+  as a heredoc, so that instruction takes only plain paths and options,
+  without quotes, backslashes or `$` variables, and names its heredocs
+  `<<NAME`, `<<'NAME'` or `<<"NAME"`.
+- The harness and gateway images mount no BuildKit cache, so nothing a policy
+  build leaves in one can reach them. Harness images built before that change
+  read a `/root/.cache/uv` cache mount; after rebuilding them, drop it with
+  `docker builder prune --filter type=exec.cachemount`.
+- The build has no context: `COPY` and `ADD` work only with `--from=<image>`,
+  heredocs or URLs, never host files. It runs as root with the host's normal
+  network access, not the policy's egress rules, on the Docker daemon's own
+  builder (named after the current Docker context) whichever buildx builder
+  is selected, so `FROM` finds the local harness image.
+- After the text TTH appends a trailer, read from the harness image, that
+  restores its `WORKDIR`, `HOME`, `DJANGO_SETTINGS_MODULE` and `USER`, so start
+  with `USER root` to install packages; the split still runs as `agent`. A
+  harness image that leaves `USER` or `WORKDIR` empty gets Docker's defaults,
+  `root` and `/`.
+- Install to system paths such as `/usr`, `/usr/local` or `/opt`. `/home/agent`
+  and `/data` are named volumes, and image content there reaches only a new,
+  empty volume.
+- The image is tagged `tth-<kind>-custom:<hash>`, where the hash covers the
+  state directory, the harness image id and the text, and carries the
+  `tth.image=derived`, `tth.derived`, `tth.state`, `tth.kind`, `tth.base-id`,
+  `tth.dockerfile-sha256` and `tth.contract` labels. List them with
+  `docker images --filter label=tth.derived=1`. Proxies with different state
+  directories on one daemon build and remove separate images.
+- It is built lazily, when a sandbox of that policy is prepared, after the
+  harness image is ensured and before the scope's lock is taken, so reaping or
+  closing that scope never waits for a build. The first session after the
+  instructions change or the harness image is rebuilt waits for the build;
+  requests meanwhile get the retryable `sandbox_preparing` error, up to the
+  build timeout. A rebuilt harness image changes the tag, so an image built on
+  the old one is never used; its container is recreated on the new image at
+  the next preparation. A harness image rebuilt during a build is built on
+  once more, then preparation fails with `custom_image_build_failed`.
+- Each build is checked against the harness image: user, working directory,
+  entrypoint, command, health check, ports, volumes, stop signal and shell must
+  be unchanged; `HOME`, `VIRTUAL_ENV` and every variable starting with `UV_`,
+  `PYTHON`, `DJANGO_`, `TALKTOHARNESSES_` or `TTH_` must keep the harness
+  image's value, or stay unset; `PATH` must keep the harness image's
+  directories in order (adding to it is fine); and the harness image's layers
+  must come first. A failed build or check removes the image and fails
+  preparation with `sandbox_unavailable`, reason `custom_image_build_failed`;
+  the build output is only in the proxy log. There is no fallback to the
+  harness image.
+- The gateway never receives the instructions, and a policy without them is
+  stored and served without the `image_dockerfile` field, so clients built
+  before it existed still read it. Old images are removed by the scope reaper
+  (see above).
+
+Project dependencies still belong in `.tth/setup.sh`.
 
 ## RTK command rewriting
 
@@ -327,7 +438,14 @@ this flag. Directly deployed splits retain their existing telemetry configuratio
 ## Live gates
 
 The docker sandbox path has an opt-in gate: `TALKTOHARNESSES_SANDBOX_DOCKER=1`
-runs `tests/live/test_sandbox_docker.py`.
+runs `tests/live/test_sandbox_docker.py` and
+`tests/live/test_custom_sandbox_image_live.py`. The latter builds small images
+on the local `tth-codex` image from instructions with a `COPY` heredoc, a
+`RUN` heredoc script and `<<` in a command, checks that the derived image runs
+as `agent` with their results, gets a new tag after its base is rebuilt, and
+that image cleanup removes the superseded one. It removes everything it
+created, and its cleanup runs under a temporary state directory, so it never
+removes another proxy's images.
 
 Workspace setup has its own credential-free gate:
 `TALKTOHARNESSES_SANDBOX_WORKSPACE=1` runs

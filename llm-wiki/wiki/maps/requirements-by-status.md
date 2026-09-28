@@ -40,6 +40,7 @@ Plugin-free delivery view of the public contracts documented in this vault.
 - [Host Django ASGI with readiness](../requirements/host-django-asgi-with-readiness.md)
 - [Provision sandbox workspaces](../requirements/provision-sandbox-workspaces.md)
 - [Reclaim sandbox scopes](../requirements/reclaim-sandbox-scopes.md)
+- [Customize sandbox images](../requirements/customize-sandbox-images.md)
 
 ## Historical decisions
 

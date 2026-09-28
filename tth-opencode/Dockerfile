@@ -79,14 +79,12 @@ USER root
 # uv.lock pins tth-types as ../tth-types relative to the project directory.
 WORKDIR /app/service
 COPY pyproject.toml README.md uv.lock ./
-RUN --mount=type=cache,target=/root/.cache/uv \
-    UV_PROJECT_ENVIRONMENT=/opt/tth/venv UV_CACHE_DIR=/root/.cache/uv UV_PYTHON=/usr/local/bin/python3 UV_PYTHON_DOWNLOADS=never UV_LINK_MODE=copy \
+RUN UV_PROJECT_ENVIRONMENT=/opt/tth/venv UV_NO_CACHE=1 UV_PYTHON=/usr/local/bin/python3 UV_PYTHON_DOWNLOADS=never UV_LINK_MODE=copy \
     uv sync --frozen --no-dev --no-editable --no-install-project --no-install-package tth-types
 COPY --from=tth_types pyproject.toml README.md uv.lock ../tth-types/
 COPY --from=tth_types src ../tth-types/src
 COPY src ./src
-RUN --mount=type=cache,target=/root/.cache/uv \
-    UV_PROJECT_ENVIRONMENT=/opt/tth/venv UV_CACHE_DIR=/root/.cache/uv UV_PYTHON=/usr/local/bin/python3 UV_PYTHON_DOWNLOADS=never UV_LINK_MODE=copy \
+RUN UV_PROJECT_ENVIRONMENT=/opt/tth/venv UV_NO_CACHE=1 UV_PYTHON=/usr/local/bin/python3 UV_PYTHON_DOWNLOADS=never UV_LINK_MODE=copy \
     uv sync --frozen --no-dev --no-editable
 USER agent
 

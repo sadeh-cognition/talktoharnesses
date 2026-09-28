@@ -65,6 +65,11 @@ class ScopeLayout:
         return self.state / "mounts.json"
 
     @property
+    def image_file(self) -> Path:
+        """Which derived image the scope's policy wants; garbage collection keeps it."""
+        return self.state / "image.json"
+
+    @property
     def last_used_file(self) -> Path:
         """Its mtime is the scope's last use, shared by every proxy process on the host."""
         return self.state / "last-used"

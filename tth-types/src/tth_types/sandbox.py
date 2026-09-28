@@ -9,9 +9,18 @@ from typing import Literal, Self
 from urllib.parse import urlsplit
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializerFunctionWrapHandler,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 from tth_types.enums import HarnessKind
+from tth_types.image_instructions import parse_image_instructions
 
 
 class PolicyModel(BaseModel):
@@ -80,6 +89,9 @@ class CommandRule(PolicyModel):
         return value
 
 
+IMAGE_DOCKERFILE_MAX_CHARS = 16_384
+
+
 class SandboxPolicy(PolicyModel):
     """The editable rules for one project. Hard isolation cannot be disabled."""
 
@@ -92,6 +104,9 @@ class SandboxPolicy(PolicyModel):
     )
     providers: tuple[HarnessKind, ...] = tuple(HarnessKind)
     command_rules: tuple[CommandRule, ...] = ()
+    # Dockerfile instructions, without FROM, applied to every harness image
+    # this policy's sandboxes run. None runs the harness images unchanged.
+    image_dockerfile: str | None = Field(default=None, max_length=IMAGE_DOCKERFILE_MAX_CHARS)
 
     @field_validator("project_root")
     @classmethod
@@ -105,6 +120,32 @@ class SandboxPolicy(PolicyModel):
     @classmethod
     def dependency_paths(cls, value: tuple[str, ...]) -> tuple[str, ...]:
         return tuple(cls.workspace_path(path) for path in value)
+
+    @field_validator("image_dockerfile", mode="before")
+    @classmethod
+    def normalized_dockerfile(cls, value: object) -> object:
+        # Line endings and surrounding blank lines never change the image, so
+        # they must not change its content hash either.
+        if not isinstance(value, str):
+            return value
+        text = value.replace("\r\n", "\n").replace("\r", "\n").strip()
+        return text or None
+
+    @field_validator("image_dockerfile")
+    @classmethod
+    def permitted_dockerfile(cls, value: str | None) -> str | None:
+        if value is not None:
+            parse_image_instructions(value)
+        return value
+
+    @model_serializer(mode="wrap")
+    def omit_unset_image(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
+        # Left out rather than null, so readers built before the field existed
+        # (extra="forbid") still accept every policy that does not use it.
+        data: dict[str, object] = handler(self)
+        if self.image_dockerfile is None:
+            data.pop("image_dockerfile", None)
+        return data
 
 
 class SandboxPolicyRef(PolicyModel):

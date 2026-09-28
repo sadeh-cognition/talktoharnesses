@@ -58,9 +58,24 @@ def test_service_runtime_is_root_owned_and_started_by_absolute_path(kind: str) -
     )
     assert "USER agent\n\nEXPOSE 8010" in per_kind
     assert per_kind.count(f"UV_PROJECT_ENVIRONMENT={SERVICE_VENV}") == 2
-    # The build cache never lands under the service user's home (it is a volume).
+    # uv's cache is thrown away, so it lands neither in the image nor under the
+    # service user's home (a volume).
+    assert per_kind.count("UV_NO_CACHE=1") == 2
+    assert "UV_CACHE_DIR" not in per_kind
     assert "/home/agent/.cache" not in per_kind
     assert "chown" not in per_kind
+
+
+@pytest.mark.parametrize(
+    "dockerfile",
+    [
+        *(pytest.param(render_dockerfile(split), id=kind) for kind, split in SPLITS.items()),
+        pytest.param((ROOT / "deploy" / "gateway.Dockerfile").read_text(), id="gateway"),
+    ],
+)
+def test_images_read_no_build_cache_a_policy_build_can_write(dockerfile: str) -> None:
+    """Policy image instructions build on the same BuildKit, so no shared cache mounts."""
+    assert "--mount" not in dockerfile
 
 
 @pytest.mark.parametrize("kind", list(SPLITS))

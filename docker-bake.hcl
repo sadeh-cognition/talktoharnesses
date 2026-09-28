@@ -23,6 +23,9 @@ target "split" {
   tags     = ["tth-${kind}:${TAG}"]
   args     = { UID = HOST_UID, GID = HOST_GID }
   contexts = { tth_types = "tth-types" }
+  // Lets the proxy remove the untagged images a rebuild leaves behind
+  // (remote/custom_images.collect_garbage).
+  labels   = { "tth.image" = "base" }
 }
 
 
@@ -31,4 +34,5 @@ target "gateway" {
   dockerfile = "deploy/gateway.Dockerfile"
   tags = ["tth-policy-gateway:${TAG}"]
   args = { UID = HOST_UID, GID = HOST_GID }
+  labels = { "tth.image" = "gateway" }
 }

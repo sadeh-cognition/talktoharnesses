@@ -14,6 +14,7 @@ verified_against_commit: f7e2c5e25226f669f969fe6ff5fbf25b8af5fa96
 sources:
   - raw/product/sandbox-workspace-provisioning.md
   - raw/product/on-demand-sandbox-provisioning.md
+  - raw/product/sandbox-image-customization-amendment.md
 ---
 
 # Provision Sandbox Workspaces
@@ -21,6 +22,8 @@ sources:
 ## Intent
 
 A repository declares how its environment is prepared, and TalkToHarnesses runs that preparation inside the kind's sandbox before a harness works there. Clients inject nothing; the split service's own runtime stays invisible to agents; Python and Node toolchains download on demand into persistent caches.
+
+Since the [sandbox image customization amendment](../../raw/product/sandbox-image-customization-amendment.md) (2026-09-28), `.tth/setup.sh` covers workspace dependencies only, such as `uv sync` or `npm ci` in a mounted worktree. System packages and compilers come from the project policy's image instructions; see [Customize sandbox images](customize-sandbox-images.md).
 
 ## Current behavior
 
@@ -74,6 +77,7 @@ Concurrent setups of one directory by different kinds are not serialized (the lo
 
 - [Isolated harness runtimes](../capabilities/isolated-harness-runtimes.md)
 - [Sandbox toolchain hygiene decision](../decisions/sandbox-toolchain-hygiene.md)
+- [Customize sandbox images](customize-sandbox-images.md)
 - [Split services decision](../decisions/split-services.md)
 - [Probe and configure harnesses](probe-and-configure-harnesses.md)
 - [Deployment](../operations/deployment.md)

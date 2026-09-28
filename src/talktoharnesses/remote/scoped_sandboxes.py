@@ -14,7 +14,7 @@ from tth_types.enums import ErrorCode
 from tth_types.errors import DomainError
 from tth_types.harness import HarnessConfiguration
 
-from talktoharnesses.remote import docker_ops
+from talktoharnesses.remote import custom_images, docker_ops
 from talktoharnesses.remote.isolated_sandbox import IsolatedSandbox
 from talktoharnesses.remote.sandbox import SandboxConfig, SandboxStore, SplitEndpoint
 from talktoharnesses.remote.sandbox_paths import repository_directory
@@ -144,6 +144,19 @@ class ScopedSandboxManager:
             for path in sorted(self.state_root.iterdir())
             if SCOPE_NAME.fullmatch(path.name) and path.is_dir() and not path.is_symlink()
         ]
+
+    async def collect_images(self, client: Any) -> tuple[str, ...]:
+        """Remove derived and superseded harness images nothing uses or wants any more.
+
+        Returns the removed images; see :func:`custom_images.collect_garbage`.
+        """
+
+        def collect() -> tuple[str, ...]:
+            return custom_images.collect_garbage(
+                client, scopes=self.owned_scopes(), state_root=self.state_root
+            )
+
+        return await asyncio.to_thread(collect)
 
     async def touch_in_use(self) -> None:
         """Record a use of every scope this process is using."""

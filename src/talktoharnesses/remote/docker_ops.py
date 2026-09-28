@@ -30,6 +30,17 @@ def kind_slug(kind: HarnessKind) -> str:
     return kind.value.replace("_", "-")
 
 
+def base_image(kind: HarnessKind, tag: str) -> str:
+    """The kind's harness image, as ``deploy/build-splits.sh`` tags it."""
+    return f"tth-{kind_slug(kind)}:{tag}"
+
+
+def image_environment(config: Mapping[str, Any] | None) -> dict[str, str]:
+    """The ``Env`` of an image or container configuration, as a mapping."""
+    items: list[str] = (config or {}).get("Env") or []
+    return dict(item.split("=", 1) for item in items if "=" in item)
+
+
 def rewrite_loopback_url(url: str, alias: str) -> str:
     """Point a loopback URL at ``alias`` so a container reaches the proxy host.
 
@@ -192,6 +203,39 @@ def build_image(kind: HarnessKind, image: str, *, root: Path, timeout: float) ->
     run_image_build(command, kind=kind, image=image, cwd=root, timeout=timeout, env=env)
 
 
+def docker_driver_builder(docker_bin: str, *, kind: HarnessKind, reason: str) -> str:
+    """Blocking; the buildx builder that builds into the daemon's own image store.
+
+    It is named after the current Docker context. Only that builder resolves
+    ``FROM`` against locally built images and needs no ``--load``; the builder
+    an operator selected may run elsewhere.
+    """
+    try:
+        result = subprocess.run(
+            [docker_bin, "context", "show"],
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise DomainError(
+            ErrorCode.SANDBOX_UNAVAILABLE,
+            "docker context show timed out",
+            details={"kind": kind.value, "reason": reason},
+        ) from exc
+    context = result.stdout.strip()
+    if result.returncode != 0 or not context:
+        logger.error("docker context show failed: %s", result.stderr.strip())
+        raise DomainError(
+            ErrorCode.SANDBOX_UNAVAILABLE,
+            "could not determine the current docker context",
+            details={"kind": kind.value, "reason": reason},
+        )
+    return context
+
+
 def run_image_build(
     command: Sequence[str],
     *,
@@ -200,11 +244,14 @@ def run_image_build(
     cwd: Path,
     timeout: float,
     env: Mapping[str, str] | None = None,
+    stdin: str | None = None,
+    reason: str = "image_build_failed",
 ) -> None:
     """Blocking; run a docker CLI build of ``image``, logging its output on failure.
 
-    Failures become ``sandbox_unavailable`` with reason ``image_build_failed``;
-    the output's tail goes into the details, never into the message.
+    ``stdin`` is fed to the command (a Dockerfile for ``docker build -``).
+    Failures become ``sandbox_unavailable`` with ``reason``; the output's tail
+    goes into the details, never into the message.
     """
     logger.info("building sandbox image %s", image)
     try:
@@ -212,8 +259,11 @@ def run_image_build(
             list(command),
             cwd=cwd,
             env=env,
+            input=stdin,
             capture_output=True,
-            text=True,
+            # Build output is whatever the instructions print, not always UTF-8.
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout,
             check=False,
         )
@@ -221,7 +271,7 @@ def run_image_build(
         raise DomainError(
             ErrorCode.SANDBOX_UNAVAILABLE,
             f"sandbox image build for {image} timed out",
-            details={"kind": kind.value, "reason": "image_build_failed"},
+            details={"kind": kind.value, "reason": reason},
         ) from exc
     if result.returncode != 0:
         output = f"{result.stdout}\n{result.stderr}".strip()
@@ -232,7 +282,7 @@ def run_image_build(
             f"sandbox image build failed for {image}",
             details={
                 "kind": kind.value,
-                "reason": "image_build_failed",
+                "reason": reason,
                 "build_tail": tail,
             },
         )

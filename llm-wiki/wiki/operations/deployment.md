@@ -30,9 +30,15 @@ Muse Code uses port 8117 and image `tth-muse`. The proxy forwards
 `src/talktoharnesses/remote/sandbox.py`, `src/talktoharnesses/remote/sandbox_auth.py`, and `tth-muse/Dockerfile`.
 
 Sandboxes provision project environments themselves: a working directory's
-`.tth/setup.sh` runs inside the kind's container before a session starts
-there, toolchain caches live on the per-kind `/data` volume, and
-`TTH_WORKSPACE_SETUP=0` / `TTH_WORKSPACE_SETUP_TIMEOUT` tune it. Upgrading
+`.tth/setup.sh` installs workspace dependencies inside the kind's container
+before a session starts there, toolchain caches live on the per-kind `/data`
+volume, and `TTH_WORKSPACE_SETUP=0` / `TTH_WORKSPACE_SETUP_TIMEOUT` tune it.
+System packages and compilers come from a project policy's image
+instructions, which the proxy builds on the harness image at first use and
+rebuilds after the harness image changes; the scope reaper removes images
+nothing needs any more. See
+[Customize sandbox images](../requirements/customize-sandbox-images.md) and
+the repository's `deploy/README.md` (Custom sandbox images). Upgrading
 from images that exported `UV_PROJECT_ENVIRONMENT` recreates every kind's
 container on its next request. The operator contract is in the repository's
 `deploy/README.md` (Toolchains and caches, Workspace setup); see
@@ -47,4 +53,5 @@ container on its next request. The operator contract is in the repository's
 - [JWT authentication decision](../decisions/jwt-authentication.md)
 - [Split services decision](../decisions/split-services.md)
 - [Provision sandbox workspaces](../requirements/provision-sandbox-workspaces.md)
+- [Customize sandbox images](../requirements/customize-sandbox-images.md)
 - [Approved split runtime ownership](../../raw/product/split-service-runtime-ownership.md)

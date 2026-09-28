@@ -65,6 +65,9 @@ _SAFE_VERSION_VALUE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 .()_\[\]\-]{0,127}$")
 _SANDBOX_UNAVAILABLE_REASONS: Final[dict[str, str]] = {
     "docker_unavailable": "Docker is not reachable on the TalkToHarnesses host",
     "image_build_failed": ("sandbox image build failed; check TalkToHarnesses server logs"),
+    "custom_image_build_failed": (
+        "the sandbox policy's image instructions failed to build; check TalkToHarnesses server logs"
+    ),
     "build_context_missing": (
         "sandbox image is missing and no build context is available; "
         "build it with deploy/build-splits.sh"

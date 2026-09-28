@@ -12,12 +12,12 @@ from unittest.mock import AsyncMock, Mock
 from uuid import uuid4
 
 import pytest
-from docker.errors import APIError, NotFound
+from docker.errors import APIError, ImageNotFound, NotFound
 from tth_types.enums import HarnessKind
 from tth_types.harness import HarnessConfiguration
 from tth_types.sandbox import SandboxPolicy, SandboxPolicyRef, SandboxPolicyRevision
 
-from talktoharnesses.remote import scope_layout
+from talktoharnesses.remote import custom_images, scope_layout
 from talktoharnesses.remote.isolated_sandbox import IsolatedSandbox
 from talktoharnesses.remote.sandbox import SandboxConfig, SandboxRecordData
 from talktoharnesses.remote.scope_layout import ScopeLayout
@@ -45,6 +45,7 @@ class FakeResource:
         self.status = status
         self.labels = labels or {}
         self.remove_error: Exception | None = None
+        self.attrs: dict[str, Any] = {"ImageID": "sha256:" + name}
         registry[name] = self
 
     def remove(self, force: bool = False) -> None:
@@ -58,8 +59,10 @@ class FakeCollection:
     def __init__(self) -> None:
         self.items: dict[str, FakeResource] = {}
 
-    def list(self, all: bool = False, filters: dict[str, str] | None = None) -> list[FakeResource]:
-        del all
+    def list(
+        self, all: bool = False, filters: dict[str, str] | None = None, sparse: bool = False
+    ) -> list[FakeResource]:
+        del all, sparse
         label = (filters or {}).get("label")
         return [item for item in self.items.values() if label is None or label in item.labels]
 
@@ -69,11 +72,23 @@ class FakeCollection:
         return self.items[name]
 
 
+class FakeImages:
+    """No images: image cleanup runs for real and finds nothing to remove."""
+
+    def list(self, filters: dict[str, Any]) -> list[Any]:
+        del filters
+        return []
+
+    def get(self, name: str) -> Any:
+        raise ImageNotFound(name)
+
+
 class FakeDocker:
     def __init__(self) -> None:
         self.containers = FakeCollection()
         self.networks = FakeCollection()
         self.volumes = FakeCollection()
+        self.images = FakeImages()
 
     def add_scope(
         self, name: str, *, main: str | None = "running", gateway: str | None = "running"
@@ -263,7 +278,7 @@ async def test_purge_ttl_reclaims_session_state_unless_disabled(
 
 
 async def test_scope_in_use_is_kept_and_marked_used(
-    tmp_path: Path, project: Path, relays: list[Path]
+    tmp_path: Path, project: Path, relays: list[Path], caplog: pytest.LogCaptureFixture
 ) -> None:
     docker = FakeDocker()
     manager = _manager(tmp_path, docker=docker)
@@ -284,6 +299,8 @@ async def test_scope_in_use_is_kept_and_marked_used(
     assert not instance.in_use
     assert await reaper.tick() == ReapReport(purged=(SCOPE,))
     assert SCOPE not in manager.instances
+    # Each pass also ran the image cleanup, which found nothing to remove.
+    assert "sandbox image cleanup failed" not in caplog.text
 
 
 async def test_stop_removes_a_configurations_containers_but_keeps_volumes_once_unused(
@@ -461,3 +478,67 @@ def test_policy_from_env() -> None:
         ScopeReaperPolicy.from_env({"TTH_SANDBOX_PURGE_IDLE_SECONDS": "soon"})
     with pytest.raises(ValueError, match="shorter than the container idle period"):
         ScopeReaperPolicy.from_env({"TTH_SANDBOX_CONTAINER_IDLE_SECONDS": "600"})
+
+
+async def test_each_pass_removes_unneeded_images_after_reaping(
+    tmp_path: Path, project: Path, relays: list[Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    docker = FakeDocker()
+    manager = _manager(tmp_path, docker=docker)
+    docker.add_scope(SCOPE, main="exited")
+    _state(manager.state_root, SCOPE, mounted=project, used=NOW)
+    collected: list[dict[str, Any]] = []
+
+    def collect_garbage(client: Any, **options: Any) -> tuple[str, ...]:
+        # Runs after reaping, so the dead scope's containers are already gone.
+        assert client is docker and SCOPE not in docker.containers.items
+        collected.append(options)
+        return ("tth-codex-custom:" + "a" * 24,)
+
+    monkeypatch.setattr(custom_images, "collect_garbage", collect_garbage)
+
+    report = await _reaper(manager).tick()
+
+    assert report == ReapReport(stopped=(SCOPE,), images=("tth-codex-custom:" + "a" * 24,))
+    [options] = collected
+    assert options["state_root"] == manager.state_root
+    assert [layout.name for layout in options["scopes"]] == [SCOPE]
+
+
+async def test_image_cleanup_failure_keeps_the_reaping_report(
+    tmp_path: Path, project: Path, relays: list[Path], caplog: pytest.LogCaptureFixture
+) -> None:
+    docker = FakeDocker()
+    manager = _manager(tmp_path, docker=docker)
+    docker.add_scope(SCOPE, main="exited")
+    _state(manager.state_root, SCOPE, mounted=project, used=NOW)
+    manager.collect_images = AsyncMock(side_effect=RuntimeError("images unreachable"))
+
+    assert await _reaper(manager).tick() == ReapReport(stopped=(SCOPE,))
+    assert "sandbox image cleanup failed" in caplog.text
+
+
+async def test_pass_without_docker_skips_reaping_and_image_cleanup(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    def unreachable() -> Any:
+        raise RuntimeError("docker is not running")
+
+    manager = _manager(tmp_path, docker=FakeDocker())
+    manager.client_factory = unreachable
+    manager.collect_images = AsyncMock()
+
+    assert await _reaper(manager).tick() == ReapReport()
+
+    manager.collect_images.assert_not_awaited()
+    [record] = caplog.records
+    assert "docker is unreachable" in record.message and record.exc_info is None
+
+
+async def test_disabled_reaper_removes_no_images(tmp_path: Path) -> None:
+    manager = _manager(tmp_path, docker=FakeDocker())
+    manager.collect_images = AsyncMock()
+
+    await _reaper(manager, ScopeReaperPolicy(enabled=False)).tick()
+
+    manager.collect_images.assert_not_awaited()

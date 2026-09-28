@@ -74,6 +74,14 @@ gateway and recreates a stopped one, since the gateway keeps its state in the
 bind-mounted state directory and a Docker Desktop restart can leave a stopped
 gateway unstartable.
 
+After reclaiming, each pass also removes harness images nothing needs any
+more: images this state root built from a policy's image instructions that no
+container uses and no owned scope wants on its current base image, and base
+or gateway images a rebuild left untagged. Other state roots' derived images
+are left alone, and a pass that cannot reach Docker skips reaping and image
+cleanup with one warning. See
+[Customize sandbox images](customize-sandbox-images.md).
+
 Clients can also stop a scope on demand.
 `POST /conversations/{id}/runtime/close?release_sandbox=true` closes the
 conversation's runtime as usual, then resolves the scope from the
@@ -174,4 +182,5 @@ and lint passes.
 
 - [Project sandbox policies](project-sandbox-policies.md)
 - [Provision sandbox workspaces](provision-sandbox-workspaces.md)
+- [Customize sandbox images](customize-sandbox-images.md): the image cleanup each pass runs.
 - [Requirements by Status](../maps/requirements-by-status.md)

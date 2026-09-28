@@ -1,5 +1,8 @@
+import contextlib
+import fcntl
 import json
 import subprocess
+from collections.abc import Generator
 from pathlib import Path
 from typing import Any
 from unittest.mock import Mock, PropertyMock
@@ -11,13 +14,15 @@ from tth_types.enums import ErrorCode, HarnessKind
 from tth_types.errors import DomainError, public_message
 from tth_types.sandbox import SandboxPolicy, SandboxPolicyRef, SandboxPolicyRevision
 
-from talktoharnesses.remote import docker_ops
+from talktoharnesses.gateway.server import GatewayConfig
+from talktoharnesses.remote import custom_images, docker_ops
 from talktoharnesses.remote.isolated_sandbox import IsolatedSandbox
-from talktoharnesses.remote.sandbox import SandboxConfig
+from talktoharnesses.remote.sandbox import SandboxConfig, SandboxManager
 
 
 @pytest.mark.parametrize(
-    "failure", ["none", "attachment", "replacement", "credentials", "stopped_gateway"]
+    "failure",
+    ["none", "attachment", "replacement", "credentials", "stopped_gateway", "custom_image"],
 )
 def test_launch_keeps_secrets_and_public_network_outside_agent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
@@ -30,7 +35,11 @@ def test_launch_keeps_secrets_and_public_network_outside_agent(
     auth.write_text('{"tokens":{"access_token":"real-secret"}}')
     revision = SandboxPolicyRevision(
         ref=SandboxPolicyRef(id=uuid4(), revision=1),
-        policy=SandboxPolicy(project_root=str(root), read_only_roots=(str(dependency),)),
+        policy=SandboxPolicy(
+            project_root=str(root),
+            read_only_roots=(str(dependency),),
+            image_dockerfile="USER root\nRUN true" if failure == "custom_image" else None,
+        ),
     )
     manager = IsolatedSandbox(
         SandboxConfig(auth_files={HarnessKind.CODEX: str(auth)}),
@@ -61,7 +70,7 @@ def test_launch_keeps_secrets_and_public_network_outside_agent(
         return containers[name]
 
     def run(image: str, **kwargs: Any) -> Any:
-        runs.append(kwargs)
+        runs.append({"image": image, **kwargs})
         if image == manager.gateway_image:
             ca = manager.state / "ca" / "mitmproxy-ca-cert.pem"
             ca.parent.mkdir()
@@ -130,6 +139,14 @@ def test_launch_keeps_secrets_and_public_network_outside_agent(
         return client
 
     monkeypatch.setattr(manager, "_docker_client", docker_client)
+    derived: list[dict[str, Any]] = []
+
+    @contextlib.contextmanager
+    def derived_image(client: Any, kind: HarnessKind, **options: Any) -> Generator[str]:
+        derived.append({"kind": kind, **options})
+        yield "tth-codex-custom:" + "a" * 24
+
+    monkeypatch.setattr(custom_images, "ensure_derived_image", derived_image)
     relays: list[Path] = []
     monkeypatch.setattr("talktoharnesses.remote.isolated_sandbox.ensure_mcp_relay", relays.append)
     if failure == "attachment":
@@ -147,6 +164,22 @@ def test_launch_keeps_secrets_and_public_network_outside_agent(
     assert gateways[0]["sysctls"]["net.ipv4.ip_forward"] == "0"
     assert network.connect.call_args.kwargs["aliases"] == ["tth-gateway.invalid"]
     config = json.loads((manager.state / "config.json").read_text())
+    # The gateway never sees image text, so older gateway images accept the config.
+    assert "image_dockerfile" not in config["revision"]["policy"]
+    GatewayConfig.model_validate_json((manager.state / "config.json").read_text())
+    split_images = {call["image"] for call in runs if call["image"] != manager.gateway_image}
+    if failure == "custom_image":
+        # The seeders and the split all run the derived image, built on the base.
+        assert split_images == {"tth-codex-custom:" + "a" * 24}
+        assert derived[0]["base_tag"] == "tth-codex:latest"
+        assert derived[0]["dockerfile"] == "USER root\nRUN true"
+        assert json.loads(manager.layout.image_file.read_text()) == custom_images.image_record(
+            HarnessKind.CODEX, "tth-codex:latest", "USER root\nRUN true"
+        )
+        assert manager._container_image(HarnessKind.CODEX) == "tth-codex-custom:" + "a" * 24  # pyright: ignore[reportPrivateUsage]
+    else:
+        assert split_images == {"tth-codex:latest"} and derived == []
+        assert not manager.layout.image_file.exists()
     assert config["control_token"] == "host-only-control"
     assert config["auth_file"] == "/credentials/auth.json"
     assert config["split_token"] != config["control_token"]
@@ -236,17 +269,21 @@ def _image_present(kind: HarnessKind) -> None:
     del kind
 
 
+def _base_image_present(self: SandboxManager, kind: HarnessKind) -> None:
+    del self, kind
+
+
 def _docker_cli(kind: HarnessKind | None = None) -> str:
     del kind
     return "docker"
 
 
-def _scope(tmp_path: Path) -> IsolatedSandbox:
+def _scope(tmp_path: Path, image_dockerfile: str | None = None) -> IsolatedSandbox:
     root = tmp_path / "project"
     root.mkdir()
     revision = SandboxPolicyRevision(
         ref=SandboxPolicyRef(id=uuid4(), revision=1),
-        policy=SandboxPolicy(project_root=str(root)),
+        policy=SandboxPolicy(project_root=str(root), image_dockerfile=image_dockerfile),
     )
     auth = tmp_path / "auth.json"
     auth.write_text('{"tokens":{"access_token":"real-secret"}}')
@@ -325,3 +362,32 @@ def test_failed_gateway_image_build_logs_its_output_and_keeps_it_from_clients(
     assert "private output" not in public_message(failure.code, details=failure.details)
     # The operator reads the build output in the server log.
     assert "private output" in caplog.text
+
+
+def test_derived_image_is_built_before_the_scope_lock_is_taken(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A build can take the whole build timeout; reaping and closing the scope must not wait."""
+    manager = _scope(tmp_path, image_dockerfile="USER root\nRUN true")
+    client = Mock()
+    monkeypatch.setattr(manager, "_docker_client", _returning(client))
+    monkeypatch.setattr(SandboxManager, "_ensure_image", _base_image_present)
+    built: list[dict[str, Any]] = []
+
+    @contextlib.contextmanager
+    def derived_image(client: Any, kind: HarnessKind, **options: Any) -> Generator[str]:
+        lock = manager.layout.state_root / ".locks" / (manager.name + ".lock")
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        with lock.open("a") as handle:
+            # Raises if the scope lock were held.
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        built.append(options)
+        yield "tth-codex-custom:" + "a" * 24
+
+    monkeypatch.setattr(custom_images, "ensure_derived_image", derived_image)
+
+    manager._ensure_image(HarnessKind.CODEX)  # pyright: ignore[reportPrivateUsage]
+
+    [options] = built
+    assert options["base_tag"] == "tth-codex:latest"
+    assert json.loads(manager.layout.image_file.read_text())["base_image"] == "tth-codex:latest"

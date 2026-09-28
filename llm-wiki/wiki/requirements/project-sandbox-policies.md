@@ -23,8 +23,14 @@ commands. See the [approved request](../../raw/product/project-sandbox-policies.
 ## Current behavior
 
 The editable project policy contains an exact HTTPS host/path allowlist,
-provider selection, read-only dependency roots, and additional command prefixes.
-Defaults allow provider operation and Python/npm registry reads. The gateway
+provider selection, read-only dependency roots, additional command prefixes,
+and optional image instructions (Dockerfile text without `FROM`) that
+[customize the sandbox images](customize-sandbox-images.md) of that policy.
+Defaults allow provider operation and Python/npm registry reads and add no
+image instructions. The gateway configuration omits the image instructions,
+so the gateway never receives them. A policy without image instructions is
+stored and served without the field, so readers built before it existed
+still accept the policy. The gateway
 rejects private DNS results, direct tunnels, unapproved redirects, and Git receive-pack.
 Inside an admitted tunnel, every Host header and any request-target authority
 (absolute-form or HTTP/2 `:authority`) must name the admitted host. Only ASCII
@@ -185,4 +191,6 @@ the fix it stalled after 75 tarballs. The proxy suite passes 976 tests (21 skipp
 ## Related
 
 - [Project sandbox policy request](../../raw/product/project-sandbox-policies.md)
+- [Approved sandbox image customization](../../raw/product/sandbox-image-customization-amendment.md)
+- [Customize sandbox images](customize-sandbox-images.md): image instructions in the policy and derived images.
 - [Reclaim sandbox scopes](reclaim-sandbox-scopes.md): idle and dead scope containers are removed; session volumes stay for resume.
