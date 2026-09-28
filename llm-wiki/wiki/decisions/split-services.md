@@ -11,6 +11,7 @@ last_verified: 2026-09-06
 verified_against_commit: 1655a774b7b6f7f88b56d75497277dadcaa10c30
 sources:
   - raw/product/split-service-runtime-ownership.md
+  - raw/engineering/adr-0008-split-session-reattach.md
 ---
 
 # Split Services Architecture
@@ -53,7 +54,7 @@ The monolith was split at the `HarnessAdapter` seam in commit `4764402`.
   `TTH_SPLIT_DETACH_GRACE_SECONDS` (default 120) with its sent frames retained.
   A restarted proxy reattaches with `GET /v1/sessions/{sid}/events?after=<id>`
   from the frame cursor committed with its events, and the turn continues
-  ([ADR 0008](../../../docs/adr/0008-split-session-reattach.md)). When that
+  ([ADR 0008](../../raw/engineering/adr-0008-split-session-reattach.md)). When that
   fails, recovery settles the turn as `turn_lost_on_restart`: a fresh split
   session from a native resume never continues a turn begun before it.
 - Split sessions are in-memory; a split restart loses them by design.

@@ -15,6 +15,15 @@ verified_against_commit: 78003994d9fe93108ce5a6bc3591ab2e2ef904d9
 
 Entries are appended using `## [YYYY-MM-DD] operation | Title`.
 
+## [2026-09-28] ingest | Snapshot ADR 0008 into the vault
+
+- Preserved `docs/adr/0008-split-session-reattach.md` verbatim as
+  `raw/engineering/adr-0008-split-session-reattach.md`, like ADRs 0001 to 0007.
+- [Runtime Isolation Architecture](architecture/runtime-isolation.md) and
+  [Split Services Architecture](decisions/split-services.md) linked the
+  repository file directly, which failed `wiki_lint` with `link-outside-vault`.
+  Both now link the snapshot, and the decision page lists it as a source.
+
 ## [2026-09-28] fix | Deny domain fronting through admitted gateway tunnels
 
 - Inside a CONNECT tunnel mitmproxy takes `request.host` from the tunnel and
