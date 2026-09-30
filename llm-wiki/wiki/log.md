@@ -672,3 +672,16 @@ are considered. The removal and the row deletion are atomic against binding.
 Gateway preparation recreates a stopped gateway instead of restarting it.
 Record the behavior and test evidence in
 [Reclaim sandbox scopes](requirements/reclaim-sandbox-scopes.md).
+
+## [2026-09-30] update | Bump Codex to 0.159.2
+
+Against baseline `16ea5c2` plus this working tree, the Codex split pins
+`openai-codex` and `openai-codex-cli-bin` 0.159.2, which is also its floor and
+latest verified release. The 0.154.0 CLI's model catalog did not offer
+`gpt-6.1-sol`, `gpt-6-sol` or `gpt-6-luna`. Codex 0.159.2 adds workspace routing
+discovery, so the gateway's credentialed Codex routes now admit
+`chatgpt.com/backend-api/wham/accounts/check`. The Codex sandbox live gate
+passed with `gpt-6-astra` and again with `gpt-6.1-sol`. Record the route in
+[Project sandbox policies](requirements/project-sandbox-policies.md) and the
+confirmation format in
+[Resolve approvals and structured questions](requirements/resolve-approvals-and-structured-questions.md).

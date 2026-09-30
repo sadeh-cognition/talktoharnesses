@@ -99,8 +99,8 @@ def harness_config() -> HarnessConfiguration:
 
 def launch_snapshot() -> LaunchSnapshot:
     return LaunchSnapshot(
-        harness_version="0.154.0",
+        harness_version="0.159.2",
         working_directory="/tmp",
         adapter_version="2026.8.1",
-        capabilities=HarnessCapabilities(kind=HarnessKind.CODEX, version="0.154.0"),
+        capabilities=HarnessCapabilities(kind=HarnessKind.CODEX, version="0.159.2"),
     )

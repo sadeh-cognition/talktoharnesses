@@ -49,6 +49,7 @@ PROVIDER_ROUTES = (
             "/backend-api/codex/responses",
             "/backend-api/codex/models",
             "/backend-api/wham/usage",
+            "/backend-api/wham/accounts/check",
         ),
     ),
     ProviderRoute(

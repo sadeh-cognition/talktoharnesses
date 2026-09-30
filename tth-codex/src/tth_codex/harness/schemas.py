@@ -311,7 +311,7 @@ class CodexMcpToolApprovalParams(CodexApproval):
     @model_validator(mode="before")
     @classmethod
     def _read_tool_name(cls, data: object) -> object:
-        # Codex 0.154 names the tool only in this native confirmation message,
+        # Codex 0.159 names the tool only in this native confirmation message,
         # not in _meta. Require its exact format and server identity.
         if not isinstance(data, dict):
             return data

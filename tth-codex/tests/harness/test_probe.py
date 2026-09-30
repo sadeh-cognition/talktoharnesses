@@ -31,7 +31,7 @@ def _sdk_with_response(data: list[object]) -> SimpleNamespace:
         async def models(self) -> SimpleNamespace:
             return SimpleNamespace(data=data)
 
-    return SimpleNamespace(__version__="0.154.0", AsyncCodex=_Client, CodexConfig=_Config)
+    return SimpleNamespace(__version__="0.159.2", AsyncCodex=_Client, CodexConfig=_Config)
 
 
 def _model(
@@ -67,11 +67,11 @@ async def test_probe_matches_pinned_release(monkeypatch: pytest.MonkeyPatch) -> 
             ]
         ),
     )
-    monkeypatch.setattr(probe_mod, "_runtime_version", lambda: "0.154.0")
+    monkeypatch.setattr(probe_mod, "_runtime_version", lambda: "0.159.2")
     caps, release = await probe_mod.probe_codex(
         HarnessConfiguration(kind=HarnessKind.CODEX, working_directory="/tmp")
     )
-    assert release.id == "codex-openai-codex-0.154.0"
+    assert release.id == "codex-openai-codex-0.159.2"
     assert caps.supports_resume is True
     assert [(model.id, model.label) for model in caps.models] == [("gpt-5.6-sol", "GPT-5.6-Sol")]
     assert [effort.id for effort in caps.efforts] == ["low", "medium", "high"]
@@ -110,9 +110,9 @@ def test_import_and_runtime_version_helpers(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr(
         probe_mod,
         "_import_openai_codex",
-        lambda: SimpleNamespace(__version__="0.154.0"),
+        lambda: SimpleNamespace(__version__="0.159.2"),
     )
-    assert probe_mod._import_openai_codex().__version__ == "0.154.0"
+    assert probe_mod._import_openai_codex().__version__ == "0.159.2"
 
     def _missing_import() -> object:
         raise DomainError(
@@ -128,13 +128,13 @@ def test_import_and_runtime_version_helpers(monkeypatch: pytest.MonkeyPatch) -> 
     def version(name: str) -> str:
         if name == "openai-codex-cli-bin":
             raise importlib.metadata.PackageNotFoundError(name)
-        return "0.154.0"
+        return "0.159.2"
 
     monkeypatch.setattr(importlib.metadata, "version", version)
     # Restore real helper body for runtime version fallback.
     monkeypatch.undo()
     monkeypatch.setattr(importlib.metadata, "version", version)
-    assert probe_mod._runtime_version() == "0.154.0"
+    assert probe_mod._runtime_version() == "0.159.2"
 
 
 @pytest.mark.asyncio
@@ -149,7 +149,7 @@ async def test_discovery_failure_reports_cause() -> None:
         async def __aexit__(self, *_args: object) -> None:
             return None
 
-    sdk = SimpleNamespace(__version__="0.154.0", AsyncCodex=_FailingClient, CodexConfig=_Config)
+    sdk = SimpleNamespace(__version__="0.159.2", AsyncCodex=_FailingClient, CodexConfig=_Config)
 
     with pytest.raises(DomainError) as exc:
         await probe_mod._discover_models(sdk, "/tmp")

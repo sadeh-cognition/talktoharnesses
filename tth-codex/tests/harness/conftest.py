@@ -19,7 +19,7 @@ async def broker() -> AsyncIterator[tuple[CodexAdapter, HarnessSession]]:
     adapter = CodexAdapter(client_factory=FakeCodex)
     # Exercise the real broker with an offline compatible SDK transport.
     adapter._release = match_release(
-        sdk_version="0.154.0", runtime_version="0.154.0", platform="linux"
+        sdk_version="0.159.2", runtime_version="0.159.2", platform="linux"
     )
     session = await adapter.start(
         StartSessionRequest(

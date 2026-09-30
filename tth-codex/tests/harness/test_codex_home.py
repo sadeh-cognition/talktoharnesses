@@ -52,7 +52,7 @@ async def test_starts_after_success_run_concurrently() -> None:
 def _release():
     from tth_codex.harness.compatibility import match_release
 
-    return match_release(sdk_version="0.154.0", runtime_version="0.154.0", platform="linux")
+    return match_release(sdk_version="0.159.2", runtime_version="0.159.2", platform="linux")
 
 
 async def test_adapter_probes_share_the_gate(monkeypatch: pytest.MonkeyPatch) -> None:

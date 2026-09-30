@@ -99,7 +99,10 @@ launched through unobserved tools. Coverage is exposed with the conversation.
 The initial policy implementation passed live create and resume checks for all
 seven installed providers, including verification of the requested reply.
 Native credential formats and endpoints can change; rerun this gate after provider
-upgrades. Refresh rotation, cross-scope JWT handles, and secret filtering are
+upgrades. Codex 0.159.2, for example, added workspace routing discovery at
+`chatgpt.com/backend-api/wham/accounts/check`; until that credentialed route was
+added to `src/talktoharnesses/gateway/routes.py`, every Codex turn failed with
+`workspace routing discovery failed`. Refresh rotation, cross-scope JWT handles, and secret filtering are
 covered by deterministic gateway tests; forced live refresh was not exercised
 for every provider.
 Existing deployment images must be rebuilt with the shared policy wire types and

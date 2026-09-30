@@ -39,7 +39,7 @@ overload/backpressure errors. Internal errors remain visible.
 ## Gap
 
 General MCP data forms and URL elicitations remain unsupported. They must not
-be mistaken for tool approvals. Codex 0.154 puts the tool name only in its
+be mistaken for tool approvals. Codex 0.159 puts the tool name only in its
 confirmation message, so the adapter requires that exact native message format
 and matching server identity.
 

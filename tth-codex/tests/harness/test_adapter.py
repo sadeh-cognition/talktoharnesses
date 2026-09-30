@@ -60,7 +60,7 @@ async def test_start_submit_terminal_without_final_and_steer(
     async def fake_probe(config: HarnessConfiguration):
         from tth_codex.harness.compatibility import match_release
 
-        release = match_release(sdk_version="0.154.0", runtime_version="0.154.0", platform="linux")
+        release = match_release(sdk_version="0.159.2", runtime_version="0.159.2", platform="linux")
         return release.to_harness_capabilities(), release
 
     monkeypatch.setattr("tth_codex.harness.adapter.probe_codex", fake_probe)
@@ -107,7 +107,7 @@ async def test_two_conversations_isolated(monkeypatch: pytest.MonkeyPatch) -> No
     async def fake_probe(config: HarnessConfiguration):
         from tth_codex.harness.compatibility import match_release
 
-        release = match_release(sdk_version="0.154.0", runtime_version="0.154.0", platform="linux")
+        release = match_release(sdk_version="0.159.2", runtime_version="0.159.2", platform="linux")
         return release.to_harness_capabilities(), release
 
     monkeypatch.setattr("tth_codex.harness.adapter.probe_codex", fake_probe)
@@ -142,7 +142,7 @@ async def test_stream_approval_notification_fails_closed(monkeypatch: pytest.Mon
     async def fake_probe(config: HarnessConfiguration):
         from tth_codex.harness.compatibility import match_release
 
-        release = match_release(sdk_version="0.154.0", runtime_version="0.154.0", platform="linux")
+        release = match_release(sdk_version="0.159.2", runtime_version="0.159.2", platform="linux")
         return release.to_harness_capabilities(), release
 
     monkeypatch.setattr("tth_codex.harness.adapter.probe_codex", fake_probe)
