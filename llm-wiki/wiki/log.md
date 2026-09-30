@@ -685,3 +685,16 @@ passed with `gpt-6-astra` and again with `gpt-6.1-sol`. Record the route in
 [Project sandbox policies](requirements/project-sandbox-policies.md) and the
 confirmation format in
 [Resolve approvals and structured questions](requirements/resolve-approvals-and-structured-questions.md).
+
+## [2026-10-01] update | Stop sandboxed Codex requests the gateway denies
+
+Against baseline `16ea5c2` plus this working tree, every sandboxed Codex start
+made about eight `chatgpt.com` requests that the gateway denied: the remote
+plugin catalog, remote-control enrollment, ChatGPT Apps MCP and analytics
+events. TTH's readiness re-probe repeated them roughly every four and a half
+minutes. The Codex image now writes root-owned `/etc/codex/config.toml`
+(`plugins`, `apps` and `analytics` off) and `/etc/codex/requirements.toml`
+(`allow_remote_control = false`), and the gateway admits Codex's read-only
+GET of `wham/settings/user` at turn start. The Codex sandbox live gate passed
+with no denials, down from 52. Record the behavior in
+[Project sandbox policies](requirements/project-sandbox-policies.md).

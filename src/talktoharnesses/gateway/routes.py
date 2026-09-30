@@ -52,6 +52,9 @@ PROVIDER_ROUTES = (
             "/backend-api/wham/accounts/check",
         ),
     ),
+    # Codex reads the user's settings at every turn start. Read-only: the
+    # sandbox must not change them.
+    ProviderRoute("openai", EgressRule(host="chatgpt.com", path="/backend-api/wham/settings/user")),
     ProviderRoute(
         "openai",
         EgressRule(host="auth.openai.com", path="/oauth/token", methods=("POST",)),

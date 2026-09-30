@@ -102,7 +102,12 @@ Native credential formats and endpoints can change; rerun this gate after provid
 upgrades. Codex 0.159.2, for example, added workspace routing discovery at
 `chatgpt.com/backend-api/wham/accounts/check`; until that credentialed route was
 added to `src/talktoharnesses/gateway/routes.py`, every Codex turn failed with
-`workspace routing discovery failed`. Refresh rotation, cross-scope JWT handles, and secret filtering are
+`workspace routing discovery failed`. The Codex image (`CODEX_SYSTEM_CONFIG` in
+`scripts/render_dockerfiles.py`) turns off Codex plugins, ChatGPT Apps and
+analytics in `/etc/codex/config.toml` and forbids remote control in
+`/etc/codex/requirements.toml`, because the gateway denied those requests on
+every Codex start. The gateway admits the one remaining call, Codex's GET of
+`wham/settings/user` at each turn start, as a read-only route. Refresh rotation, cross-scope JWT handles, and secret filtering are
 covered by deterministic gateway tests; forced live refresh was not exercised
 for every provider.
 Existing deployment images must be rebuilt with the shared policy wire types and

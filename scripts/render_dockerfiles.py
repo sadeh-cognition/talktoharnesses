@@ -37,6 +37,16 @@ RUN set -eu; case "$(uname -m)" in \\
     && chmod 0755 /usr/local/bin/rtk \\
     && rtk --version"""
 
+CODEX_SYSTEM_CONFIG = """\
+# The policy gateway admits Codex's model and usage routes, not its plugin
+# catalog, ChatGPT Apps, analytics or remote control, so every Codex start made
+# requests it denied. Turn those off by default and forbid remote control.
+RUN mkdir -p /etc/codex \\
+    && printf '[features]\\nplugins = false\\napps = false\\n\\n[analytics]\\nenabled = false\\n' \\
+       > /etc/codex/config.toml \\
+    && printf 'allow_remote_control = false\\n' > /etc/codex/requirements.toml \\
+    && chmod 0644 /etc/codex/config.toml /etc/codex/requirements.toml"""
+
 CURSOR_INSTALL = """\
 # Pinned versioned artifact (the cursor.com/install script always installs
 # latest, which can run ahead of the adapter's verified matrix).
@@ -107,6 +117,7 @@ class Split:
     extra_apt: tuple[str, ...] = ()
     root_installs: tuple[str, ...] = ()  # before USER agent
     agent_installs: tuple[str, ...] = ()  # as the service user
+    root_config: tuple[str, ...] = ()  # as root, in the per-kind section
 
 
 SPLITS: dict[str, Split] = {
@@ -119,7 +130,7 @@ SPLITS: dict[str, Split] = {
             extra_apt=("libatomic1", "make", "ripgrep"),
             root_installs=(CURSOR_INSTALL, RTK_INSTALL),
         ),
-        Split("codex", root_installs=(RTK_INSTALL,)),
+        Split("codex", root_installs=(RTK_INSTALL,), root_config=(CODEX_SYSTEM_CONFIG,)),
         Split("claude", root_installs=(RTK_INSTALL,)),
         Split("opencode", root_installs=(OPENCODE_INSTALL, RTK_INSTALL)),
         Split("prime-agent", root_installs=(PRIME_AGENT_INSTALL,)),
@@ -176,6 +187,7 @@ def render_dockerfile(split: Split) -> str:
     ]
     command = [f"{SERVICE_VENV}/bin/python", "-m", "uvicorn", f"{package}.asgi:application"]
     command += ["--host", "0.0.0.0", "--port", "8010"]
+    root_config = "".join(f"{step}\n\n" for step in split.root_config)
 
     blocks = [
         f"""\
@@ -240,7 +252,7 @@ ENV DJANGO_SETTINGS_MODULE={package}.settings
 # only apply to the process-bound harness CLIs installed above, never to the
 # venv (the SDK-managed kinds have no checked executable).
 USER root
-# uv.lock pins tth-types as ../tth-types relative to the project directory.
+{root_config}# uv.lock pins tth-types as ../tth-types relative to the project directory.
 WORKDIR /app/service
 COPY pyproject.toml README.md uv.lock ./
 {_uv_sync("--no-install-project --no-install-package tth-types")}

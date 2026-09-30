@@ -67,6 +67,15 @@ ENV DJANGO_SETTINGS_MODULE=tth_codex.settings
 # only apply to the process-bound harness CLIs installed above, never to the
 # venv (the SDK-managed kinds have no checked executable).
 USER root
+# The policy gateway admits Codex's model and usage routes, not its plugin
+# catalog, ChatGPT Apps, analytics or remote control, so every Codex start made
+# requests it denied. Turn those off by default and forbid remote control.
+RUN mkdir -p /etc/codex \
+    && printf '[features]\nplugins = false\napps = false\n\n[analytics]\nenabled = false\n' \
+       > /etc/codex/config.toml \
+    && printf 'allow_remote_control = false\n' > /etc/codex/requirements.toml \
+    && chmod 0644 /etc/codex/config.toml /etc/codex/requirements.toml
+
 # uv.lock pins tth-types as ../tth-types relative to the project directory.
 WORKDIR /app/service
 COPY pyproject.toml README.md uv.lock ./

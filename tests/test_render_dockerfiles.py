@@ -110,6 +110,13 @@ def test_common_prefix_is_shared_between_kinds_with_the_same_installs() -> None:
     assert len(layers) == 1
 
 
+def test_codex_image_turns_off_requests_the_gateway_denies() -> None:
+    per_kind = render_dockerfile(SPLITS["codex"]).split(_PER_KIND_MARKER, 1)[1]
+
+    assert "plugins = false" in per_kind
+    assert "allow_remote_control = false" in per_kind
+
+
 def test_rendered_dockerfiles_are_current() -> None:
     for kind, split in SPLITS.items():
         rendered = (ROOT / f"tth-{kind}" / "Dockerfile").read_text()
