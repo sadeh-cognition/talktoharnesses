@@ -26,14 +26,14 @@ def test_build_broker_async_codex_forwards_public_approval_handler() -> None:
         del method, params
         return {"decision": "decline"}
 
-    client = adapter_mod._build_broker_async_codex(handler)  # pyright: ignore[reportPrivateUsage]
+    client = adapter_mod._build_broker_async_codex(handler)
     try:
         assert type(client).__name__ == "BrokerAsyncCodex"
-        sync = client._client._sync  # pyright: ignore[reportPrivateUsage]
-        assert sync._approval_handler is handler  # pyright: ignore[reportPrivateUsage]
+        sync = client._client._sync
+        assert sync._approval_handler is handler
     finally:
         # Construction must not start the process; still close transport state.
-        close = getattr(client._client._sync, "close", None)  # pyright: ignore[reportPrivateUsage]
+        close = getattr(client._client._sync, "close", None)
         if callable(close):
             close()
 
@@ -42,24 +42,24 @@ def test_sandbox_wire_value() -> None:
     from openai_codex.generated.v2_all import SandboxMode
 
     assert (
-        adapter_mod._sandbox_wire_value(SimpleNamespace(value="workspace-write"))  # pyright: ignore[reportPrivateUsage]
+        adapter_mod._sandbox_wire_value(SimpleNamespace(value="workspace-write"))
         is SandboxMode.workspace_write
     )
-    assert adapter_mod._sandbox_wire_value("read-only") is SandboxMode.read_only  # pyright: ignore[reportPrivateUsage]
-    assert adapter_mod._sandbox_wire_value("full-access") is SandboxMode.danger_full_access  # pyright: ignore[reportPrivateUsage]
+    assert adapter_mod._sandbox_wire_value("read-only") is SandboxMode.read_only
+    assert adapter_mod._sandbox_wire_value("full-access") is SandboxMode.danger_full_access
 
 
 def test_codex_settings_modes() -> None:
     from openai_codex import ApprovalMode, Sandbox
     from tth_types.errors import DomainError
 
-    mode, sandbox = adapter_mod._codex_settings("read_only")  # pyright: ignore[reportPrivateUsage]
+    mode, sandbox = adapter_mod._codex_settings("read_only")
     assert mode is ApprovalMode.auto_review
     assert sandbox is Sandbox.read_only
-    _, full = adapter_mod._codex_settings("full-access")  # pyright: ignore[reportPrivateUsage]
+    _, full = adapter_mod._codex_settings("full-access")
     assert full is Sandbox.full_access
     with pytest.raises(DomainError):
-        adapter_mod._codex_settings("not-a-mode")  # pyright: ignore[reportPrivateUsage]
+        adapter_mod._codex_settings("not-a-mode")
 
 
 @pytest.mark.asyncio
@@ -85,12 +85,12 @@ async def test_interrupt_and_close_cancel_pending(
     )
     loop = __import__("asyncio").get_running_loop()
     fut = loop.create_future()
-    adapter._pending_interactions[uuid4()] = fut  # pyright: ignore[reportPrivateUsage]
+    adapter._pending_interactions[uuid4()] = fut
     await adapter.interrupt(session)
     assert fut.result().decision is ApprovalDecision.CANCEL
 
     fut2 = loop.create_future()
-    adapter._pending_interactions[uuid4()] = fut2  # pyright: ignore[reportPrivateUsage]
+    adapter._pending_interactions[uuid4()] = fut2
     await adapter.close(session)
     assert fut2.result().decision is ApprovalDecision.CANCEL
 
@@ -103,7 +103,7 @@ async def test_thread_start_override_forces_user_reviewer(
         del method, params
         return {"decision": "accept"}
 
-    client = adapter_mod._build_broker_async_codex(handler)  # pyright: ignore[reportPrivateUsage]
+    client = adapter_mod._build_broker_async_codex(handler)
     started: dict[str, object] = {}
 
     async def fake_ensure() -> None:
@@ -114,7 +114,7 @@ async def test_thread_start_override_forces_user_reviewer(
         return SimpleNamespace(thread=SimpleNamespace(id="thr-1"))
 
     monkeypatch.setattr(client, "_ensure_initialized", fake_ensure)
-    monkeypatch.setattr(client._client, "thread_start", fake_thread_start)  # pyright: ignore[reportPrivateUsage]
+    monkeypatch.setattr(client._client, "thread_start", fake_thread_start)
 
     thread = await client.thread_start(
         cwd="/tmp",
@@ -131,7 +131,7 @@ async def test_thread_start_override_forces_user_reviewer(
 async def test_thread_start_and_resume_yolo_uses_never_without_reviewer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    client = adapter_mod._build_broker_async_codex(None, yolo=True)  # pyright: ignore[reportPrivateUsage]
+    client = adapter_mod._build_broker_async_codex(None, yolo=True)
     started: dict[str, object] = {}
     resumed: dict[str, object] = {}
 
@@ -147,8 +147,8 @@ async def test_thread_start_and_resume_yolo_uses_never_without_reviewer(
         resumed["params"] = params
 
     monkeypatch.setattr(client, "_ensure_initialized", fake_ensure)
-    monkeypatch.setattr(client._client, "thread_start", fake_thread_start)  # pyright: ignore[reportPrivateUsage]
-    monkeypatch.setattr(client._client, "thread_resume", fake_thread_resume)  # pyright: ignore[reportPrivateUsage]
+    monkeypatch.setattr(client._client, "thread_start", fake_thread_start)
+    monkeypatch.setattr(client._client, "thread_resume", fake_thread_resume)
 
     thread = await client.thread_start(
         cwd="/tmp",
@@ -180,5 +180,5 @@ def test_codex_settings_import_error(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setitem(sys.modules, "openai_codex", None)  # force ImportError on import
     with pytest.raises(DomainError) as exc:
-        adapter_mod._codex_settings("default")  # pyright: ignore[reportPrivateUsage]
+        adapter_mod._codex_settings("default")
     assert exc.value.code.value == "provider_incompatible"

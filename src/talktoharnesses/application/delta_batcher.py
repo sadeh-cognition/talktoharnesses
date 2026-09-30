@@ -25,8 +25,8 @@ FlushFn = Callable[
 class _Pending:
     base_version: int | None = None
     state: ConversationState | None = None
-    events: list[ConversationEvent] = field(default_factory=lambda: [])
-    commands: list[Command] = field(default_factory=lambda: [])
+    events: list[ConversationEvent] = field(default_factory=list[ConversationEvent])
+    commands: list[Command] = field(default_factory=list[Command])
 
 
 class DeltaBatcher:

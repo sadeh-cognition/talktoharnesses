@@ -231,7 +231,7 @@ def test_session_status_idle_completed_aborted_error() -> None:
     completed = n.on_server_event(_status(status="idle"))
     assert any(isinstance(e, AssistantMessageCompletedPayload) for e in completed)
     assert any(isinstance(e, TurnCompletedPayload) for e in completed)
-    assert n._active_turn_id is None  # pyright: ignore[reportPrivateUsage]
+    assert n._active_turn_id is None
 
     n.begin_turn(uuid4())
     done = n.on_server_event(_status(status="completed"))

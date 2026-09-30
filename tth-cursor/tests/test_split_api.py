@@ -114,7 +114,7 @@ async def test_session_lifecycle_and_event_stream(fake_adapter: FakeAdapter, tmp
     assert created.pid is None
     assert created.session.metadata["split_session_id"] == str(created.session_id)
     assert fake_adapter.preflight_modes == ["start"]
-    assert fake_adapter._imported is not None  # pyright: ignore[reportPrivateUsage]
+    assert fake_adapter._imported is not None
 
     turn = TurnRequest(turn_id=uuid4(), prompt="hello")
     response = await _post(client, f"/v1/sessions/{created.session_id}/turns", turn)
@@ -269,9 +269,7 @@ async def test_capacity_refusal_closes_started_session(
     monkeypatch.setattr(
         store,
         "_policy",
-        store._policy.model_copy(  # pyright: ignore[reportPrivateUsage]
-            update={"max_runtimes": 0}
-        ),
+        store._policy.model_copy(update={"max_runtimes": 0}),
     )
     client = AsyncClient()
     request = CreateSessionRequest(

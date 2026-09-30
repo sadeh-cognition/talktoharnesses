@@ -209,7 +209,7 @@ async def test_new_commands_are_refused_while_worker_lease_is_lost() -> None:
     cid = (await service.create_conversation("owner", h.id)).detail.conversation.id
     await service.start("worker-1")
     assert service.coordinator.ready_for_work is True
-    await service.coordinator._on_worker_lease_lost()  # pyright: ignore[reportPrivateUsage]
+    await service.coordinator._on_worker_lease_lost()
 
     with pytest.raises(DomainError) as exc:
         await service.submit_turn("owner", cid, prompt="hello", idempotency_key="k1")
@@ -375,7 +375,7 @@ async def test_interrupt_cancellations_are_audited_without_answer_commands() -> 
         (*queued.events, *running.events, *requested.events, *requested_again.events),
     )
 
-    await service._broker.cancel_open_for_interrupt(conversation_id)  # pyright: ignore[reportPrivateUsage]
+    await service._broker.cancel_open_for_interrupt(conversation_id)
 
     assert len(p.interaction_audits) == 2
     assert all(
@@ -407,7 +407,7 @@ async def test_list_search_and_history_pages() -> None:
         created_at=_now(),
     )
     p.messages[cid] = {msg.id: msg}
-    p._refresh_search(p.states[cid])  # pyright: ignore[reportPrivateUsage]
+    p._refresh_search(p.states[cid])
 
     found = await service.search_conversations("owner", "needle-token")
     assert len(found.items) == 1
@@ -650,8 +650,8 @@ async def test_start_failure_rolls_back_and_shutdown_timeouts() -> None:
         raise RuntimeError("stop failed")
 
     deadline = time.monotonic() + 0.05
-    await TalkToHarnessesService._run_shutdown_step(hang(), deadline, "hang")  # pyright: ignore[reportPrivateUsage]
-    await TalkToHarnessesService._run_shutdown_step(boom(), deadline + 1, "boom")  # pyright: ignore[reportPrivateUsage]
+    await TalkToHarnessesService._run_shutdown_step(hang(), deadline, "hang")
+    await TalkToHarnessesService._run_shutdown_step(boom(), deadline + 1, "boom")
 
     async def cancellable() -> None:
         await asyncio.sleep(10)
@@ -660,7 +660,7 @@ async def test_start_failure_rolls_back_and_shutdown_timeouts() -> None:
     await asyncio.sleep(0)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
-        await TalkToHarnessesService._run_shutdown_step(task, deadline + 1, "cancel")  # pyright: ignore[reportPrivateUsage]
+        await TalkToHarnessesService._run_shutdown_step(task, deadline + 1, "cancel")
 
 
 @pytest.mark.asyncio
@@ -731,7 +731,7 @@ async def test_close_runtime_releases_idle_runtime_and_keeps_history(tmp_path: P
     await service.close_runtime("owner", cid)
 
     assert runtime.get_runtime(cid) is None
-    assert not runtime._runtimes  # pyright: ignore[reportPrivateUsage]
+    assert not runtime._runtimes
     assert adapter.closed is True
     assert "session_closed" in {event.type for event in persistence.events[cid]}
     # The conversation and its native session survive for a later resume.
@@ -764,7 +764,7 @@ async def test_close_runtime_stops_the_sandbox_only_when_asked(
 ) -> None:
     service, persistence, runtime, _adapter, cid = await _live_runtime_service(tmp_path)
     stopper = _RecordingStopper()
-    service._stop_sandbox = stopper  # pyright: ignore[reportPrivateUsage]
+    service._stop_sandbox = stopper
     state = await persistence.get_snapshot(cid, "owner")
     assert state.binding is not None
 
@@ -782,7 +782,7 @@ async def test_close_runtime_stops_the_sandbox_after_the_runtime_is_already_gone
     # sandbox is keyed by the binding, so asking for it still stops it.
     service, _persistence, runtime, _adapter, cid = await _live_runtime_service(tmp_path)
     stopper = _RecordingStopper()
-    service._stop_sandbox = stopper  # pyright: ignore[reportPrivateUsage]
+    service._stop_sandbox = stopper
     await service.close_runtime("owner", cid)
     assert runtime.get_runtime(cid) is None
 
@@ -795,7 +795,7 @@ async def test_close_runtime_stops_the_sandbox_after_the_runtime_is_already_gone
 async def test_close_runtime_survives_a_failed_sandbox_stop(tmp_path: Path) -> None:
     service, _persistence, runtime, _adapter, cid = await _live_runtime_service(tmp_path)
     stopper = _RecordingStopper(RuntimeError("docker unreachable"))
-    service._stop_sandbox = stopper  # pyright: ignore[reportPrivateUsage]
+    service._stop_sandbox = stopper
 
     await service.close_runtime("owner", cid, release_sandbox=True)
 
@@ -836,7 +836,7 @@ async def test_soft_delete_closes_live_runtime(tmp_path: Path) -> None:
     await service.soft_delete_conversation("owner", cid)
 
     assert runtime.get_runtime(cid) is None
-    assert not runtime._runtimes  # pyright: ignore[reportPrivateUsage]
+    assert not runtime._runtimes
     assert adapter.closed is True
     with pytest.raises(DomainError) as exc:
         await service.get_conversation("owner", cid)
@@ -980,13 +980,13 @@ async def test_close_runtime_refuses_while_switch_is_in_flight(tmp_path: Path) -
 async def test_close_runtime_on_non_owning_worker_refuses(tmp_path: Path) -> None:
     """Runtimes are per worker: a close landing elsewhere must not report success."""
     service_a, persistence, runtime_a, adapter, cid = await _live_runtime_service(tmp_path)
-    service_a._worker_id = "worker-a"  # pyright: ignore[reportPrivateUsage]
+    service_a._worker_id = "worker-a"
     persistence.ownership[cid] = ("worker-a", 1, _now() + timedelta(minutes=5))
     registry = AdapterRegistry()
     registry.register(HarnessKind.OPENCODE, FakeAdapter)
     runtime_b = RuntimeManager(persistence, registry, clock=_now)
     service_b = TalkToHarnessesService(persistence, registry, _Publisher(), _now, runtime_b)
-    service_b._worker_id = "worker-b"  # pyright: ignore[reportPrivateUsage]
+    service_b._worker_id = "worker-b"
 
     with pytest.raises(DomainError) as exc:
         await service_b.close_runtime("owner", cid)
@@ -1012,7 +1012,7 @@ async def test_close_runtime_ignores_expired_lease_of_other_worker(tmp_path: Pat
     registry.register(HarnessKind.OPENCODE, FakeAdapter)
     runtime = RuntimeManager(persistence, registry, clock=_now)
     service = TalkToHarnessesService(persistence, registry, _Publisher(), _now, runtime)
-    service._worker_id = "worker-b"  # pyright: ignore[reportPrivateUsage]
+    service._worker_id = "worker-b"
     config = HarnessConfiguration(kind=HarnessKind.OPENCODE, working_directory=str(tmp_path))
     harness = await service.create_harness("owner", name="h", configuration=config)
     cid = (await service.create_conversation("owner", harness.id)).detail.conversation.id

@@ -114,7 +114,7 @@ def test_envelope_rejects_sequence_below_one() -> None:
     with pytest.raises(ValidationError):
         ConversationEvent(
             conversation_id=uuid4(),
-            sequence=0,
+            sequence=0,  # pyrefly: ignore[bad-argument-type]
             timestamp=datetime.now(UTC),
             type="turn_started",
             payload=TurnStartedPayload(turn_id=uuid4()),

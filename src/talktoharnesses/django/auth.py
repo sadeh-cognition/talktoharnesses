@@ -128,9 +128,7 @@ def _encode_token(*, user_pk: str, jti: str, issued_at: datetime, expires_at: da
         "exp": int(expires_at.timestamp()),
     }
     # PyJWT stubs type the key parameter as partially unknown.
-    return jwt.encode(  # pyright: ignore[reportUnknownMemberType]
-        payload, cfg.signing_key, algorithm=_JWT_ALGORITHM
-    )
+    return jwt.encode(payload, cfg.signing_key, algorithm=_JWT_ALGORITHM)
 
 
 def _decode_unverified_claims(token: str) -> dict[str, Any]:
@@ -141,7 +139,7 @@ def _decode_unverified_claims(token: str) -> dict[str, Any]:
         logger.warning("jwt settings invalid during authentication")
         raise AuthenticationFailed() from exc
     try:
-        claims: dict[str, Any] = jwt.decode(  # pyright: ignore[reportUnknownMemberType]
+        claims: dict[str, Any] = jwt.decode(
             token,
             cfg.signing_key,
             algorithms=[_JWT_ALGORITHM],

@@ -21,7 +21,7 @@ from tth_prime_agent.harness.probe import probe_prime_agent
 )
 def test_prime_agent_model_list_rejects_malformed_output(output: str) -> None:
     with pytest.raises(DomainError) as exc:
-        probe_mod._parse_models(output)  # pyright: ignore[reportPrivateUsage]
+        probe_mod._parse_models(output)
     assert exc.value.code is ErrorCode.PROVIDER_INCOMPATIBLE
 
 

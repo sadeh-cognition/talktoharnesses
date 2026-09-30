@@ -381,7 +381,7 @@ class AcpSessionNormalizer:
         )
         self._tool_names[tool_call_id] = name
         raw_input = update.get("rawInput") or update.get("arguments")
-        arguments = _as_dict(raw_input) if raw_input is not None else {}
+        arguments: dict[str, Any] | None = _as_dict(raw_input) if raw_input is not None else {}
         if arguments is None:
             arguments = {"value": raw_input}
         arguments = self._redact(arguments)

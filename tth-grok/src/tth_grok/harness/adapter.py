@@ -55,11 +55,9 @@ logger = logging.getLogger(__name__)
 
 
 def _map_dict(value: object) -> dict[str, Any]:
-    # Accept partially-unknown JSON dicts under strict Pyright.
     if not isinstance(value, dict):
         return {}
-    raw = cast(dict[object, object], cast(object, value))
-    return {str(k): v for k, v in raw.items()}
+    return {str(k): v for k, v in value.items()}
 
 
 class GrokAdapter:

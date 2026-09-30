@@ -158,8 +158,8 @@ async def test_stream_approval_notification_fails_closed(monkeypatch: pytest.Mon
     )
     turn_id = uuid4()
     await adapter.submit(session, TurnRequest(turn_id=turn_id, prompt="hi"))
-    assert adapter._thread is not None  # pyright: ignore[reportPrivateUsage]
-    handle = adapter._thread.handles[0]  # pyright: ignore[reportPrivateUsage]
+    assert adapter._thread is not None
+    handle = adapter._thread.handles[0]
     handle.events.append(
         {
             "method": "approvalRequest",
@@ -207,7 +207,7 @@ async def test_brokered_approval_handler_awaits_answer(
 
     answer_task = asyncio.create_task(_answer_when_requested())
     result = await asyncio.to_thread(
-        adapter._approval_handler,  # pyright: ignore[reportPrivateUsage]
+        adapter._approval_handler,
         "item/commandExecution/requestApproval",
         {
             "kind": "command",
@@ -243,7 +243,7 @@ async def test_brokered_user_input_handler_awaits_structured_answers(
 
     answer_task = asyncio.create_task(_answer_when_requested())
     result = await asyncio.to_thread(
-        adapter._approval_handler,  # pyright: ignore[reportPrivateUsage]
+        adapter._approval_handler,
         "item/tool/requestUserInput",
         {
             "threadId": session.native_session_id,
@@ -406,7 +406,7 @@ def test_coerce_public_slotted_notifications() -> None:
     ]
     methods: list[str] = []
     for note in notifications:
-        coerced = adapter._coerce_notification(note)  # pyright: ignore[reportPrivateUsage]
+        coerced = adapter._coerce_notification(note)
         assert coerced is not None
         methods.append(coerced["method"])
     assert methods == [
@@ -418,7 +418,7 @@ def test_coerce_public_slotted_notifications() -> None:
         "tokenUsageUpdated",
         "turnCompleted",
     ]
-    usage = adapter._coerce_notification(notifications[-2])  # pyright: ignore[reportPrivateUsage]
+    usage = adapter._coerce_notification(notifications[-2])
     assert usage is not None
     assert usage["usage"] == {
         "input_tokens": 10,
@@ -451,7 +451,7 @@ def test_command_item_is_named_as_a_tool_and_carries_its_command_as_an_argument(
         )
     )
     adapter = CodexAdapter(client_factory=FakeCodex)
-    coerced = adapter._coerce_notification(  # pyright: ignore[reportPrivateUsage]
+    coerced = adapter._coerce_notification(
         Notification(
             method="item/started",
             payload=ItemStartedNotification(
@@ -866,18 +866,18 @@ async def test_redaction_seen_helpers_and_ensure_client_start_path() -> None:
             self.started = True
 
     client = _StartClient()
-    adapter._client_factory = lambda: client  # pyright: ignore[reportPrivateUsage]
-    await adapter._ensure_client()  # pyright: ignore[reportPrivateUsage]
+    adapter._client_factory = lambda: client
+    await adapter._ensure_client()
     assert client.started is True
-    assert adapter._client is client  # pyright: ignore[reportPrivateUsage]
+    assert adapter._client is client
 
 
 def test_codex_settings_modes_and_sandbox_wire_value() -> None:
     from openai_codex import Sandbox
 
     from tth_codex.harness.adapter import (
-        _codex_settings,  # pyright: ignore[reportPrivateUsage]
-        _sandbox_wire_value,  # pyright: ignore[reportPrivateUsage]
+        _codex_settings,
+        _sandbox_wire_value,
     )
 
     _, workspace = _codex_settings("workspace-write")
@@ -952,12 +952,12 @@ async def test_build_broker_async_codex_thread_start_and_resume(
         del method, params
         return {"decision": "accept"}
 
-    broker = adapter_mod._build_broker_async_codex(handler)  # pyright: ignore[reportPrivateUsage]
+    broker = adapter_mod._build_broker_async_codex(handler)
 
     assert broker._client._sync.config.config_overrides == (  # type: ignore[attr-defined]
         "features.default_mode_request_user_input=true",
     )
-    with_mcp = adapter_mod._build_broker_async_codex(  # pyright: ignore[reportPrivateUsage]
+    with_mcp = adapter_mod._build_broker_async_codex(
         handler,
         config_overrides=('mcp_servers.memory.url="http://host.docker.internal:8001/mcp"',),
     )
@@ -1000,7 +1000,7 @@ async def test_approval_handler_file_deny_and_cancel_paths(
 
     deny_task = asyncio.create_task(_answer(ApprovalDecision.DENY))
     deny_result = await asyncio.to_thread(
-        adapter._approval_handler,  # pyright: ignore[reportPrivateUsage]
+        adapter._approval_handler,
         "item/fileChange/requestApproval",
         {
             "threadId": session.native_session_id,
@@ -1015,7 +1015,7 @@ async def test_approval_handler_file_deny_and_cancel_paths(
 
     cancel_task = asyncio.create_task(_answer(ApprovalDecision.CANCEL))
     cancel_result = await asyncio.to_thread(
-        adapter._approval_handler,  # pyright: ignore[reportPrivateUsage]
+        adapter._approval_handler,
         "item/commandExecution/requestApproval",
         {
             "threadId": session.native_session_id,
@@ -1031,7 +1031,7 @@ async def test_approval_handler_file_deny_and_cancel_paths(
     # Must run off the event-loop thread — handler blocks waiting on a Future.
     with pytest.raises(DomainError):
         await asyncio.to_thread(
-            adapter._approval_handler,  # pyright: ignore[reportPrivateUsage]
+            adapter._approval_handler,
             "item/unknown/requestApproval",
             {},
         )
@@ -1051,7 +1051,7 @@ async def test_coerce_notification_fallbacks_and_require_session() -> None:
                 "delta": "x",
             }
 
-    coerced = adapter._coerce_notification(_Dump())  # pyright: ignore[reportPrivateUsage]
+    coerced = adapter._coerce_notification(_Dump())
     assert coerced is not None
     assert coerced["method"] == "agentMessageDelta"
 
@@ -1061,18 +1061,18 @@ async def test_coerce_notification_fallbacks_and_require_session() -> None:
             self.thread_id = "t"
             self.turn_id = "u"
 
-    dictish = adapter._coerce_notification(_Dictish())  # pyright: ignore[reportPrivateUsage]
+    dictish = adapter._coerce_notification(_Dictish())
     assert dictish is not None
     assert dictish["method"] == "turnStarted"
 
     class _HookStarted:
         method = "hook/started"
-        payload = None
+        payload: None = None
 
-    assert adapter._coerce_notification(_HookStarted()) is None  # pyright: ignore[reportPrivateUsage]
+    assert adapter._coerce_notification(_HookStarted()) is None
 
     with pytest.raises(DomainError) as bad_shape:
-        adapter._coerce_notification(object())  # pyright: ignore[reportPrivateUsage]
+        adapter._coerce_notification(object())
     assert bad_shape.value.code is ErrorCode.UNSUPPORTED_NATIVE_EVENT
 
     session = HarnessSession(
@@ -1082,15 +1082,15 @@ async def test_coerce_notification_fallbacks_and_require_session() -> None:
         native_session_id="t1",
     )
     with pytest.raises(DomainError):
-        adapter._require_session(session)  # pyright: ignore[reportPrivateUsage]
-    adapter._session = session  # pyright: ignore[reportPrivateUsage]
-    adapter._closed = True  # pyright: ignore[reportPrivateUsage]
+        adapter._require_session(session)
+    adapter._session = session
+    adapter._closed = True
     with pytest.raises(DomainError):
-        adapter._require_session(session)  # pyright: ignore[reportPrivateUsage]
-    adapter._closed = False  # pyright: ignore[reportPrivateUsage]
+        adapter._require_session(session)
+    adapter._closed = False
     other = session.model_copy(update={"conversation_id": uuid4()})
     with pytest.raises(DomainError):
-        adapter._require_session(other)  # pyright: ignore[reportPrivateUsage]
+        adapter._require_session(other)
 
 
 @pytest.mark.asyncio

@@ -235,7 +235,7 @@ class SessionStore:
             )
         except Exception:  # noqa: BLE001
             logger.exception("adapter close failed for session %s", session_id)
-        tasks = [entry.pump_task] if entry.pump_task is not None else []
+        tasks: list[asyncio.Task[None]] = [entry.pump_task] if entry.pump_task is not None else []
         if tasks:
             _, pending = await asyncio.wait(
                 tasks,

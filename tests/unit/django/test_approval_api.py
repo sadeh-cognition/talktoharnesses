@@ -193,9 +193,7 @@ def test_resolve_create_and_allow_and_audit_list(
     cid = UUID(conv.json()["detail"]["conversation"]["id"])
 
     async def _seed() -> Any:
-        state = await service._persistence.get_snapshot(  # pyright: ignore[reportPrivateUsage]
-            cid, owner
-        )
+        state = await service._persistence.get_snapshot(cid, owner)
         queued = submit_turn(state, prompt="x", idempotency_key="k1", now=_now())
         running = start_turn(queued.state, now=_now())
         interaction = PendingInteraction(
@@ -209,7 +207,7 @@ def test_resolve_create_and_allow_and_audit_list(
             created_at=_now(),
         )
         requested = request_interaction(running.state, interaction, now=_now())
-        await service._persistence.commit_facade_mutation(  # pyright: ignore[reportPrivateUsage]
+        await service._persistence.commit_facade_mutation(
             state.conversation.id,
             owner,
             state.conversation.version,
@@ -318,9 +316,7 @@ def test_draft_update_and_all_decisions_and_structured_question(
         return UUID(conv.json()["detail"]["conversation"]["id"])
 
     async def _seed_approval(cid: UUID, key: str) -> Any:
-        state = await service._persistence.get_snapshot(  # pyright: ignore[reportPrivateUsage]
-            cid, owner
-        )
+        state = await service._persistence.get_snapshot(cid, owner)
         queued = submit_turn(state, prompt=key, idempotency_key=key, now=_now())
         running = start_turn(queued.state, now=_now())
         interaction = PendingInteraction(
@@ -331,7 +327,7 @@ def test_draft_update_and_all_decisions_and_structured_question(
             created_at=_now(),
         )
         requested = request_interaction(running.state, interaction, now=_now())
-        await service._persistence.commit_facade_mutation(  # pyright: ignore[reportPrivateUsage]
+        await service._persistence.commit_facade_mutation(
             cid,
             owner,
             state.conversation.version,
@@ -379,9 +375,7 @@ def test_draft_update_and_all_decisions_and_structured_question(
     cid = _new_conversation()
 
     async def _seed_question() -> Any:
-        state = await service._persistence.get_snapshot(  # pyright: ignore[reportPrivateUsage]
-            cid, owner
-        )
+        state = await service._persistence.get_snapshot(cid, owner)
         queued = submit_turn(state, prompt="q", idempotency_key="q1", now=_now())
         running = start_turn(queued.state, now=_now())
         interaction = PendingInteraction(
@@ -394,7 +388,7 @@ def test_draft_update_and_all_decisions_and_structured_question(
             created_at=_now(),
         )
         requested = request_interaction(running.state, interaction, now=_now())
-        await service._persistence.commit_facade_mutation(  # pyright: ignore[reportPrivateUsage]
+        await service._persistence.commit_facade_mutation(
             cid,
             owner,
             state.conversation.version,

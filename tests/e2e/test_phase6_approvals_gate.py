@@ -134,12 +134,10 @@ def test_phase6_rule_auto_resolve_sse_and_single_command(
     cid = UUID(conv.json()["detail"]["conversation"]["id"])
 
     async def _run() -> None:
-        state = await service._persistence.get_snapshot(  # pyright: ignore[reportPrivateUsage]
-            cid, owner
-        )
+        state = await service._persistence.get_snapshot(cid, owner)
         queued = submit_turn(state, prompt="install deps", idempotency_key="s1", now=_now())
         running = start_turn(queued.state, now=_now())
-        await service._persistence.commit_facade_mutation(  # pyright: ignore[reportPrivateUsage]
+        await service._persistence.commit_facade_mutation(
             cid,
             owner,
             state.conversation.version,
@@ -162,7 +160,7 @@ def test_phase6_rule_auto_resolve_sse_and_single_command(
             ),
             created_at=_now(),
         )
-        await service._broker.accept_request(  # pyright: ignore[reportPrivateUsage]
+        await service._broker.accept_request(
             state.conversation.id,
             interaction,
             provider_correlation={"json_rpc_request_id": "peer-1"},
@@ -175,9 +173,7 @@ def test_phase6_rule_auto_resolve_sse_and_single_command(
         resolved = next(e for e in events if e.type == "interaction_resolved")
         assert resolved.payload.automatic is True  # type: ignore[attr-defined]
         assert resolved.payload.decision is ApprovalDecision.ALLOW_ONCE  # type: ignore[attr-defined]
-        loaded = await service._persistence.get_worker_snapshot(  # pyright: ignore[reportPrivateUsage]
-            state.conversation.id
-        )
+        loaded = await service._persistence.get_worker_snapshot(state.conversation.id)
         answer_cmds = [c for c in loaded.commands.values() if c.kind.value == "answer_interaction"]
         assert len(answer_cmds) == 1
 
@@ -234,13 +230,11 @@ def test_phase6_manual_and_rule_event_shapes_match_except_automatic(
 
     async def _run() -> None:
         async def _seed_interaction(argv: tuple[str, ...], key: str):
-            state = await service._persistence.get_snapshot(  # pyright: ignore[reportPrivateUsage]
-                cid, owner
-            )
+            state = await service._persistence.get_snapshot(cid, owner)
             if state.active_turn is None:
                 queued = submit_turn(state, prompt=key, idempotency_key=key, now=_now())
                 running = start_turn(queued.state, now=_now())
-                await service._persistence.commit_facade_mutation(  # pyright: ignore[reportPrivateUsage]
+                await service._persistence.commit_facade_mutation(
                     cid,
                     owner,
                     state.conversation.version,
@@ -250,9 +244,7 @@ def test_phase6_manual_and_rule_event_shapes_match_except_automatic(
                 )
                 state = running.state
             else:
-                state = await service._persistence.get_worker_snapshot(  # pyright: ignore[reportPrivateUsage]
-                    cid
-                )
+                state = await service._persistence.get_worker_snapshot(cid)
             interaction = PendingInteraction(
                 conversation_id=state.conversation.id,
                 turn_id=state.active_turn.id,  # type: ignore[union-attr]
@@ -267,7 +259,7 @@ def test_phase6_manual_and_rule_event_shapes_match_except_automatic(
 
         i1, state = await _seed_interaction(("manual",), "m1")
         requested = request_interaction(state, i1, now=_now())
-        await service._persistence.commit_facade_mutation(  # pyright: ignore[reportPrivateUsage]
+        await service._persistence.commit_facade_mutation(
             cid,
             owner,
             state.conversation.version,
@@ -293,14 +285,14 @@ def test_phase6_manual_and_rule_event_shapes_match_except_automatic(
                 updated_at=_now(),
             ),
         )
-        state = await service._persistence.get_worker_snapshot(cid)  # pyright: ignore[reportPrivateUsage]
+        state = await service._persistence.get_worker_snapshot(cid)
         if state.active_turn is not None:
             done = complete_turn(state, now=_now())
-            await service._persistence.commit_facade_mutation(  # pyright: ignore[reportPrivateUsage]
+            await service._persistence.commit_facade_mutation(
                 cid, owner, state.conversation.version, done.state, done.events
             )
         i2, _state = await _seed_interaction(("auto",), "m2")
-        await service._broker.accept_request(cid, i2)  # pyright: ignore[reportPrivateUsage]
+        await service._broker.accept_request(cid, i2)
         events = await service.replay_events(owner, cid, after_sequence=0)
         auto = next(
             e
@@ -351,12 +343,10 @@ def test_phase6_deny_rule_auto_path(service: TalkToHarnessesService, two_users: 
     cid = UUID(conv.json()["detail"]["conversation"]["id"])
 
     async def _run() -> None:
-        state = await service._persistence.get_snapshot(  # pyright: ignore[reportPrivateUsage]
-            cid, owner
-        )
+        state = await service._persistence.get_snapshot(cid, owner)
         queued = submit_turn(state, prompt="x", idempotency_key="d1", now=_now())
         running = start_turn(queued.state, now=_now())
-        await service._persistence.commit_facade_mutation(  # pyright: ignore[reportPrivateUsage]
+        await service._persistence.commit_facade_mutation(
             cid,
             owner,
             state.conversation.version,
@@ -374,9 +364,7 @@ def test_phase6_deny_rule_auto_path(service: TalkToHarnessesService, two_users: 
             ),
             created_at=_now(),
         )
-        await service._broker.accept_request(  # pyright: ignore[reportPrivateUsage]
-            cid, interaction
-        )
+        await service._broker.accept_request(cid, interaction)
         events = await service.replay_events(owner, cid, after_sequence=0)
         resolved = next(e for e in events if e.type == "interaction_resolved")
         assert resolved.payload.decision is ApprovalDecision.DENY  # type: ignore[attr-defined]

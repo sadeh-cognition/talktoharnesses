@@ -157,8 +157,8 @@ def test_get_service_fails_closed_without_lifespan() -> None:
 
 
 def test_default_registry_contains_all_phase7_adapters() -> None:
-    service = asgi_mod._build_components().service  # pyright: ignore[reportPrivateUsage]
-    kinds = service._registry.kinds()  # pyright: ignore[reportPrivateUsage]
+    service = asgi_mod._build_components().service
+    kinds = service._registry.kinds()
     assert kinds == frozenset(
         {
             HarnessKind.GROK,
@@ -184,7 +184,7 @@ def test_build_service_fails_closed_without_docker_cli(
     monkeypatch.setattr(asgi_mod, "ensure_docker_cli_available", ensure_docker_cli_available)
     monkeypatch.setattr(shutil, "which", no_which)
     with pytest.raises(DomainError) as excinfo:
-        asgi_mod._build_components()  # pyright: ignore[reportPrivateUsage]
+        asgi_mod._build_components()
     assert excinfo.value.code is ErrorCode.SANDBOX_UNAVAILABLE
     assert excinfo.value.details["reason"] == "docker_unavailable"
 
@@ -203,9 +203,9 @@ def test_build_service_applies_runtime_policy_from_env(monkeypatch: pytest.Monke
     monkeypatch.setenv("TTH_RUNTIME_IDLE_REAP_SECONDS", "42")
     monkeypatch.setenv("TTH_RUNTIME_MAX_RUNTIMES", "3")
 
-    service = asgi_mod._build_components().service  # pyright: ignore[reportPrivateUsage]
+    service = asgi_mod._build_components().service
 
-    policy = service._runtime._policy  # pyright: ignore[reportPrivateUsage]
+    policy = service._runtime._policy
     assert policy.idle_reap == 42.0
     assert policy.max_runtimes == 3
 
@@ -215,17 +215,17 @@ def test_build_service_fails_closed_on_invalid_runtime_env(
 ) -> None:
     monkeypatch.setenv("TTH_RUNTIME_MAX_RUNTIMES", "0")
     with pytest.raises(ValueError, match="TTH_RUNTIME_MAX_RUNTIMES"):
-        asgi_mod._build_components()  # pyright: ignore[reportPrivateUsage]
+        asgi_mod._build_components()
 
 
 def test_scope_reaper_policy_comes_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("TTH_SANDBOX_REAPER", "0")
-    reaper = asgi_mod._build_components().reaper  # pyright: ignore[reportPrivateUsage]
+    reaper = asgi_mod._build_components().reaper
     assert not reaper.policy.enabled
 
     monkeypatch.setenv("TTH_SANDBOX_REAPER", "1")
     monkeypatch.setenv("TTH_SANDBOX_CONTAINER_IDLE_SECONDS", "900")
-    reaper = asgi_mod._build_components().reaper  # pyright: ignore[reportPrivateUsage]
+    reaper = asgi_mod._build_components().reaper
     assert reaper.policy.enabled and reaper.policy.container_idle == 900
 
 
@@ -245,15 +245,15 @@ async def test_scope_reaper_runs_with_the_lifespan(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(ScopeReaper, "tick", tick)
     monkeypatch.setattr(ScopeReaperPolicy, "from_env", from_env)
 
-    await asgi_mod._startup()  # pyright: ignore[reportPrivateUsage]
-    reaper = asgi_mod._scope_reaper  # pyright: ignore[reportPrivateUsage]
+    await asgi_mod._startup()
+    reaper = asgi_mod._scope_reaper
     assert reaper is not None
     for _ in range(50):
         if passes:
             break
         await asyncio.sleep(0.01)
-    await asgi_mod._shutdown()  # pyright: ignore[reportPrivateUsage]
+    await asgi_mod._shutdown()
 
     assert passes == [None]
-    assert asgi_mod._scope_reaper is None  # pyright: ignore[reportPrivateUsage]
-    assert reaper._task is None  # pyright: ignore[reportPrivateUsage]
+    assert asgi_mod._scope_reaper is None
+    assert reaper._task is None

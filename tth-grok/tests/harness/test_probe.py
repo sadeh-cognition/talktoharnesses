@@ -13,7 +13,7 @@ from tth_types.harness import (
     LaunchSnapshot,
 )
 
-from tests.fakes import _FakeAcpProcess  # pyright: ignore[reportPrivateUsage]
+from tests.fakes import _FakeAcpProcess
 from tth_grok.harness import probe as probe_mod
 from tth_grok.harness.compatibility import match_release
 
@@ -33,12 +33,12 @@ class _Proc:
 )
 def test_grok_model_list_rejects_malformed_output(output: str) -> None:
     with pytest.raises(DomainError) as exc:
-        probe_mod._parse_models(output)  # pyright: ignore[reportPrivateUsage]
+        probe_mod._parse_models(output)
     assert exc.value.code is ErrorCode.PROVIDER_INCOMPATIBLE
 
 
 def test_grok_model_list_accepts_1_0_3_output() -> None:
-    models = probe_mod._parse_models(  # pyright: ignore[reportPrivateUsage]
+    models = probe_mod._parse_models(
         "Default model: grok-4.6\n\nAvailable models:\n  * grok-4.6 (default)\n  - grok-4.5\n"
     )
 
@@ -133,7 +133,7 @@ async def test_grok_resume_probe_reads_initialize_capability(
             return process
 
     monkeypatch.setattr(probe_mod, "ProcessSupervisor", _Supervisor)
-    probe = probe_mod._probe_load_session(  # pyright: ignore[reportPrivateUsage]
+    probe = probe_mod._probe_load_session(
         Path("/tmp/grok"),
         HarnessConfiguration(
             kind=HarnessKind.GROK,

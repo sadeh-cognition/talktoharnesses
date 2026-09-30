@@ -110,7 +110,7 @@ class DjangoCommittedEventBroker:
     def _pg_listen_loop(self) -> None:
         """Dedicated autocommit listener connection (psycopg3)."""
         try:
-            import psycopg  # pyright: ignore[reportMissingImports]
+            import psycopg
             from django.db import connections
         except ImportError:
             logger.warning("psycopg not installed; skipping PostgreSQL LISTEN")

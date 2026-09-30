@@ -179,10 +179,10 @@ def _own(
     worker_id: str = "worker-a",
 ) -> int:
     """Mark ownership without starting the heartbeat loop (avoids async teardown hangs)."""
-    coordinator._worker_id = worker_id  # pyright: ignore[reportPrivateUsage]
-    coordinator._lease_healthy = True  # pyright: ignore[reportPrivateUsage]
-    coordinator._heartbeat_healthy = True  # pyright: ignore[reportPrivateUsage]
-    coordinator._processor.initialize_worker(worker_id)  # pyright: ignore[reportPrivateUsage]
+    coordinator._worker_id = worker_id
+    coordinator._lease_healthy = True
+    coordinator._heartbeat_healthy = True
+    coordinator._processor.initialize_worker(worker_id)
     fence = 1
     # MemoryPersistence ownership checks use wall-clock now(), not the coordinator clock.
     persistence.ownership[conversation_id] = (
@@ -190,8 +190,8 @@ def _own(
         fence,
         datetime.now(UTC) + timedelta(hours=1),
     )
-    coordinator._fences[conversation_id] = fence  # pyright: ignore[reportPrivateUsage]
-    coordinator._processor.set_fence(conversation_id, fence)  # pyright: ignore[reportPrivateUsage]
+    coordinator._fences[conversation_id] = fence
+    coordinator._processor.set_fence(conversation_id, fence)
     return fence
 
 
@@ -224,12 +224,12 @@ async def test_initial_recovery_marks_ready_bits() -> None:
     await coordinator.run_initial_recovery()
     assert coordinator.initial_recovery_complete is True
     assert coordinator.ready_for_work is False
-    await coordinator._processor.start("worker-a")  # pyright: ignore[reportPrivateUsage]
+    await coordinator._processor.start("worker-a")
     assert coordinator.ready_for_work is True
     snap = coordinator.readiness_snapshot()
     assert snap["recovery_complete"] is True
     assert snap["worker_lease"] is True
-    await coordinator._processor.stop()  # pyright: ignore[reportPrivateUsage]
+    await coordinator._processor.stop()
 
 
 async def _wait_until(condition: Callable[[], bool]) -> None:
@@ -241,7 +241,7 @@ async def _wait_until(condition: Callable[[], bool]) -> None:
 
 
 def _claims_enabled(coordinator: WorkerCoordinator) -> bool:
-    return coordinator._processor._claims_enabled  # pyright: ignore[reportPrivateUsage]
+    return coordinator._processor._claims_enabled
 
 
 async def _ready_worker(
@@ -250,14 +250,14 @@ async def _ready_worker(
     coordinator, persistence, runtime = _coordinator(policy=policy)
     await coordinator.acquire_and_heartbeat("worker-a")
     await coordinator.run_initial_recovery()
-    coordinator._processor.set_claims_enabled(True)  # pyright: ignore[reportPrivateUsage]
-    await coordinator._processor.start("worker-a")  # pyright: ignore[reportPrivateUsage]
+    coordinator._processor.set_claims_enabled(True)
+    await coordinator._processor.start("worker-a")
     assert coordinator.ready_for_work is True
     return coordinator, persistence, runtime
 
 
 async def _stop_worker(coordinator: WorkerCoordinator) -> None:
-    await coordinator._processor.stop()  # pyright: ignore[reportPrivateUsage]
+    await coordinator._processor.stop()
     await coordinator.finish_shutdown()
 
 
@@ -277,7 +277,7 @@ async def test_heartbeat_reacquires_worker_lease_that_expired_while_host_slept()
     assert lease["worker_id"] == "worker-a"
     assert cast(datetime, lease["expires_at"]) > datetime.now(UTC)
     assert _claims_enabled(coordinator) is True
-    assert runtime._shutting_down is False  # pyright: ignore[reportPrivateUsage]
+    assert runtime._shutting_down is False
     await _stop_worker(coordinator)
 
 
@@ -338,7 +338,7 @@ async def test_apply_native_resume_success() -> None:
         return_value=(SimpleNamespace(conversation_id=cid), RecoveryReasonCode.UNCHANGED_LAUNCH)
     )
 
-    await coordinator._recover_owned(  # pyright: ignore[reportPrivateUsage]
+    await coordinator._recover_owned(
         cid,
         fence,
         attempt_id=None,
@@ -376,9 +376,7 @@ async def _recover_with_cursor(
     reattach = AsyncMock(side_effect=reattach_error)
     runtime.reattach_for_recovery = reattach  # type: ignore[method-assign]
     runtime.resume_for_recovery = AsyncMock()  # type: ignore[method-assign]
-    await coordinator._recover_owned(  # pyright: ignore[reportPrivateUsage]
-        cid, fence, attempt_id=None, trigger=RecoveryTrigger.STARTUP
-    )
+    await coordinator._recover_owned(cid, fence, attempt_id=None, trigger=RecoveryTrigger.STARTUP)
     # A turn in flight is never resumed natively: a fresh split session never runs it.
     runtime.resume_for_recovery.assert_not_awaited()
     return persistence, reattach, probe, cid, command_id
@@ -445,7 +443,7 @@ async def test_native_resume_failure_falls_through_to_handoff() -> None:
     runtime.close_candidate = AsyncMock()  # type: ignore[method-assign]
     runtime.promote_candidate = AsyncMock()  # type: ignore[method-assign]
 
-    await coordinator._recover_owned(  # pyright: ignore[reportPrivateUsage]
+    await coordinator._recover_owned(
         cid,
         fence,
         attempt_id=None,
@@ -469,7 +467,7 @@ async def test_apply_outcome_unknown_marks_command() -> None:
     fence = _own(coordinator, persistence, cid)
     runtime.prepare_launch_snapshot = AsyncMock(return_value=_launch())  # type: ignore[method-assign]
 
-    await coordinator._recover_owned(  # pyright: ignore[reportPrivateUsage]
+    await coordinator._recover_owned(
         cid,
         fence,
         attempt_id=None,
@@ -505,7 +503,7 @@ async def test_handoff_fallback_without_binding_fails_attempt() -> None:
     runtime.recovery_handoff_fallback = AsyncMock()  # type: ignore[method-assign]
     # Force handoff path directly: no binding => failed attempt.
     state = await persistence.get_worker_snapshot(cid)
-    await coordinator._apply_decision(  # pyright: ignore[reportPrivateUsage]
+    await coordinator._apply_decision(
         state,
         RecoveryDecision(
             kind=RecoveryDecisionKind.HANDOFF_FALLBACK,
@@ -550,7 +548,7 @@ async def test_handoff_fallback_with_binding_rotates_session() -> None:
     runtime.close_candidate = AsyncMock()  # type: ignore[method-assign]
     runtime.promote_candidate = AsyncMock()  # type: ignore[method-assign]
 
-    await coordinator._recover_owned(  # pyright: ignore[reportPrivateUsage]
+    await coordinator._recover_owned(
         cid,
         fence,
         attempt_id=None,
@@ -574,7 +572,7 @@ async def test_native_resume_stale_owner_drops_lease() -> None:
     )
     runtime.close = AsyncMock()  # type: ignore[method-assign]
 
-    await coordinator._recover_owned(  # pyright: ignore[reportPrivateUsage]
+    await coordinator._recover_owned(
         cid,
         fence,
         attempt_id=None,
@@ -630,7 +628,7 @@ async def test_apply_no_action_and_reclaim_complete_attempts() -> None:
         started_at=_now(),
         completed_at=None,
     )
-    await coordinator._recover_owned(  # pyright: ignore[reportPrivateUsage]
+    await coordinator._recover_owned(
         cid,
         fence,
         attempt_id=attempt_id,
@@ -680,7 +678,7 @@ async def test_handoff_fallback_failure_when_candidate_rejected() -> None:
         started_at=_now(),
         completed_at=None,
     )
-    await coordinator._recover_owned(  # pyright: ignore[reportPrivateUsage]
+    await coordinator._recover_owned(
         cid,
         fence,
         attempt_id=attempt_id,
@@ -720,7 +718,7 @@ async def test_probe_failure_and_resume_generic_exception_fall_to_handoff() -> N
     runtime.recovery_handoff_fallback = AsyncMock(return_value=candidate)  # type: ignore[method-assign]
     runtime.close_candidate = AsyncMock()  # type: ignore[method-assign]
     runtime.promote_candidate = AsyncMock()  # type: ignore[method-assign]
-    await coordinator._recover_owned(  # pyright: ignore[reportPrivateUsage]
+    await coordinator._recover_owned(
         cid,
         fence,
         attempt_id=None,
@@ -738,7 +736,7 @@ async def test_probe_failure_and_resume_generic_exception_fall_to_handoff() -> N
     runtime2.recovery_handoff_fallback = AsyncMock(return_value=candidate)  # type: ignore[method-assign]
     runtime2.close_candidate = AsyncMock()  # type: ignore[method-assign]
     runtime2.promote_candidate = AsyncMock()  # type: ignore[method-assign]
-    await coordinator2._recover_owned(  # pyright: ignore[reportPrivateUsage]
+    await coordinator2._recover_owned(
         cid2,
         fence2,
         attempt_id=None,
@@ -766,18 +764,18 @@ async def test_release_undelivered_claims_and_worker_lease_lost() -> None:
     persistence.states[cid] = state.model_copy(update={"commands": {command_id: cmd}})
     coordinator, _, runtime = _coordinator(persistence)
     fence = _own(coordinator, persistence, cid)
-    coordinator._worker_id = "worker-a"  # pyright: ignore[reportPrivateUsage]
-    await coordinator._release_undelivered_claims()  # pyright: ignore[reportPrivateUsage]
+    coordinator._worker_id = "worker-a"
+    await coordinator._release_undelivered_claims()
     released = persistence.states[cid].commands[command_id]
     assert released.status is CommandStatus.ACCEPTED
     assert released.worker_id is None
 
     runtime.close = AsyncMock()  # type: ignore[method-assign]
     runtime.close_all = AsyncMock()  # type: ignore[method-assign]
-    coordinator._fences[cid] = fence  # pyright: ignore[reportPrivateUsage]
-    await coordinator._on_worker_lease_lost()  # pyright: ignore[reportPrivateUsage]
-    assert coordinator._lease_healthy is False  # pyright: ignore[reportPrivateUsage]
-    assert cid not in coordinator._fences  # pyright: ignore[reportPrivateUsage]
+    coordinator._fences[cid] = fence
+    await coordinator._on_worker_lease_lost()
+    assert coordinator._lease_healthy is False
+    assert cid not in coordinator._fences
     runtime.close.assert_awaited()
     runtime.close_all.assert_awaited()
 
@@ -796,7 +794,7 @@ async def test_native_resume_without_native_session_returns_false_path() -> None
     runtime.recovery_handoff_fallback = AsyncMock(return_value=candidate)  # type: ignore[method-assign]
     runtime.close_candidate = AsyncMock()  # type: ignore[method-assign]
     runtime.promote_candidate = AsyncMock()  # type: ignore[method-assign]
-    await coordinator._recover_owned(  # pyright: ignore[reportPrivateUsage]
+    await coordinator._recover_owned(
         cid,
         fence,
         attempt_id=None,
@@ -826,7 +824,7 @@ async def test_idle_conversation_recovery_does_not_probe_its_sandbox() -> None:
     fence = _own(coordinator, persistence, conversation_id)
     runtime.prepare_launch_snapshot = AsyncMock(return_value=_launch())  # type: ignore[method-assign]
 
-    await coordinator._recover_owned(  # pyright: ignore[reportPrivateUsage]
+    await coordinator._recover_owned(
         conversation_id, fence, attempt_id=None, trigger=RecoveryTrigger.TAKEOVER
     )
 
@@ -873,7 +871,7 @@ async def test_heartbeat_keeps_renewing_while_a_recovery_runs() -> None:
     # the leases it claims, and the heartbeat starts no second recovery.
     await _wait_until(lambda: renew.await_count >= renewed + 3)
     assert claims.calls == 1
-    recovery = coordinator._recovery_task  # pyright: ignore[reportPrivateUsage]
+    recovery = coordinator._recovery_task
     assert recovery is not None
 
     await coordinator.finish_shutdown()
@@ -886,10 +884,10 @@ async def test_losing_the_worker_lease_stops_a_running_recovery() -> None:
     claims = _BlockedClaims()
     persistence.claim_expired_conversations = claims  # type: ignore[method-assign]
     await asyncio.wait_for(claims.claiming.wait(), timeout=3)
-    recovery = coordinator._recovery_task  # pyright: ignore[reportPrivateUsage]
+    recovery = coordinator._recovery_task
     assert recovery is not None
 
-    await coordinator._on_worker_lease_lost()  # pyright: ignore[reportPrivateUsage]
+    await coordinator._on_worker_lease_lost()
 
     assert recovery.cancelled()
     await coordinator.finish_shutdown()
@@ -923,21 +921,19 @@ async def test_heartbeat_starts_takeover_recovery_only_after_startup_recovery() 
 @pytest.mark.asyncio
 async def test_a_drain_stops_recovery_between_batches() -> None:
     coordinator, persistence, _ = _coordinator()
-    coordinator._worker_id = "worker-a"  # pyright: ignore[reportPrivateUsage]
-    coordinator._processor.initialize_worker("worker-a")  # pyright: ignore[reportPrivateUsage]
+    coordinator._worker_id = "worker-a"
+    coordinator._processor.initialize_worker("worker-a")
     claim = AsyncMock(
         return_value=[SimpleNamespace(conversation_id=uuid4(), fence=1, recovery_attempt_id=None)]
     )
     persistence.claim_expired_conversations = claim  # type: ignore[method-assign]
 
     async def shutdown_begins(*args: object, **kwargs: object) -> None:
-        coordinator._draining = True  # pyright: ignore[reportPrivateUsage]
+        coordinator._draining = True
 
     coordinator._recover_owned = shutdown_begins  # type: ignore[method-assign]
 
-    await coordinator._recover_until_empty(  # pyright: ignore[reportPrivateUsage]
-        trigger=RecoveryTrigger.TAKEOVER
-    )
+    await coordinator._recover_until_empty(trigger=RecoveryTrigger.TAKEOVER)
 
     claim.assert_awaited_once()
     assert coordinator.initial_recovery_complete is False

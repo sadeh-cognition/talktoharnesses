@@ -45,7 +45,7 @@ def test_effective_access_fallback_and_windows_branch(
         raise NotImplementedError
 
     monkeypatch.setattr(paths_mod.os, "access", boom)
-    assert paths_mod._effective_access(exe) is True  # pyright: ignore[reportPrivateUsage]
+    assert paths_mod._effective_access(exe) is True
 
     monkeypatch.setattr(paths_mod.sys, "platform", "win32")
 
@@ -54,7 +54,7 @@ def test_effective_access_fallback_and_windows_branch(
         return True
 
     monkeypatch.setattr(paths_mod.os, "access", access_ok)
-    assert paths_mod._effective_access(exe) is True  # pyright: ignore[reportPrivateUsage]
+    assert paths_mod._effective_access(exe) is True
 
 
 def test_windows_ownership_import_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -67,7 +67,7 @@ def test_windows_ownership_import_error(tmp_path: Path, monkeypatch: pytest.Monk
 
     monkeypatch.setattr(paths_mod, "_windows_file_and_token_sids", raise_import)
     with pytest.raises(DomainError) as exc:
-        paths_mod._check_ownership_windows(exe)  # pyright: ignore[reportPrivateUsage]
+        paths_mod._check_ownership_windows(exe)
     assert exc.value.code is ErrorCode.INVALID_EXECUTABLE
 
 
@@ -96,14 +96,14 @@ def test_effective_access_group_and_other_bits(
         return []
 
     monkeypatch.setattr(paths_mod.os, "access", boom)
-    monkeypatch.setattr(paths_mod.os, "geteuid", lambda: 1)  # pyright: ignore[reportUnknownArgumentType]
-    monkeypatch.setattr(paths_mod.os, "getegid", lambda: 20)  # pyright: ignore[reportUnknownArgumentType]
-    monkeypatch.setattr(paths_mod.os, "getgroups", lambda: [20])  # pyright: ignore[reportUnknownArgumentType, reportUnknownLambdaType]
+    monkeypatch.setattr(paths_mod.os, "geteuid", lambda: 1)
+    monkeypatch.setattr(paths_mod.os, "getegid", lambda: 20)
+    monkeypatch.setattr(paths_mod.os, "getgroups", lambda: [20])
     monkeypatch.setattr(Path, "stat", stat_group)
-    assert paths_mod._effective_access(exe) is True  # pyright: ignore[reportPrivateUsage]
+    assert paths_mod._effective_access(exe) is True
     monkeypatch.setattr(Path, "stat", stat_other)
     monkeypatch.setattr(paths_mod.os, "getgroups", empty_groups)
-    assert paths_mod._effective_access(exe) is True  # pyright: ignore[reportPrivateUsage]
+    assert paths_mod._effective_access(exe) is True
 
 
 def test_windows_ownership_helpers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -144,9 +144,9 @@ def test_windows_ownership_helpers(tmp_path: Path, monkeypatch: pytest.MonkeyPat
 
     monkeypatch.setitem(sys.modules, "win32security", FakeSec)
     monkeypatch.setitem(sys.modules, "win32api", FakeApi)
-    owner, user = paths_mod._windows_file_and_token_sids(exe)  # pyright: ignore[reportPrivateUsage]
+    owner, user = paths_mod._windows_file_and_token_sids(exe)
     assert owner == user == "owner-sid"
-    paths_mod._check_ownership_windows(exe)  # pyright: ignore[reportPrivateUsage]
+    paths_mod._check_ownership_windows(exe)
 
     def mismatch_sids(_p: Path) -> tuple[str, str]:
         return ("a", "b")
@@ -157,7 +157,7 @@ def test_windows_ownership_helpers(tmp_path: Path, monkeypatch: pytest.MonkeyPat
         mismatch_sids,
     )
     with pytest.raises(DomainError) as mismatch:
-        paths_mod._check_ownership_windows(exe)  # pyright: ignore[reportPrivateUsage]
+        paths_mod._check_ownership_windows(exe)
     assert mismatch.value.code is ErrorCode.EXECUTABLE_OWNER_MISMATCH
 
     monkeypatch.setattr(paths_mod.sys, "platform", "win32")
@@ -171,7 +171,7 @@ def test_windows_ownership_helpers(tmp_path: Path, monkeypatch: pytest.MonkeyPat
         boom_sids,
     )
     with pytest.raises(DomainError) as generic:
-        paths_mod._check_ownership_windows(exe)  # pyright: ignore[reportPrivateUsage]
+        paths_mod._check_ownership_windows(exe)
     assert generic.value.code is ErrorCode.INVALID_EXECUTABLE
 
 
@@ -191,7 +191,7 @@ def test_check_ownership_dispatches_windows(
         "_check_ownership_windows",
         record_windows,
     )
-    paths_mod._check_ownership(exe)  # pyright: ignore[reportPrivateUsage]
+    paths_mod._check_ownership(exe)
     assert called == [exe]
 
 
@@ -208,8 +208,8 @@ def test_ownership_mismatch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     def stat_mismatch(self: Path) -> Stat:
         return Stat()
 
-    monkeypatch.setattr(Path, "stat", stat_mismatch)  # pyright: ignore[reportUnknownArgumentType]
+    monkeypatch.setattr(Path, "stat", stat_mismatch)
     monkeypatch.setattr(paths_mod.os, "geteuid", lambda: 1)
     with pytest.raises(DomainError) as exc:
-        paths_mod._check_ownership(exe)  # pyright: ignore[reportPrivateUsage]
+        paths_mod._check_ownership(exe)
     assert exc.value.code is ErrorCode.EXECUTABLE_OWNER_MISMATCH

@@ -64,7 +64,7 @@ class _Runtime:
     def __init__(self, persistence: MemoryPersistence, adapter: _Adapter) -> None:
         self.persistence = persistence
         self.adapter = adapter
-        self.managed = None
+        self.managed: SimpleNamespace | None = None
 
     def get_runtime(self, conversation_id: UUID):
         return self.managed

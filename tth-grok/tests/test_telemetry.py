@@ -43,7 +43,7 @@ def test_configure_is_noop_when_opted_out(monkeypatch: pytest.MonkeyPatch) -> No
 
     telemetry.configure_opentelemetry()
 
-    assert telemetry._telemetry_enabled is False  # pyright: ignore[reportPrivateUsage]
+    assert telemetry._telemetry_enabled is False
     assert list(logging.getLogger().handlers) == root_handlers_before
 
 
@@ -59,9 +59,9 @@ def test_configure_hard_fails_without_otel_packages(
     with pytest.raises(RuntimeError, match="opt out"):
         telemetry.configure_opentelemetry()
 
-    assert telemetry._telemetry_enabled is False  # pyright: ignore[reportPrivateUsage]
+    assert telemetry._telemetry_enabled is False
 
 
 def test_service_name_matches_package() -> None:
     # Guards against copy-paste drift across the split repos.
-    assert telemetry._SERVICE_NAME == "tth-grok"  # pyright: ignore[reportPrivateUsage]
+    assert telemetry._SERVICE_NAME == "tth-grok"

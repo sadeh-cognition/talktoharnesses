@@ -106,7 +106,7 @@ def _parse_models(output: str) -> tuple[HarnessModelInfo, ...]:
         values = cast(dict[object, object], metadata)
         variants = values.get("variants")
         if variants is None:
-            variants = {}
+            variants = dict[object, object]()
         if not isinstance(variants, dict):
             raise DomainError(
                 ErrorCode.PROVIDER_INCOMPATIBLE,

@@ -348,7 +348,7 @@ async def test_cursor_protocol_rejects_grok_write_permission() -> None:
 
 def test_fault_details_are_summarized_as_key_paths_only() -> None:
     from tth_grok.acp.connection import (
-        _describe_fault_details,  # pyright: ignore[reportPrivateUsage]
+        _describe_fault_details,
     )
 
     summary = _describe_fault_details(

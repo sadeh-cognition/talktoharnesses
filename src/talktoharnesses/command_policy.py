@@ -7,8 +7,8 @@ import shlex
 from pathlib import PurePosixPath
 from typing import Any, cast
 
-import bashlex  # pyright: ignore[reportMissingTypeStubs]
-from bashlex.errors import ParsingError  # pyright: ignore[reportMissingTypeStubs]
+import bashlex
+from bashlex.errors import ParsingError
 from tth_types.sandbox import CommandCheck, CommandDecision, CommandRule
 
 _parser: Any = bashlex

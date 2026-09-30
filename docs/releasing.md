@@ -25,7 +25,7 @@ publication from this tree is therefore **`2026.8.1`** / tag **`v2026.8.1`**
 
 ## Candidate commit gate
 
-1. Static checks: lockfile, Ruff, format, strict Pyright, migration drift,
+1. Static checks: lockfile, Ruff, format, strict Pyrefly, migration drift,
    development compatibility validation, and
    `uv run python scripts/render_supported.py --check`.
 2. Coverage job ≥ 91% on the non-live suite.

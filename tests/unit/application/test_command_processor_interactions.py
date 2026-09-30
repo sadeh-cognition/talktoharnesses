@@ -284,7 +284,7 @@ async def test_event_pump_routes_interaction_request_through_broker(
 
     await runtime.start(conversation_id=cid, owner_id="owner")
     await processor.start("w1")
-    processor._ensure_pump(cid)  # pyright: ignore[reportPrivateUsage]
+    processor._ensure_pump(cid)
     iid = adapter.push_interaction(turn_id, envelope=envelope)
 
     for _ in range(50):
@@ -330,10 +330,10 @@ async def test_failed_interaction_persistence_bounds_retries_and_terminalizes_tu
     commit = AsyncMock(side_effect=DomainError(code, "interaction commit rejected"))
     monkeypatch.setattr(p, "commit_interaction_request", commit)
     await runtime.start(conversation_id=cid, owner_id="owner")
-    processor._running = True  # pyright: ignore[reportPrivateUsage]
+    processor._running = True
     iid = adapter.push_interaction(turn_id)
 
-    await asyncio.wait_for(processor._event_pump(cid), timeout=1)  # pyright: ignore[reportPrivateUsage]
+    await asyncio.wait_for(processor._event_pump(cid), timeout=1)
 
     assert commit.await_count == attempts
     assert {call.kwargs["interaction_id"] for call in commit.await_args_list} == {iid}
@@ -393,18 +393,18 @@ async def test_ended_event_stream_marks_active_turn_outcome_unknown(
         (claimed_command,),
     )
     await runtime.start(conversation_id=cid, owner_id="owner")
-    processor._running = True  # pyright: ignore[reportPrivateUsage]
+    processor._running = True
     message_id = uuid4()
-    adapter._queue.put_nowait(  # pyright: ignore[reportPrivateUsage]
+    adapter._queue.put_nowait(
         AssistantMessageStartedPayload(turn_id=turn_id, message_id=message_id)
     )
     delta = AssistantMessageDeltaPayload(
         turn_id=turn_id, message_id=message_id, text="received before disconnect", sequence=0
     )
-    adapter._queue.put_nowait(delta)  # pyright: ignore[reportPrivateUsage]
-    adapter._queue.put_nowait(stream_error)  # pyright: ignore[reportPrivateUsage]
+    adapter._queue.put_nowait(delta)
+    adapter._queue.put_nowait(stream_error)
 
-    await processor._event_pump(cid)  # pyright: ignore[reportPrivateUsage]
+    await processor._event_pump(cid)
 
     state = await p.get_worker_snapshot(cid)
     command = next(iter(state.commands.values()))
@@ -643,8 +643,8 @@ async def test_interrupt_flushes_pending_deltas_before_cancelling_interactions()
         return await p.commit_turn_batch(cid, base_version, pending_state, events, commands)
 
     batcher = DeltaBatcher(conversation_id=cid, flush=flush, interval_ms=60_000)
-    processor._batchers[cid] = batcher  # pyright: ignore[reportPrivateUsage]
-    await processor._on_harness_event(  # pyright: ignore[reportPrivateUsage]
+    processor._batchers[cid] = batcher
+    await processor._on_harness_event(
         cid,
         AssistantMessageDeltaPayload(
             turn_id=turn_id,
@@ -668,10 +668,10 @@ async def test_interrupt_flushes_pending_deltas_before_cancelling_interactions()
         created_at=_now(),
     )
     await p.accept_command(interrupt)
-    await processor._execute_command(interrupt)  # pyright: ignore[reportPrivateUsage]
+    await processor._execute_command(interrupt)
     assert batcher.state is None
 
-    await processor._on_harness_event(  # pyright: ignore[reportPrivateUsage]
+    await processor._on_harness_event(
         cid,
         TurnInterruptedPayload(turn_id=turn_id, reason="user"),
         batcher,

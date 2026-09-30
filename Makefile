@@ -5,7 +5,7 @@ BACKEND_PORT := 8010
 BACKEND_URL := http://$(BACKEND_HOST):$(BACKEND_PORT)
 
 lint:
-	uv run pyright
+	uv run pyrefly check
 	uv run ruff check .
 	uv run isort --check-only src
 

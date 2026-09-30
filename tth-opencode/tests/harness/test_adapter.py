@@ -201,7 +201,7 @@ async def test_start_and_complete_turn(
         event = {"type": event_type, "properties": properties}
         if session_metadata:
             event["id"] = f"evt_{event_type}"
-        await adapter._dispatch_sse(None, json.dumps(event))  # pyright: ignore[reportPrivateUsage]
+        await adapter._dispatch_sse(None, json.dumps(event))
     stream = adapter.events(session)
     emitted = [await asyncio.wait_for(anext(stream), timeout=1.0) for _ in range(7)]
     assert [type(event) for event in emitted] == [
@@ -298,7 +298,7 @@ async def test_permission_events_are_filtered_by_session(
     )
     await adapter.submit(session, TurnRequest(turn_id=uuid4(), prompt="hi"))
     for session_id, permission_id in (("other", "foreign"), ("sess-1", "own")):
-        await adapter._dispatch_sse(  # pyright: ignore[reportPrivateUsage]
+        await adapter._dispatch_sse(
             None,
             json.dumps(
                 {
@@ -405,7 +405,7 @@ async def test_answer_interaction_pending_permission(monkeypatch: pytest.MonkeyP
         )
     )
     await adapter.submit(session, TurnRequest(turn_id=uuid4(), prompt="hi"))
-    await adapter._dispatch_sse(  # pyright: ignore[reportPrivateUsage]
+    await adapter._dispatch_sse(
         None,
         json.dumps(
             {
@@ -495,27 +495,27 @@ def test_bind_process_redaction_seen_and_build_argv() -> None:
     adapter = OpenCodeAdapter(http_client_factory=lambda base_url: FakeHttpClient(base_url))
     handle = object()
     adapter.bind_process(handle)  # type: ignore[arg-type]
-    assert adapter._process is handle  # pyright: ignore[reportPrivateUsage]
+    assert adapter._process is handle
     adapter.set_redaction_patterns(("SECRET",))
     adapter.import_seen(frozenset({"n"}), frozenset({"o"}))
     native, offsets = adapter.export_seen()
     assert "n" in native and "o" in offsets
     argv = adapter.build_argv(_config())
     assert any(part.isdigit() or part.startswith("--") for part in argv)
-    assert adapter._port is not None  # pyright: ignore[reportPrivateUsage]
+    assert adapter._port is not None
 
 
 def test_only_root_session_is_success_terminal() -> None:
     adapter = OpenCodeAdapter()
-    adapter._normalizer.set_session("parent")  # pyright: ignore[reportPrivateUsage]
+    adapter._normalizer.set_session("parent")
 
-    assert adapter._is_success_terminal(  # pyright: ignore[reportPrivateUsage]
+    assert adapter._is_success_terminal(
         {"type": "session.idle", "properties": {"sessionID": "parent"}}
     )
-    assert not adapter._is_success_terminal(  # pyright: ignore[reportPrivateUsage]
+    assert not adapter._is_success_terminal(
         {"type": "session.idle", "properties": {"sessionID": "child"}}
     )
-    assert not adapter._is_success_terminal(  # pyright: ignore[reportPrivateUsage]
+    assert not adapter._is_success_terminal(
         {"type": "session.status", "properties": {"status": {"type": "idle"}}}
     )
 
@@ -569,13 +569,11 @@ async def test_terminal_reconciles_usage_history_before_emitting_completion() ->
         },
     ]
     adapter = OpenCodeAdapter(http_client_factory=lambda _base_url: client)
-    adapter._client = client  # pyright: ignore[reportPrivateUsage]
-    adapter._normalizer.set_session("sess-1")  # pyright: ignore[reportPrivateUsage]
-    adapter._normalizer.begin_turn(  # pyright: ignore[reportPrivateUsage]
-        uuid4(), root_message_id="root-message"
-    )
+    adapter._client = client
+    adapter._normalizer.set_session("sess-1")
+    adapter._normalizer.begin_turn(uuid4(), root_message_id="root-message")
 
-    await adapter._dispatch_sse(  # pyright: ignore[reportPrivateUsage]
+    await adapter._dispatch_sse(
         None,
         json.dumps(
             {
@@ -585,8 +583,8 @@ async def test_terminal_reconciles_usage_history_before_emitting_completion() ->
         ),
     )
     events: list[object] = []
-    while not adapter._event_q.empty():  # pyright: ignore[reportPrivateUsage]
-        events.append(adapter._event_q.get_nowait())  # pyright: ignore[reportPrivateUsage]
+    while not adapter._event_q.empty():
+        events.append(adapter._event_q.get_nowait())
     usage = next(event for event in events if isinstance(event, UsageUpdatedPayload))
     assert usage.input_tokens == 10
     cost = next(event for event in events if isinstance(event, CostUpdatedPayload))
@@ -611,10 +609,10 @@ async def test_terminal_keeps_live_usage_when_history_reconciliation_fails() -> 
 
     client = FailingHistoryClient("http://127.0.0.1")
     adapter = OpenCodeAdapter(http_client_factory=lambda _base_url: client)
-    adapter._client = client  # pyright: ignore[reportPrivateUsage]
-    adapter._normalizer.set_session("sess-1")  # pyright: ignore[reportPrivateUsage]
-    adapter._normalizer.begin_turn(uuid4())  # pyright: ignore[reportPrivateUsage]
-    await adapter._dispatch_sse(  # pyright: ignore[reportPrivateUsage]
+    adapter._client = client
+    adapter._normalizer.set_session("sess-1")
+    adapter._normalizer.begin_turn(uuid4())
+    await adapter._dispatch_sse(
         None,
         json.dumps(
             {
@@ -639,7 +637,7 @@ async def test_terminal_keeps_live_usage_when_history_reconciliation_fails() -> 
             }
         ),
     )
-    await adapter._dispatch_sse(  # pyright: ignore[reportPrivateUsage]
+    await adapter._dispatch_sse(
         None,
         json.dumps(
             {
@@ -649,8 +647,8 @@ async def test_terminal_keeps_live_usage_when_history_reconciliation_fails() -> 
         ),
     )
     events: list[object] = []
-    while not adapter._event_q.empty():  # pyright: ignore[reportPrivateUsage]
-        events.append(adapter._event_q.get_nowait())  # pyright: ignore[reportPrivateUsage]
+    while not adapter._event_q.empty():
+        events.append(adapter._event_q.get_nowait())
     assert any(isinstance(event, UsageUpdatedPayload) for event in events)
     assert getattr(events[-1], "type", None) == "turn_completed"
 
@@ -681,21 +679,21 @@ async def test_dispatch_sse_and_reconnect_edges(monkeypatch: pytest.MonkeyPatch)
             launch=_launch(),
         )
     )
-    adapter._normalizer.begin_turn(uuid4())  # pyright: ignore[reportPrivateUsage]
+    adapter._normalizer.begin_turn(uuid4())
 
-    await adapter._dispatch_sse("server.connected", "")  # pyright: ignore[reportPrivateUsage]
+    await adapter._dispatch_sse("server.connected", "")
     with pytest.raises(DomainError):
-        await adapter._dispatch_sse(None, "{not-json")  # pyright: ignore[reportPrivateUsage]
+        await adapter._dispatch_sse(None, "{not-json")
     with pytest.raises(DomainError):
-        await adapter._dispatch_sse(None, "[]")  # pyright: ignore[reportPrivateUsage]
+        await adapter._dispatch_sse(None, "[]")
     with pytest.raises(DomainError):
-        await adapter._dispatch_sse(  # pyright: ignore[reportPrivateUsage]
+        await adapter._dispatch_sse(
             None,
             json.dumps({"type": "permission.asked", "properties": {"permissionID": "p"}}),
         )
 
     # Flat envelope without properties.
-    await adapter._dispatch_sse(  # pyright: ignore[reportPrivateUsage]
+    await adapter._dispatch_sse(
         None,
         json.dumps(
             {
@@ -714,27 +712,27 @@ async def test_dispatch_sse_and_reconnect_edges(monkeypatch: pytest.MonkeyPatch)
         returncode = 9
 
     adapter._process = _Dead()  # type: ignore[assignment]
-    adapter._closed = False  # pyright: ignore[reportPrivateUsage]
-    await adapter._reconnect_resync()  # pyright: ignore[reportPrivateUsage]
+    adapter._closed = False
+    await adapter._reconnect_resync()
     drained: list[object] = []
     while True:
         try:
-            drained.append(adapter._event_q.get_nowait())  # pyright: ignore[reportPrivateUsage]
+            drained.append(adapter._event_q.get_nowait())
         except Exception:
             break
     assert any(isinstance(item, TurnOutcomeUnknownPayload) for item in drained)
 
     with pytest.raises(DomainError):
-        adapter._require_session(  # pyright: ignore[reportPrivateUsage]
+        adapter._require_session(
             HarnessSession(
                 conversation_id=uuid4(),
                 binding_id=uuid4(),
                 kind=HarnessKind.OPENCODE,
             )
         )
-    adapter._raise_http(FakeResponse(status_code=200), "ok")  # pyright: ignore[reportPrivateUsage]
+    adapter._raise_http(FakeResponse(status_code=200), "ok")
     with pytest.raises(DomainError) as http_exc:
-        adapter._raise_http(FakeResponse(status_code=500), "boom")  # pyright: ignore[reportPrivateUsage]
+        adapter._raise_http(FakeResponse(status_code=500), "boom")
     assert http_exc.value.code is ErrorCode.PROTOCOL_ERROR
     await adapter.close(session)
 
@@ -744,7 +742,7 @@ def test_opencode_model_ref_parsing() -> None:
     from tth_types.errors import DomainError
 
     from tth_opencode.harness.adapter import (
-        _opencode_model_ref,  # pyright: ignore[reportPrivateUsage]
+        _opencode_model_ref,
     )
 
     assert _opencode_model_ref("openai/gpt-5") == {
@@ -813,8 +811,8 @@ async def test_question_asked_and_submit_model_ref(monkeypatch: pytest.MonkeyPat
     assert prompt_posts[-1]["agent"] == "build"
     assert await adapter.steer(session, SteerRequest(turn_id=turn_id, prompt="more")) is False
 
-    adapter._normalizer.begin_turn(turn_id)  # pyright: ignore[reportPrivateUsage]
-    await adapter._dispatch_sse(  # pyright: ignore[reportPrivateUsage]
+    adapter._normalizer.begin_turn(turn_id)
+    await adapter._dispatch_sse(
         None,
         json.dumps(
             {
@@ -827,7 +825,7 @@ async def test_question_asked_and_submit_model_ref(monkeypatch: pytest.MonkeyPat
             }
         ),
     )
-    item = adapter._event_q.get_nowait()  # pyright: ignore[reportPrivateUsage]
+    item = adapter._event_q.get_nowait()
     assert isinstance(item, HarnessInteractionRequest)
     await adapter.answer_interaction(
         session,
@@ -841,7 +839,7 @@ async def test_question_asked_and_submit_model_ref(monkeypatch: pytest.MonkeyPat
     assert reply_posts
 
     with pytest.raises(DomainError) as missing_id:
-        await adapter._handle_question({})  # pyright: ignore[reportPrivateUsage]
+        await adapter._handle_question({})
     assert missing_id.value.code is ErrorCode.PROTOCOL_ERROR
     await adapter.close(session)
 
@@ -932,7 +930,7 @@ async def test_yolo_keeps_questions_interactive_and_answers_child_session_approv
         )
     )
     await adapter.submit(session, TurnRequest(turn_id=uuid4(), prompt="hi"))
-    await adapter._dispatch_sse(  # pyright: ignore[reportPrivateUsage]
+    await adapter._dispatch_sse(
         None,
         json.dumps(
             {
@@ -945,12 +943,12 @@ async def test_yolo_keeps_questions_interactive_and_answers_child_session_approv
             }
         ),
     )
-    assert adapter._event_q.empty()  # pyright: ignore[reportPrivateUsage]
+    assert adapter._event_q.empty()
     assert (
         "/permission/perm-yolo/reply",
         {"reply": "once"},
     ) in client.posts
-    await adapter._dispatch_sse(  # pyright: ignore[reportPrivateUsage]
+    await adapter._dispatch_sse(
         None,
         json.dumps(
             {
@@ -963,7 +961,7 @@ async def test_yolo_keeps_questions_interactive_and_answers_child_session_approv
             }
         ),
     )
-    item = adapter._event_q.get_nowait()  # pyright: ignore[reportPrivateUsage]
+    item = adapter._event_q.get_nowait()
     assert isinstance(item, HarnessInteractionRequest)
     await adapter.answer_interaction(
         session,
@@ -997,7 +995,7 @@ async def test_mcp_attachment_on_create_and_resume(resume: bool, mcp_status: str
     adapter.prepare_port(19501)
     release = match_release("1.2.27", platform="linux")
     assert release.to_harness_capabilities().supports_mcp_servers
-    adapter._release = release  # pyright: ignore[reportPrivateUsage]
+    adapter._release = release
     config = _config().model_copy(
         update={
             "mcp_servers": (
@@ -1049,7 +1047,7 @@ async def test_mcp_attachment_on_create_and_resume(resume: bool, mcp_status: str
             },
         )
     finally:
-        await adapter._close_http()  # pyright: ignore[reportPrivateUsage]
+        await adapter._close_http()
 
 
 @pytest.mark.asyncio

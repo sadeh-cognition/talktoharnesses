@@ -114,7 +114,9 @@ def stamp_inputs(working_directory: Path) -> list[Path]:
         if candidate.is_file():
             found.append(candidate)
     try:
-        children = sorted(child for child in working_directory.iterdir() if child.is_dir())
+        children: list[Path] = sorted(
+            child for child in working_directory.iterdir() if child.is_dir()
+        )
     except OSError:
         children = []
     for child in children:

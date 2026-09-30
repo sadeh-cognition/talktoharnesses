@@ -51,7 +51,7 @@ async def test_mcp_approval_waits_for_broker_decision(
     adapter, session = broker
     task = asyncio.create_task(
         asyncio.to_thread(
-            adapter._approval_handler,  # pyright: ignore[reportPrivateUsage]
+            adapter._approval_handler,
             "mcpServer/elicitation/request",
             elicitation,
         )
@@ -87,7 +87,7 @@ async def test_interrupt_cancels_pending_mcp_approval(
     adapter, session = broker
     task = asyncio.create_task(
         asyncio.to_thread(
-            adapter._approval_handler,  # pyright: ignore[reportPrivateUsage]
+            adapter._approval_handler,
             "mcpServer/elicitation/request",
             elicitation,
         )
@@ -118,14 +118,14 @@ async def test_other_elicitations_cannot_be_mistaken_for_tool_approvals(
     with pytest.raises(DomainError) as exc:
         await asyncio.wait_for(
             asyncio.to_thread(
-                adapter._approval_handler,  # pyright: ignore[reportPrivateUsage]
+                adapter._approval_handler,
                 "mcpServer/elicitation/request",
                 elicitation | override,
             ),
             timeout=2,
         )
     assert exc.value.code is ErrorCode.UNSUPPORTED_NATIVE_EVENT
-    assert not adapter._pending_interactions  # pyright: ignore[reportPrivateUsage]
+    assert not adapter._pending_interactions
 
 
 def test_mcp_tool_item_is_named_as_its_approval_is() -> None:
@@ -149,7 +149,7 @@ def test_mcp_tool_item_is_named_as_its_approval_is() -> None:
         )
     )
     adapter = CodexAdapter()
-    coerced = adapter._coerce_notification(  # pyright: ignore[reportPrivateUsage]
+    coerced = adapter._coerce_notification(
         Notification(
             method="item/started",
             payload=ItemStartedNotification(

@@ -274,7 +274,7 @@ MCP URLs carrying userinfo or a query string are rejected.
 uv sync --extra django --extra client --extra gateway
 uv run ruff check .
 uv run ruff format --check .
-uv run pyright
+uv run pyrefly check
 uv run pytest -n auto --maxprocesses=4 --dist=worksteal \
   --ignore=tests/live --ignore=tests/performance \
   --cov=talktoharnesses --cov-fail-under=91

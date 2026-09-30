@@ -74,8 +74,8 @@ async def test_resume_interrupts_native_turns_left_waiting_on_orphaned_requests(
         assert sorted(row["turnId"] for row in interrupts) == ["turn-old", "turn-older"]
         assert all(row["sessionId"] == host.session_id for row in interrupts)
         # Nothing was surfaced as a TTH interaction: there is no turn to own it.
-        assert adapter._queue.empty()  # pyright: ignore[reportPrivateUsage]
-        assert adapter._pending == {}  # pyright: ignore[reportPrivateUsage]
+        assert adapter._queue.empty()
+        assert adapter._pending == {}
     finally:
         await adapter.close(session)
 
@@ -134,7 +134,7 @@ async def test_null_optionals_in_requests_do_not_tear_down_the_connection(
         assert isinstance(first, HarnessInteractionRequest)
         assert isinstance(second, HarnessInteractionRequest)
         # The reader is still alive: a follow-up request round-trips.
-        connection = adapter._connection  # pyright: ignore[reportPrivateUsage]
+        connection = adapter._connection
         assert connection is not None
         assert await connection.request("model/list")
     finally:
@@ -151,10 +151,10 @@ async def test_notification_handler_failure_does_not_close_the_stream(
         await adapter.submit(session, TurnRequest(turn_id=uuid4(), prompt="ask"))
         # approvalId is mandatory; its absence raises inside the handler.
         await host.emit("approval/requested", sessionId=host.session_id, turnId="x")
-        connection = adapter._connection  # pyright: ignore[reportPrivateUsage]
+        connection = adapter._connection
         assert connection is not None
         assert await connection.request("model/list")
-        assert adapter._queue.empty()  # pyright: ignore[reportPrivateUsage]
+        assert adapter._queue.empty()
     finally:
         await adapter.close(session)
 

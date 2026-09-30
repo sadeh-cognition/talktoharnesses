@@ -95,7 +95,7 @@ async def test_adapter_start_and_resume_share_the_gate() -> None:
     starting = CodexAdapter(client_factory=_SlowCodex, home_gate=gate)
     resuming = CodexAdapter(client_factory=_SlowCodex, home_gate=gate)
     for adapter in (starting, resuming):
-        adapter._release = _release()  # pyright: ignore[reportPrivateUsage]
+        adapter._release = _release()
 
     await asyncio.gather(
         starting.start(

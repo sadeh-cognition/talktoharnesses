@@ -17,7 +17,7 @@ from tth_types.harness import (
     LaunchSnapshot,
 )
 
-from tests.fakes import _FakeAcpProcess  # pyright: ignore[reportPrivateUsage]
+from tests.fakes import _FakeAcpProcess
 from tth_cursor.harness import probe as probe_mod
 from tth_cursor.harness.compatibility import match_release
 
@@ -40,14 +40,14 @@ def _resolve_to(executable: Path) -> Callable[[HarnessKind], Path]:
 
 @pytest.fixture(autouse=True)
 def clear_effort_discovery_state() -> None:
-    probe_mod._EFFORT_CACHE.clear()  # pyright: ignore[reportPrivateUsage]
-    probe_mod._EFFORT_IN_FLIGHT.clear()  # pyright: ignore[reportPrivateUsage]
+    probe_mod._EFFORT_CACHE.clear()
+    probe_mod._EFFORT_IN_FLIGHT.clear()
 
 
 @pytest.mark.parametrize("output", ("", "Available models", "Available models\nbad-row"))
 def test_cursor_model_list_rejects_malformed_output(output: str) -> None:
     with pytest.raises(DomainError) as exc:
-        probe_mod._parse_models(output)  # pyright: ignore[reportPrivateUsage]
+        probe_mod._parse_models(output)
     assert exc.value.code is ErrorCode.PROVIDER_INCOMPATIBLE
 
 
@@ -165,7 +165,7 @@ async def test_cursor_effort_discovery_is_prompt_free_and_closes_process(
         HarnessModelInfo(id="gpt-5.6-sol", label="GPT-5.6 Sol"),
     )
 
-    default_efforts, discovered, load_session = await probe_mod._discover_model_efforts(  # pyright: ignore[reportPrivateUsage]
+    default_efforts, discovered, load_session = await probe_mod._discover_model_efforts(
         Path("/tmp/cursor-agent"),
         HarnessConfiguration(
             kind=HarnessKind.CURSOR,
@@ -208,8 +208,8 @@ async def test_cursor_effort_discovery_rejects_inconsistent_worker_catalogs(
     )
 
     class _DifferentCatalogProcess(_FakeAcpProcess):
-        def _cursor_config_options(self) -> list[dict[str, object]]:  # pyright: ignore[reportPrivateUsage]
-            options = super()._cursor_config_options()  # pyright: ignore[reportPrivateUsage]
+        def _cursor_config_options(self) -> list[dict[str, object]]:
+            options = super()._cursor_config_options()
             model = options[0]
             values = model["options"]
             assert isinstance(values, list)
@@ -245,7 +245,7 @@ async def test_cursor_effort_discovery_rejects_inconsistent_worker_catalogs(
     monkeypatch.setattr(probe_mod, "_EFFORT_WORKER_COUNT", 2)
 
     with pytest.raises(DomainError, match="inconsistent model options"):
-        await probe_mod._discover_model_efforts(  # pyright: ignore[reportPrivateUsage]
+        await probe_mod._discover_model_efforts(
             Path("/tmp/cursor-agent"),
             HarnessConfiguration(kind=HarnessKind.CURSOR, working_directory="/tmp"),
             match_release("2026.08.04-aaa8809", platform="linux"),
@@ -288,7 +288,7 @@ async def test_cursor_effort_discovery_closes_open_workers_when_another_fails_to
             processes.append(process)
             return process
 
-    original_open = probe_mod._open_effort_worker  # pyright: ignore[reportPrivateUsage]
+    original_open = probe_mod._open_effort_worker
     first_opened = asyncio.Event()
     open_calls = 0
 
@@ -308,7 +308,7 @@ async def test_cursor_effort_discovery_closes_open_workers_when_another_fails_to
     monkeypatch.setattr(probe_mod, "_EFFORT_WORKER_COUNT", 2)
 
     with pytest.raises(OSError, match="spawn failed"):
-        await probe_mod._discover_model_efforts(  # pyright: ignore[reportPrivateUsage]
+        await probe_mod._discover_model_efforts(
             Path("/tmp/cursor-agent"),
             HarnessConfiguration(kind=HarnessKind.CURSOR, working_directory="/tmp"),
             match_release("2026.08.04-aaa8809", platform="linux"),

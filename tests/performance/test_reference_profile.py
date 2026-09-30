@@ -109,7 +109,7 @@ async def test_list_conversations_p95() -> None:
 
     def _list() -> Page[ConversationShell]:
         with CaptureQueriesContext(connection) as ctx:
-            page = persistence._list_conversations(OWNER, None, 50, True)  # pyright: ignore[reportPrivateUsage]
+            page = persistence._list_conversations(OWNER, None, 50, True)
         assert len(page.items) == 50
         assert len(ctx.captured_queries) <= 2
         return page
@@ -130,7 +130,7 @@ async def test_search_conversations_p95() -> None:
 
     def _search() -> Page[ConversationSearchHit]:
         with CaptureQueriesContext(connection) as ctx:
-            page = persistence._search_conversations(OWNER, "alpha beta", None, 50)  # pyright: ignore[reportPrivateUsage]
+            page = persistence._search_conversations(OWNER, "alpha beta", None, 50)
         assert len(page.items) == 50
         assert len(ctx.captured_queries) <= 3
         return page
@@ -152,7 +152,7 @@ async def test_idempotent_submit_p95() -> None:
     broker = InProcessCommittedEventBroker(poll_interval=10.0, keepalive_interval=60.0)
     runtime = RuntimeManager(persistence, registry, clock=lambda: NOW)
     service = TalkToHarnessesService(persistence, registry, broker, lambda: NOW, runtime)
-    service._started = True  # pyright: ignore[reportPrivateUsage]
+    service._started = True
     mark_worker_ready(service)
     first = await service.submit_turn(
         OWNER,
@@ -220,7 +220,7 @@ async def test_replay_events_p95() -> None:
 
     def _replay() -> object:
         with CaptureQueriesContext(connection) as ctx:
-            replayed = persistence._replay(  # pyright: ignore[reportPrivateUsage]
+            replayed = persistence._replay(
                 conversation_id,
                 0,
                 5000,

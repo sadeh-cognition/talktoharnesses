@@ -26,7 +26,7 @@ from tth_types.harness import ApprovalRequestPayload
 
 from tth_claude.harness.normalizer import (
     ClaudeNormalizer,
-    _as_int,  # pyright: ignore[reportPrivateUsage]
+    _as_int,
 )
 from tth_claude.harness.schemas import (
     ClaudeAssistantMessage,
@@ -151,8 +151,8 @@ def test_thinking_tool_result_and_terminal_variants() -> None:
             )
         )
 
-    assert _as_int(3) == 3  # pyright: ignore[reportPrivateUsage]
-    assert _as_int("3") is None  # pyright: ignore[reportPrivateUsage]
+    assert _as_int(3) == 3
+    assert _as_int("3") is None
 
 
 def test_permission_request_mapping() -> None:

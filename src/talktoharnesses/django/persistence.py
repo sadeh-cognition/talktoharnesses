@@ -1974,7 +1974,7 @@ class DjangoPersistence:
             return None
 
         now = datetime.now(UTC)
-        events: Sequence[ConversationEvent] = ()
+        events: tuple[ConversationEvent, ...] = ()
         if waiting_expired:
             # Cancels the turn's open interactions and settles its command
             # before the answer could reach a session about to be invalidated.

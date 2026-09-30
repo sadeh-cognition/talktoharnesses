@@ -277,7 +277,7 @@ def test_create_container_always_bind_mounts_roots(tmp_path: Path) -> None:
 
     manager = SandboxManager(SandboxConfig(mount_roots=(str(tmp_path),)))
     client: Any = SimpleNamespace(containers=Containers())
-    manager._create_container(  # pyright: ignore[reportPrivateUsage]
+    manager._create_container(
         client,
         mount_type,
         kind=HarnessKind.GROK,
@@ -309,7 +309,7 @@ def test_create_codex_container_allows_nested_sandbox(tmp_path: Path) -> None:
 
     manager = SandboxManager(SandboxConfig(mount_roots=(str(tmp_path),)))
     client: Any = SimpleNamespace(containers=Containers())
-    manager._create_container(  # pyright: ignore[reportPrivateUsage]
+    manager._create_container(
         client,
         mount_type,
         kind=HarnessKind.CODEX,
@@ -378,16 +378,12 @@ async def test_wait_healthy_requires_matching_kind(
     manager = SandboxManager(config)
 
     with pytest.raises(DomainError) as excinfo:
-        await manager._wait_healthy(  # pyright: ignore[reportPrivateUsage]
-            HarnessKind.GROK, "http://127.0.0.1:1"
-        )
+        await manager._wait_healthy(HarnessKind.GROK, "http://127.0.0.1:1")
     assert excinfo.value.code is ErrorCode.SANDBOX_UNAVAILABLE
     assert "kind mismatch" in excinfo.value.details["last_error"]
 
     reported_kind = "grok"
-    await manager._wait_healthy(  # pyright: ignore[reportPrivateUsage]
-        HarnessKind.GROK, "http://127.0.0.1:1"
-    )
+    await manager._wait_healthy(HarnessKind.GROK, "http://127.0.0.1:1")
 
 
 def test_environment_passthrough_cannot_override_managed_keys(
@@ -400,9 +396,7 @@ def test_environment_passthrough_cannot_override_managed_keys(
     )
     manager = SandboxManager(config)
 
-    environment = manager._environment(  # pyright: ignore[reportPrivateUsage]
-        HarnessKind.GROK, "minted-token"
-    )
+    environment = manager._environment(HarnessKind.GROK, "minted-token")
 
     assert environment["TTH_SPLIT_TOKEN"] == "minted-token"
     assert "XAI_API_KEY" not in environment
@@ -468,7 +462,7 @@ def test_missing_build_context_raises_actionable_error(tmp_path: Path) -> None:
     try:
         pkg.__file__ = str(tmp_path / "lib" / "talktoharnesses" / "__init__.py")
         with pytest.raises(DomainError) as excinfo:
-            manager._resolve_build_root(HarnessKind.GROK)  # pyright: ignore[reportPrivateUsage]
+            manager._resolve_build_root(HarnessKind.GROK)
     finally:
         pkg.__file__ = original
 
@@ -588,9 +582,7 @@ def test_environment_always_manages_otel_vars(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.delenv("OTEL_EXPORTER_OTLP_HEADERS", raising=False)
     monkeypatch.setenv("OTEL_SERVICE_NAME", "proxy-name")
 
-    environment = manager._environment(  # pyright: ignore[reportPrivateUsage]
-        HarnessKind.CLAUDE, "tok"
-    )
+    environment = manager._environment(HarnessKind.CLAUDE, "tok")
     assert environment["OTEL_EXPORTER_OTLP_ENDPOINT"] == "http://host.docker.internal:4318"
     assert "OTEL_EXPORTER_OTLP_HEADERS" not in environment
     # Each split bakes its own service name; the proxy's must not leak in.
@@ -598,22 +590,16 @@ def test_environment_always_manages_otel_vars(monkeypatch: pytest.MonkeyPatch) -
 
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4319")
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_HEADERS", "authorization=Bearer x")
-    environment = manager._environment(  # pyright: ignore[reportPrivateUsage]
-        HarnessKind.CLAUDE, "tok"
-    )
+    environment = manager._environment(HarnessKind.CLAUDE, "tok")
     assert environment["OTEL_EXPORTER_OTLP_ENDPOINT"] == "http://host.docker.internal:4319"
     assert "OTEL_EXPORTER_OTLP_HEADERS" not in environment
 
     opted_in = SandboxManager(SandboxConfig.from_env({"TTH_SANDBOX_FORWARD_OTEL_HEADERS": "1"}))
-    environment = opted_in._environment(  # pyright: ignore[reportPrivateUsage]
-        HarnessKind.CLAUDE, "tok"
-    )
+    environment = opted_in._environment(HarnessKind.CLAUDE, "tok")
     assert "OTEL_EXPORTER_OTLP_HEADERS" not in environment
 
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "0")
-    environment = manager._environment(  # pyright: ignore[reportPrivateUsage]
-        HarnessKind.CLAUDE, "tok"
-    )
+    environment = manager._environment(HarnessKind.CLAUDE, "tok")
     assert environment["OTEL_EXPORTER_OTLP_ENDPOINT"] == "0"
 
 
@@ -629,7 +615,7 @@ def test_unscoped_container_has_no_network(tmp_path: Path) -> None:
 
     manager = SandboxManager(SandboxConfig(mount_roots=(str(tmp_path),)))
     client: Any = SimpleNamespace(containers=Containers())
-    manager._create_container(  # pyright: ignore[reportPrivateUsage]
+    manager._create_container(
         client,
         mount_type,
         kind=HarnessKind.GROK,
@@ -695,7 +681,7 @@ def test_container_match_checks_managed_runtime_configuration(tmp_path: Path) ->
         token: str = "split",
         otlp_endpoint: str = "http://host.docker.internal:4318",
     ) -> bool:
-        return manager._container_matches(  # pyright: ignore[reportPrivateUsage]
+        return manager._container_matches(
             container,
             HarnessKind.GROK,
             image=image,
@@ -995,7 +981,7 @@ def test_unscoped_container_seeds_rtk_without_credentials(monkeypatch: pytest.Mo
     monkeypatch.setattr("talktoharnesses.remote.sandbox_rtk.seed_rtk_config", seed_rtk)
     monkeypatch.setattr(manager, "_reconcile_container", reconcile_container)
 
-    manager._ensure_container(HarnessKind.CURSOR, "token")  # pyright: ignore[reportPrivateUsage]
+    manager._ensure_container(HarnessKind.CURSOR, "token")
 
     assert order == ["rtk:cursor:tth-cursor:latest:tth-cursor-home", "reconcile"]
 
@@ -1040,7 +1026,7 @@ def test_unscoped_container_never_seeds_host_auth(
     monkeypatch.setattr("talktoharnesses.remote.sandbox_auth.seed_auth_file", seed_auth_file)
     monkeypatch.setattr(manager, "_reconcile_container", reconcile_container)
 
-    manager._ensure_container(HarnessKind.GROK, "token")  # pyright: ignore[reportPrivateUsage]
+    manager._ensure_container(HarnessKind.GROK, "token")
 
     assert seeded == []
 
@@ -1099,7 +1085,7 @@ def test_reconcile_recreates_container_when_start_fails(
     manager = SandboxManager(SandboxConfig.from_env({}))
     monkeypatch.setattr(manager, "_container_matches", always_matches)
     client: Any = SimpleNamespace(containers=Containers())
-    manager._reconcile_container(  # pyright: ignore[reportPrivateUsage]
+    manager._reconcile_container(
         client,
         mount_type,
         KeyError,
@@ -1146,7 +1132,7 @@ async def test_preparation_maps_docker_failures_to_reasons(
     monkeypatch.setattr(manager, "_ensure_container", failing_container)
 
     with pytest.raises(DomainError) as excinfo:
-        await manager._prepare(HarnessKind.GROK)  # pyright: ignore[reportPrivateUsage]
+        await manager._prepare(HarnessKind.GROK)
 
     assert excinfo.value.code is ErrorCode.SANDBOX_UNAVAILABLE
     assert excinfo.value.details == {"kind": "grok", "reason": reason}
@@ -1196,7 +1182,7 @@ def test_reconcile_recreates_container_whose_image_was_pruned(
     manager = SandboxManager(SandboxConfig.from_env({}))
     monkeypatch.setattr(manager, "_container_matches", image_lookup_fails)
     client: Any = SimpleNamespace(containers=Containers())
-    manager._reconcile_container(  # pyright: ignore[reportPrivateUsage]
+    manager._reconcile_container(
         client,
         mount_type,
         Missing,
@@ -1222,9 +1208,7 @@ def test_environment_injects_toolchain_caches_and_passthrough_cannot_override_th
     config = SandboxConfig.from_env({"TTH_SANDBOX_ENV_GROK": "UV_CACHE_DIR,XAI_API_KEY"})
     manager = SandboxManager(config)
 
-    environment = manager._environment(  # pyright: ignore[reportPrivateUsage]
-        HarnessKind.GROK, "tok"
-    )
+    environment = manager._environment(HarnessKind.GROK, "tok")
 
     for name, value in TOOLCHAIN_ENV.items():
         assert environment[name] == value
@@ -1237,9 +1221,7 @@ def test_environment_injects_toolchain_caches_and_passthrough_cannot_override_th
 def test_container_without_toolchain_env_is_recreated(tmp_path: Path) -> None:
     config = SandboxConfig(mount_roots=(str(tmp_path),))
     manager = SandboxManager(config)
-    environment = manager._environment(  # pyright: ignore[reportPrivateUsage]
-        HarnessKind.CODEX, "split"
-    )
+    environment = manager._environment(HarnessKind.CODEX, "split")
     env_lines = [f"{name}={value}" for name, value in environment.items()]
     container: Any = SimpleNamespace(
         image=SimpleNamespace(tags=["tth-codex:latest"]),
@@ -1261,7 +1243,7 @@ def test_container_without_toolchain_env_is_recreated(tmp_path: Path) -> None:
     )
 
     def matches() -> bool:
-        return manager._container_matches(  # pyright: ignore[reportPrivateUsage]
+        return manager._container_matches(
             container,
             HarnessKind.CODEX,
             image="tth-codex:latest",

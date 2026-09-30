@@ -15,10 +15,10 @@ def mark_worker_ready(service: TalkToHarnessesService) -> None:
     that never call ``start`` use this so it accepts them.
     """
     coordinator = service.coordinator
-    coordinator._lease_healthy = True  # pyright: ignore[reportPrivateUsage]
-    coordinator._heartbeat_healthy = True  # pyright: ignore[reportPrivateUsage]
-    coordinator._initial_recovery_complete = True  # pyright: ignore[reportPrivateUsage]
-    coordinator._draining = False  # pyright: ignore[reportPrivateUsage]
-    coordinator._phase = WorkerPhase.RUNNING  # pyright: ignore[reportPrivateUsage]
-    service.processor._running = True  # pyright: ignore[reportPrivateUsage]
-    service.processor._claim_task = Mock(done=Mock(return_value=False))  # pyright: ignore[reportPrivateUsage]
+    coordinator._lease_healthy = True
+    coordinator._heartbeat_healthy = True
+    coordinator._initial_recovery_complete = True
+    coordinator._draining = False
+    coordinator._phase = WorkerPhase.RUNNING
+    service.processor._running = True
+    service.processor._claim_task = Mock(done=Mock(return_value=False))

@@ -129,9 +129,9 @@ async def test_relay_serves_the_sandbox_socket_once_per_state(
     state = tmp_path / ("s" * 90)
     state.mkdir()
     ensure_mcp_relay(state)
-    thread = mcp_relay._relays[state.resolve()].thread  # pyright: ignore[reportPrivateUsage]
+    thread = mcp_relay._relays[state.resolve()].thread
     ensure_mcp_relay(state)
-    assert mcp_relay._relays[state.resolve()].thread is thread  # pyright: ignore[reportPrivateUsage]
+    assert mcp_relay._relays[state.resolve()].thread is thread
     socket_path = state / SOCKET_FILE
     assert socket_path.stat().st_mode & 0o777 == 0o600
     directory = os.open(state, os.O_RDONLY)
@@ -154,4 +154,4 @@ async def test_relay_serves_the_sandbox_socket_once_per_state(
     await asyncio.to_thread(stop_mcp_relay, state)
     assert not thread.is_alive()
     assert not socket_path.exists()
-    assert mcp_relay._relays == {}  # pyright: ignore[reportPrivateUsage]
+    assert mcp_relay._relays == {}

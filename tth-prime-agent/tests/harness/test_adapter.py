@@ -46,10 +46,10 @@ async def test_prime_extension_question_preserves_multi_select() -> None:
         kind=HarnessKind.PRIME_AGENT,
         native_session_id="prime-session",
     )
-    adapter._session = session  # pyright: ignore[reportPrivateUsage]
+    adapter._session = session
     adapter._process = Writer()  # type: ignore[assignment]
-    adapter._normalizer.begin_turn(uuid4())  # pyright: ignore[reportPrivateUsage]
-    await adapter._handle_extension_ui(  # pyright: ignore[reportPrivateUsage]
+    adapter._normalizer.begin_turn(uuid4())
+    await adapter._handle_extension_ui(
         {
             "type": "extension_ui_request",
             "id": "ui-question",
@@ -77,7 +77,7 @@ async def test_prime_extension_question_preserves_multi_select() -> None:
             ],
         }
     )
-    interaction = adapter._event_q.get_nowait()  # pyright: ignore[reportPrivateUsage]
+    interaction = adapter._event_q.get_nowait()
     assert isinstance(interaction, HarnessInteractionRequest)
     assert isinstance(interaction.payload.request, StructuredQuestionPayload)
     question = interaction.payload.request.questions[0]

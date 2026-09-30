@@ -18,7 +18,7 @@ async def broker() -> AsyncIterator[tuple[CodexAdapter, HarnessSession]]:
     """A started adapter with an active turn, ready to broker server requests."""
     adapter = CodexAdapter(client_factory=FakeCodex)
     # Exercise the real broker with an offline compatible SDK transport.
-    adapter._release = match_release(  # pyright: ignore[reportPrivateUsage]
+    adapter._release = match_release(
         sdk_version="0.154.0", runtime_version="0.154.0", platform="linux"
     )
     session = await adapter.start(
@@ -30,7 +30,7 @@ async def broker() -> AsyncIterator[tuple[CodexAdapter, HarnessSession]]:
         )
     )
     # Keep an active turn without racing the fake stream's terminal event.
-    adapter._normalizer.begin_turn(uuid4())  # pyright: ignore[reportPrivateUsage]
+    adapter._normalizer.begin_turn(uuid4())
     try:
         yield adapter, session
     finally:

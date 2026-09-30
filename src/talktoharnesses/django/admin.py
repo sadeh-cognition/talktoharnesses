@@ -33,7 +33,7 @@ class IssueTokenForm(forms.Form):
 
 
 @admin.register(ApiToken)
-class ApiTokenAdmin(admin.ModelAdmin):  # pyright: ignore[reportMissingTypeArgument]
+class ApiTokenAdmin(admin.ModelAdmin):  # pyrefly: ignore[implicit-any-type-argument]
     """Issue replacement tokens without exposing stored token metadata."""
 
     issue_template = "admin/talktoharnesses/apitoken/issue_token.html"
@@ -65,7 +65,7 @@ class ApiTokenAdmin(admin.ModelAdmin):  # pyright: ignore[reportMissingTypeArgum
                 user = form.cleaned_data["user"]
                 with transaction.atomic():
                     issued = issue_token_sync(user)
-                    self.log_addition(  # pyright: ignore[reportUnknownMemberType]
+                    self.log_addition(
                         request,
                         ApiToken.objects.get(user=user),
                         f"Issued client JWT for user {user}.",

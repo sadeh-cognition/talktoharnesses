@@ -427,10 +427,10 @@ async def test_scope_resolution_waits_until_the_row_is_gone(
     manager = _manager(tmp_path, store, docker=FakeDocker())
 
     reclaim = asyncio.create_task(manager.reclaim(SCOPE, purge=True))
-    while SCOPE not in manager._retiring:  # pyright: ignore[reportPrivateUsage]
+    while SCOPE not in manager._retiring:
         await asyncio.sleep(0)
     assert not await manager.reclaim(SCOPE, purge=True)
-    waiter = asyncio.shield(manager._retiring[SCOPE])  # pyright: ignore[reportPrivateUsage]
+    waiter = asyncio.shield(manager._retiring[SCOPE])
     await asyncio.sleep(0.01)
     # Docker resources are gone, but the row is not: resolution still waits.
     assert not waiter.done() and store.rows == {SCOPE}
@@ -439,7 +439,7 @@ async def test_scope_resolution_waits_until_the_row_is_gone(
     assert await reclaim
     await waiter
     assert store.rows == set()
-    assert SCOPE not in manager._retiring  # pyright: ignore[reportPrivateUsage]
+    assert SCOPE not in manager._retiring
 
 
 def test_reclaiming_waits_for_a_preparation_in_progress(tmp_path: Path, relays: list[Path]) -> None:

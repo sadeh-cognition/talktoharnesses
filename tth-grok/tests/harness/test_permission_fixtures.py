@@ -37,16 +37,16 @@ async def test_grok_ask_user_question_blocks_until_canonical_answer() -> None:
         kind=adapter.kind,
         native_session_id="s",
     )
-    adapter._session = session  # pyright: ignore[reportPrivateUsage]
-    adapter._normalizer.set_session("s")  # pyright: ignore[reportPrivateUsage]
-    adapter._normalizer.begin_turn(uuid4())  # pyright: ignore[reportPrivateUsage]
+    adapter._session = session
+    adapter._normalizer.set_session("s")
+    adapter._normalizer.begin_turn(uuid4())
     responses: list[tuple[object, object]] = []
 
     async def respond(request_id: object, result: object) -> None:
         responses.append((request_id, result))
 
     adapter._connection = SimpleNamespace(respond=respond)  # type: ignore[assignment]
-    await adapter._on_question_request(  # pyright: ignore[reportPrivateUsage]
+    await adapter._on_question_request(
         SimpleNamespace(
             id="rpc-question",
             params={
@@ -67,7 +67,7 @@ async def test_grok_ask_user_question_blocks_until_canonical_answer() -> None:
             },
         )
     )
-    interaction = adapter._event_q.get_nowait()  # pyright: ignore[reportPrivateUsage]
+    interaction = adapter._event_q.get_nowait()
     assert isinstance(interaction, HarnessInteractionRequest)
     await adapter.answer_interaction(
         session,
@@ -251,10 +251,10 @@ def test_unknown_fields_on_permission_rejected_by_schema() -> None:
 @pytest.mark.asyncio
 async def test_adapter_answer_rejects_unmapped_decision() -> None:
     adapter = GrokAdapter()
-    adapter._normalizer.set_session("s")  # pyright: ignore[reportPrivateUsage]
-    adapter._normalizer.begin_turn(uuid4())  # pyright: ignore[reportPrivateUsage]
+    adapter._normalizer.set_session("s")
+    adapter._normalizer.begin_turn(uuid4())
     interaction_id = uuid4()
-    adapter._pending_interactions[interaction_id] = PendingAcpApproval(  # pyright: ignore[reportPrivateUsage]
+    adapter._pending_interactions[interaction_id] = PendingAcpApproval(
         rpc_id="rpc-1",
         options=({"optionId": "only-allow", "kind": "allow_once"},),
     )
@@ -268,9 +268,9 @@ async def test_adapter_answer_rejects_unmapped_decision() -> None:
         kind=adapter.kind,
         native_session_id="s",
     )
-    adapter._session = session  # pyright: ignore[reportPrivateUsage]
+    adapter._session = session
     adapter._connection = SimpleNamespace(respond=lambda *a, **k: None)  # type: ignore[assignment]
-    adapter._closed = False  # pyright: ignore[reportPrivateUsage]
+    adapter._closed = False
 
     with pytest.raises(DomainError):
         await adapter.answer_interaction(
@@ -281,23 +281,23 @@ async def test_adapter_answer_rejects_unmapped_decision() -> None:
             ),
         )
     # Waiter not popped on rejection.
-    assert interaction_id in adapter._pending_interactions  # pyright: ignore[reportPrivateUsage]
+    assert interaction_id in adapter._pending_interactions
 
 
 @pytest.mark.asyncio
 async def test_concurrent_permission_requests_keep_distinct_waiters() -> None:
     adapter = GrokAdapter()
-    adapter._normalizer.set_session("s")  # pyright: ignore[reportPrivateUsage]
-    adapter._normalizer.begin_turn(uuid4())  # pyright: ignore[reportPrivateUsage]
-    await adapter._on_permission_request(  # pyright: ignore[reportPrivateUsage]
+    adapter._normalizer.set_session("s")
+    adapter._normalizer.begin_turn(uuid4())
+    await adapter._on_permission_request(
         SimpleNamespace(id="rpc-1", params={"options": [], "toolCall": {"toolCallId": "t1"}})
     )
-    await adapter._on_permission_request(  # pyright: ignore[reportPrivateUsage]
+    await adapter._on_permission_request(
         SimpleNamespace(id="rpc-2", params={"options": [], "toolCall": {"toolCallId": "t2"}})
     )
-    assert len(adapter._pending_interactions) == 2  # pyright: ignore[reportPrivateUsage]
-    e1 = adapter._event_q.get_nowait()  # pyright: ignore[reportPrivateUsage]
-    e2 = adapter._event_q.get_nowait()  # pyright: ignore[reportPrivateUsage]
+    assert len(adapter._pending_interactions) == 2
+    e1 = adapter._event_q.get_nowait()
+    e2 = adapter._event_q.get_nowait()
     assert isinstance(e1, HarnessInteractionRequest)
     assert isinstance(e2, HarnessInteractionRequest)
     assert e1.provider_correlation["json_rpc_request_id"] == "rpc-1"

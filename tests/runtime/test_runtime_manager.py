@@ -47,7 +47,7 @@ from talktoharnesses.providers.adapter import (
 from talktoharnesses.remote.handle import RemoteProcessHandle
 from talktoharnesses.runtime import RuntimeManager, RuntimePolicy
 from talktoharnesses.runtime.manager import (
-    _await_start_resume,  # pyright: ignore[reportPrivateUsage]
+    _await_start_resume,
 )
 
 
@@ -790,7 +790,7 @@ async def test_shutdown_force_phase_settles_sessions_and_releases_resources(
             assert types.index("process_stderr_truncated") < types.index(terminal)
             assert process.redacted_stderr_tail == "tail"
     assert all(task.done() for task in background_tasks)
-    assert not manager._idle_tasks  # pyright: ignore[reportPrivateUsage]
+    assert not manager._idle_tasks
     event_counts = {cid: len(events) for cid, events in store.events.items()}
     await manager.shutdown()
     assert {cid: len(events) for cid, events in store.events.items()} == event_counts
@@ -1083,11 +1083,11 @@ async def test_recovery_handoff_fallback_success_and_failure(
 def test_map_resume_reason_branches() -> None:
     from talktoharnesses.domain.enums import RecoveryReasonCode
     from talktoharnesses.runtime.manager import (
-        _map_resume_reason,  # pyright: ignore[reportPrivateUsage]
+        _map_resume_reason,
     )
 
     assert (
-        _map_resume_reason(  # pyright: ignore[reportPrivateUsage]
+        _map_resume_reason(
             DomainError(
                 ErrorCode.PROVIDER_INCOMPATIBLE,
                 RecoveryReasonCode.RESUME_UNSUPPORTED.value,
@@ -1096,15 +1096,15 @@ def test_map_resume_reason_branches() -> None:
         is RecoveryReasonCode.RESUME_UNSUPPORTED
     )
     assert (
-        _map_resume_reason(DomainError(ErrorCode.PROVIDER_INCOMPATIBLE, "other"))  # pyright: ignore[reportPrivateUsage]
+        _map_resume_reason(DomainError(ErrorCode.PROVIDER_INCOMPATIBLE, "other"))
         is RecoveryReasonCode.PROVIDER_INCOMPATIBLE
     )
     assert (
-        _map_resume_reason(DomainError(ErrorCode.RUNTIME_TIMEOUT, "timeout"))  # pyright: ignore[reportPrivateUsage]
+        _map_resume_reason(DomainError(ErrorCode.RUNTIME_TIMEOUT, "timeout"))
         is RecoveryReasonCode.RESUME_REJECTED
     )
     assert (
-        _map_resume_reason(DomainError(ErrorCode.INVALID_STATE, "x"))  # pyright: ignore[reportPrivateUsage]
+        _map_resume_reason(DomainError(ErrorCode.INVALID_STATE, "x"))
         is RecoveryReasonCode.RESUME_REJECTED
     )
 
@@ -1142,7 +1142,7 @@ async def test_persist_failure_retries_conflict_then_swallows(
         binding_id=state.binding.id,  # type: ignore[union-attr]
         status=ProcessStatus.STARTING,
     )
-    await mgr._persist_failure(  # pyright: ignore[reportPrivateUsage]
+    await mgr._persist_failure(
         cid,
         "owner-1",
         record,
@@ -1156,7 +1156,7 @@ async def test_persist_failure_retries_conflict_then_swallows(
         raise RuntimeError("db down")
 
     store.commit_runtime_lifecycle = boom  # type: ignore[method-assign]
-    await mgr._persist_failure(  # pyright: ignore[reportPrivateUsage]
+    await mgr._persist_failure(
         cid,
         "owner-1",
         record,
@@ -1218,7 +1218,7 @@ async def test_resume_for_recovery_rejects_when_shutting_down(
     registry = AdapterRegistry()
     registry.register(HarnessKind.OPENCODE, ResumingSdkAdapter)
     mgr = RuntimeManager(store, registry, policy=short_policy)
-    mgr._shutting_down = True  # pyright: ignore[reportPrivateUsage]
+    mgr._shutting_down = True
     with pytest.raises(DomainError) as exc:
         await mgr.resume_for_recovery(
             cid,
@@ -1319,12 +1319,12 @@ async def test_idle_timer_reap_removes_remote_runtime_from_live_map(
     assert managed.process is not None
 
     deadline = time.monotonic() + 3.0
-    while mgr._runtimes and time.monotonic() < deadline:  # pyright: ignore[reportPrivateUsage]
+    while mgr._runtimes and time.monotonic() < deadline:
         await asyncio.sleep(0.05)
 
     assert "session_reaped" in {e.type for e in persistence.events[cid]}
     assert mgr.get_runtime(cid) is None
-    assert not mgr._runtimes  # pyright: ignore[reportPrivateUsage]
+    assert not mgr._runtimes
     await mgr.shutdown()
 
 
@@ -1354,7 +1354,7 @@ async def test_idle_reap_frees_runtime_of_deleted_conversation(
     assert await mgr.reap_if_eligible(cid)
 
     assert mgr.get_runtime(cid) is None
-    assert not mgr._runtimes  # pyright: ignore[reportPrivateUsage]
+    assert not mgr._runtimes
     await mgr.shutdown()
 
 
@@ -1590,7 +1590,7 @@ async def test_remote_process_failure_stream_rebases_events_and_releases_runtime
     assert process.redacted_stderr_tail == snapshot.redacted_stderr_tail
     assert manager.get_runtime(cid) is None
     assert managed.closed and not managed.tasks
-    assert not manager._idle_tasks  # pyright: ignore[reportPrivateUsage]
+    assert not manager._idle_tasks
     event_count = len(events)
     await manager.shutdown()
     assert len(store.events[cid]) == event_count
@@ -1616,8 +1616,8 @@ async def test_close_idle_frees_slot_when_terminal_persist_fails(
     assert exc.value.code is ErrorCode.INVALID_STATE
     assert "session_closed" in {e.type for e in store.events[cid]}
     assert mgr.get_runtime(cid) is None
-    assert not mgr._runtimes  # pyright: ignore[reportPrivateUsage]
-    assert not mgr._idle_tasks  # pyright: ignore[reportPrivateUsage]
+    assert not mgr._runtimes
+    assert not mgr._idle_tasks
     await mgr.shutdown()
 
 
@@ -1648,7 +1648,7 @@ async def test_close_frees_slot_when_terminal_persist_fails(
 
     assert exc.value.code is ErrorCode.NOT_FOUND
     assert mgr.get_runtime(cid) is None
-    assert not mgr._runtimes  # pyright: ignore[reportPrivateUsage]
+    assert not mgr._runtimes
     await mgr.shutdown()
 
 

@@ -66,7 +66,7 @@ async def test_cleanup_composition_uses_default_registry() -> None:
         patch.object(cmd, "run_cleanup", new=AsyncMock(return_value=CleanupCounts())) as run,
         patch.object(cmd, "RuntimeManager") as runtime_cls,
     ):
-        await cmd._cleanup()  # pyright: ignore[reportPrivateUsage]
+        await cmd._cleanup()
     assert run.await_count == 1
     registry = runtime_cls.call_args.args[1]
     assert HarnessKind.CODEX in registry.kinds()
@@ -75,7 +75,7 @@ async def test_cleanup_composition_uses_default_registry() -> None:
 
 def test_clock_is_utc() -> None:
     from talktoharnesses.django.management.commands.talktoharnesses_cleanup import (
-        _utc_clock,  # pyright: ignore[reportPrivateUsage]
+        _utc_clock,
     )
 
     now = _utc_clock()

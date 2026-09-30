@@ -14,7 +14,7 @@ import pytest
 from talktoharnesses.application.publisher import ConversationWakeup
 from talktoharnesses.application.service import TalkToHarnessesService
 from talktoharnesses.django.api.sse import (
-    _bounded_replay,  # pyright: ignore[reportPrivateUsage]
+    _bounded_replay,
     iter_sse,
 )
 from talktoharnesses.domain import new_conversation_state
@@ -115,7 +115,7 @@ async def test_incomplete_replay_uses_snapshot_even_below_count_cap(
     replay = (_event(conversation_id, 1),) if events else ()
     service = _Service(conversation_id, high_waters=(2,), events=replay)
 
-    frames, sequence, deleted = await _bounded_replay(  # pyright: ignore[reportPrivateUsage]
+    frames, sequence, deleted = await _bounded_replay(
         cast(TalkToHarnessesService, service),
         owner_id="owner",
         conversation_id=conversation_id,
@@ -138,7 +138,7 @@ async def test_incomplete_replay_uses_deleted_stream_snapshot() -> None:
         update={"detail": service.snapshot.detail.model_copy(update={"conversation": conversation})}
     )
 
-    frames, sequence, deleted = await _bounded_replay(  # pyright: ignore[reportPrivateUsage]
+    frames, sequence, deleted = await _bounded_replay(
         cast(TalkToHarnessesService, service),
         owner_id="owner",
         conversation_id=conversation_id,

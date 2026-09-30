@@ -224,19 +224,19 @@ async def test_worker_switch_commits_new_binding_and_promotes_candidate(tmp_path
     state = await persistence.get_worker_snapshot(cid)
     assert state.binding is not None
     previous_binding = state.binding
-    await service._runtime.start(  # pyright: ignore[reportPrivateUsage]
+    await service._runtime.start(
         conversation_id=cid,
         owner_id="owner",
         configuration=previous_binding.configuration,
     )
-    previous_runtime = service._runtime.get_runtime(cid)  # pyright: ignore[reportPrivateUsage]
+    previous_runtime = service._runtime.get_runtime(cid)
     assert previous_runtime is not None
 
     await service.switch_harness("owner", cid, harness_id=target_id, idempotency_key="k1")
     claimed = await _claim(persistence, CommandKind.SWITCH_HARNESS)
-    service.processor._worker_id = "worker-1"  # pyright: ignore[reportPrivateUsage]
+    service.processor._worker_id = "worker-1"
     created = len(adapters)
-    await service.processor._execute_command(claimed)  # pyright: ignore[reportPrivateUsage]
+    await service.processor._execute_command(claimed)
 
     switched = await persistence.get_worker_snapshot(cid)
     assert switched.binding is not None
@@ -253,7 +253,7 @@ async def test_worker_switch_commits_new_binding_and_promotes_candidate(tmp_path
     ]
     assert persistence.commands[claimed.id].status is CommandStatus.SETTLED
 
-    promoted = service._runtime.get_runtime(cid)  # pyright: ignore[reportPrivateUsage]
+    promoted = service._runtime.get_runtime(cid)
     assert promoted is not None
     assert promoted.session.binding_id == switched.binding.id
     assert promoted is not previous_runtime
@@ -277,9 +277,9 @@ async def test_rejected_candidate_keeps_the_current_binding(tmp_path: Path) -> N
 
     await service.switch_harness("owner", cid, harness_id=target_id, idempotency_key="k1")
     claimed = await _claim(persistence, CommandKind.SWITCH_HARNESS)
-    service.processor._worker_id = "worker-1"  # pyright: ignore[reportPrivateUsage]
+    service.processor._worker_id = "worker-1"
     created = len(adapters)
-    await service.processor._execute_command(claimed)  # pyright: ignore[reportPrivateUsage]
+    await service.processor._execute_command(claimed)
 
     after = await persistence.get_worker_snapshot(cid)
     assert after.binding is not None
@@ -292,7 +292,7 @@ async def test_rejected_candidate_keeps_the_current_binding(tmp_path: Path) -> N
 
     (candidate_adapter,) = adapters[created:]
     assert candidate_adapter.closed is True
-    assert service._runtime.get_runtime(cid) is None  # pyright: ignore[reportPrivateUsage]
+    assert service._runtime.get_runtime(cid) is None
 
     await service.stop()
 
@@ -308,7 +308,7 @@ async def test_switch_rejects_candidate_when_prepared_version_changes(
     before = await persistence.get_worker_snapshot(cid)
     assert before.binding is not None
 
-    original_seed = service._runtime.seed_candidate  # pyright: ignore[reportPrivateUsage]
+    original_seed = service._runtime.seed_candidate
 
     async def seed_then_change_version(candidate: object, handoff: str) -> None:
         await original_seed(candidate, handoff)  # type: ignore[arg-type]
@@ -326,14 +326,14 @@ async def test_switch_rejects_candidate_when_prepared_version_changes(
             changed[1],
         )
 
-    runtime = service._runtime  # pyright: ignore[reportPrivateUsage]
+    runtime = service._runtime
     monkeypatch.setattr(runtime, "seed_candidate", seed_then_change_version)
     await service.switch_harness("owner", cid, harness_id=target_id, idempotency_key="k1")
     claimed = await _claim(persistence, CommandKind.SWITCH_HARNESS)
-    service.processor._worker_id = "worker-1"  # pyright: ignore[reportPrivateUsage]
+    service.processor._worker_id = "worker-1"
     created = len(adapters)
 
-    await service.processor._execute_command(claimed)  # pyright: ignore[reportPrivateUsage]
+    await service.processor._execute_command(claimed)
 
     after = await persistence.get_worker_snapshot(cid)
     assert after.binding is not None
@@ -358,7 +358,7 @@ async def test_switch_renews_lease_during_slow_candidate_seed(
     _seed_retained_turn(persistence, cid)
     renewals = 0
     original_renew = persistence.renew_command_lease
-    original_seed = service._runtime.seed_candidate  # pyright: ignore[reportPrivateUsage]
+    original_seed = service._runtime.seed_candidate
 
     async def count_renewal(
         command_id: UUID,
@@ -381,14 +381,14 @@ async def test_switch_renews_lease_during_slow_candidate_seed(
         await original_seed(candidate, handoff)  # type: ignore[arg-type]
 
     monkeypatch.setattr(persistence, "renew_command_lease", count_renewal)
-    runtime = service._runtime  # pyright: ignore[reportPrivateUsage]
+    runtime = service._runtime
     monkeypatch.setattr(runtime, "seed_candidate", slow_seed)
-    service.processor._lease_seconds = 0.03  # pyright: ignore[reportPrivateUsage]
+    service.processor._lease_seconds = 0.03
     await service.switch_harness("owner", cid, harness_id=target_id, idempotency_key="k1")
     claimed = await _claim(persistence, CommandKind.SWITCH_HARNESS)
-    service.processor._worker_id = "worker-1"  # pyright: ignore[reportPrivateUsage]
+    service.processor._worker_id = "worker-1"
 
-    await service.processor._execute_command(claimed)  # pyright: ignore[reportPrivateUsage]
+    await service.processor._execute_command(claimed)
 
     assert renewals >= 2
     assert persistence.commands[claimed.id].status is CommandStatus.SETTLED
@@ -406,13 +406,13 @@ async def test_switch_sanitizes_unexpected_failure_details(
     async def fail_candidate(**_kwargs: object) -> object:
         raise RuntimeError("/secret/provider/path: raw payload")
 
-    runtime = service._runtime  # pyright: ignore[reportPrivateUsage]
+    runtime = service._runtime
     monkeypatch.setattr(runtime, "start_candidate", fail_candidate)
     await service.switch_harness("owner", cid, harness_id=target_id, idempotency_key="k1")
     claimed = await _claim(persistence, CommandKind.SWITCH_HARNESS)
-    service.processor._worker_id = "worker-1"  # pyright: ignore[reportPrivateUsage]
+    service.processor._worker_id = "worker-1"
 
-    await service.processor._execute_command(claimed)  # pyright: ignore[reportPrivateUsage]
+    await service.processor._execute_command(claimed)
 
     failure = next(event for event in publisher.events if event.type == "harness_switch_failed")
     assert failure.payload.message == "invalid state"  # type: ignore[union-attr]
@@ -443,9 +443,9 @@ async def test_switch_claimed_while_busy_is_released_to_accepted(tmp_path: Path)
     )
 
     claimed = await _claim(persistence, CommandKind.SWITCH_HARNESS)
-    service.processor._worker_id = "worker-1"  # pyright: ignore[reportPrivateUsage]
+    service.processor._worker_id = "worker-1"
     created = len(adapters)
-    await service.processor._execute_command(claimed)  # pyright: ignore[reportPrivateUsage]
+    await service.processor._execute_command(claimed)
 
     released = persistence.commands[claimed.id]
     assert released.status is CommandStatus.ACCEPTED

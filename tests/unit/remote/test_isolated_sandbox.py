@@ -117,7 +117,10 @@ def test_launch_keeps_secrets_and_public_network_outside_agent(
         type(container).image = PropertyMock(side_effect=ImageNotFound("removed"))
         container.attrs = {
             "Image": client.images.get.return_value.id,
-            "NetworkSettings": {"Networks": {}, "Ports": {"8080/tcp": [{"HostPort": "19234"}]}},
+            "NetworkSettings": {
+                "Networks": dict[str, object](),
+                "Ports": {"8080/tcp": [{"HostPort": "19234"}]},
+            },
         }
         container.start.side_effect = lambda: setattr(container, "status", "running")
         created.append(container)
@@ -151,8 +154,8 @@ def test_launch_keeps_secrets_and_public_network_outside_agent(
     monkeypatch.setattr("talktoharnesses.remote.isolated_sandbox.ensure_mcp_relay", relays.append)
     if failure == "attachment":
         with pytest.raises(RuntimeError, match="network attachment failed"):
-            manager._ensure_container(HarnessKind.CODEX, "host-only-control")  # pyright: ignore[reportPrivateUsage]
-    manager._ensure_container(HarnessKind.CODEX, "host-only-control")  # pyright: ignore[reportPrivateUsage]
+            manager._ensure_container(HarnessKind.CODEX, "host-only-control")
+    manager._ensure_container(HarnessKind.CODEX, "host-only-control")
     sandbox = next(call for call in runs if call.get("name") == "scope")
     assert "real-secret" not in json.dumps(sandbox)
     assert "host-only-control" not in json.dumps(sandbox)
@@ -176,7 +179,7 @@ def test_launch_keeps_secrets_and_public_network_outside_agent(
         assert json.loads(manager.layout.image_file.read_text()) == custom_images.image_record(
             HarnessKind.CODEX, "tth-codex:latest", "USER root\nRUN true"
         )
-        assert manager._container_image(HarnessKind.CODEX) == "tth-codex-custom:" + "a" * 24  # pyright: ignore[reportPrivateUsage]
+        assert manager._container_image(HarnessKind.CODEX) == "tth-codex-custom:" + "a" * 24
     else:
         assert split_images == {"tth-codex:latest"} and derived == []
         assert not manager.layout.image_file.exists()
@@ -189,7 +192,7 @@ def test_launch_keeps_secrets_and_public_network_outside_agent(
     assert relays == []
     (manager.state / "mcp-routes.json").write_text("{}")
     # Reattachment preserves identities, permissions, and isolated homes.
-    manager._ensure_container(HarnessKind.CODEX, "host-only-control")  # pyright: ignore[reportPrivateUsage]
+    manager._ensure_container(HarnessKind.CODEX, "host-only-control")
     assert relays == [manager.state]
     # A gateway left unstarted by the failed attachment is recreated.
     assert len(gateways) == (2 if failure == "attachment" else 1)
@@ -199,7 +202,7 @@ def test_launch_keeps_secrets_and_public_network_outside_agent(
         # A Docker Desktop restart can leave a stopped gateway unstartable;
         # it holds no state, so it is recreated instead of restarted.
         created[0].status = "exited"
-        manager._ensure_container(HarnessKind.CODEX, "host-only-control")  # pyright: ignore[reportPrivateUsage]
+        manager._ensure_container(HarnessKind.CODEX, "host-only-control")
         created[0].remove.assert_called_once_with(force=True)
         created[0].start.assert_called_once()
         assert len(gateways) == 2 and created[1].status == "running"
@@ -209,9 +212,9 @@ def test_launch_keeps_secrets_and_public_network_outside_agent(
         previous = containers["scope-gateway"]
         previous.remove.side_effect = [RuntimeError("removal failed"), None]
         with pytest.raises(RuntimeError, match="removal failed"):
-            manager._ensure_container(HarnessKind.CODEX, "new-control")  # pyright: ignore[reportPrivateUsage]
+            manager._ensure_container(HarnessKind.CODEX, "new-control")
         assert json.loads((manager.state / "config.json").read_text()) == config
-        manager._ensure_container(HarnessKind.CODEX, "new-control")  # pyright: ignore[reportPrivateUsage]
+        manager._ensure_container(HarnessKind.CODEX, "new-control")
         assert previous.remove.call_count == 2
         assert len(gateways) == 2
         assert (
@@ -226,7 +229,7 @@ def test_launch_keeps_secrets_and_public_network_outside_agent(
         manager.config = manager.config.model_copy(
             update={"auth_files": {HarnessKind.CODEX: str(replacement_auth)}}
         )
-        manager._ensure_container(HarnessKind.CODEX, "host-only-control")  # pyright: ignore[reportPrivateUsage]
+        manager._ensure_container(HarnessKind.CODEX, "host-only-control")
         assert len(gateways) == 2
         assert len([call for call in runs if call.get("name") == "scope"]) == 1
         credential_mount = next(
@@ -242,13 +245,13 @@ def test_launch_keeps_secrets_and_public_network_outside_agent(
     previous = containers["scope-gateway"]
     previous.remove.side_effect = None
     previous.remove.reset_mock()
-    manager._ensure_container(HarnessKind.CODEX, "host-only-control")  # pyright: ignore[reportPrivateUsage]
+    manager._ensure_container(HarnessKind.CODEX, "host-only-control")
     previous.remove.assert_called_once_with(force=True)
     assert containers["scope-gateway"].attrs["Image"] == "sha256:rebuilt"
     # Recorded VM translations do not excuse a different bind source.
     bound = next(mount for mount in containers["scope"].attrs["Mounts"] if mount["Type"] == "bind")
     bound["Source"] = "/different-source"
-    assert not manager._container_matches(  # pyright: ignore[reportPrivateUsage]
+    assert not manager._container_matches(
         containers["scope"],
         HarnessKind.CODEX,
         image="tth-codex:latest",
@@ -319,7 +322,7 @@ async def test_docker_failures_become_sandbox_unavailable_reasons(
     monkeypatch.setattr(manager, "_ensure_image", _image_present)
 
     with pytest.raises(DomainError) as excinfo:
-        await manager._prepare(HarnessKind.CODEX)  # pyright: ignore[reportPrivateUsage]
+        await manager._prepare(HarnessKind.CODEX)
 
     assert excinfo.value.code is ErrorCode.SANDBOX_UNAVAILABLE
     assert excinfo.value.details == {"kind": "codex", "reason": reason}
@@ -349,7 +352,7 @@ def test_failed_gateway_image_build_logs_its_output_and_keeps_it_from_clients(
     monkeypatch.setattr("talktoharnesses.remote.docker_ops.subprocess.run", failing_build)
 
     with pytest.raises(DomainError) as excinfo:
-        manager._ensure_container(HarnessKind.CODEX, "control")  # pyright: ignore[reportPrivateUsage]
+        manager._ensure_container(HarnessKind.CODEX, "control")
 
     failure = excinfo.value
     assert failure.code is ErrorCode.SANDBOX_UNAVAILABLE
@@ -386,7 +389,7 @@ def test_derived_image_is_built_before_the_scope_lock_is_taken(
 
     monkeypatch.setattr(custom_images, "ensure_derived_image", derived_image)
 
-    manager._ensure_image(HarnessKind.CODEX)  # pyright: ignore[reportPrivateUsage]
+    manager._ensure_image(HarnessKind.CODEX)
 
     [options] = built
     assert options["base_tag"] == "tth-codex:latest"

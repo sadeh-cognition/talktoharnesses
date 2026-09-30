@@ -108,11 +108,11 @@ def configure_opentelemetry(*, log_level: str = "INFO") -> None:
     try:
         # Only the splits that ship httpx carry its instrumentation package;
         # the guard keeps this module identical across the splits.
-        from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor  # pyright: ignore
+        from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
     except ImportError:
         pass
     else:
-        HTTPXClientInstrumentor().instrument()  # pyright: ignore
+        HTTPXClientInstrumentor().instrument()
 
     _telemetry_enabled = True
 
@@ -126,6 +126,6 @@ def instrument_django() -> None:
     if not _telemetry_enabled:
         return
 
-    from opentelemetry.instrumentation.django import DjangoInstrumentor  # pyright: ignore
+    from opentelemetry.instrumentation.django import DjangoInstrumentor
 
     DjangoInstrumentor().instrument()

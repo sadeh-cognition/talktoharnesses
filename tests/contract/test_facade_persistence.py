@@ -150,9 +150,7 @@ async def test_memory_search_and_soft_delete() -> None:
         created_at=_now(),
     )
     p.messages[a.conversation.id] = {msg.id: msg}
-    p._refresh_search(  # pyright: ignore[reportPrivateUsage]
-        p.states[a.conversation.id]
-    )
+    p._refresh_search(p.states[a.conversation.id])
 
     hits = await p.search_conversations("owner-a", "unique-search-token")
     assert len(hits.items) == 1

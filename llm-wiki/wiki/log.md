@@ -15,6 +15,16 @@ verified_against_commit: 78003994d9fe93108ce5a6bc3591ab2e2ef904d9
 
 Entries are appended using `## [YYYY-MM-DD] operation | Title`.
 
+## [2026-09-30] maintain | Typecheck Python with Pyrefly
+
+- Python typechecking now uses Pyrefly's `strict` preset instead of strict
+  Pyright in the root project and every `tth-<kind>` split. The CI static
+  gate and `make lint` in the root and every split run `uv run pyrefly check`;
+  `missing-override-decorator` and `open-unpacking`, which strict Pyright did
+  not check, stay disabled.
+- Updated [Development Guidelines](operations/development-guidelines.md)
+  against baseline `73482d6` plus this working tree.
+
 ## [2026-09-28] repair | Render policy image instructions canonically and scope image cleanup
 
 - Code reviews found texts the image instruction scanner and BuildKit read

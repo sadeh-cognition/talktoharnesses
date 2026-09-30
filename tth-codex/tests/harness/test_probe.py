@@ -86,9 +86,7 @@ async def test_probe_matches_pinned_release(monkeypatch: pytest.MonkeyPatch) -> 
 @pytest.mark.parametrize("data", ([], [SimpleNamespace(model=None, display_name="bad")]))
 async def test_codex_model_discovery_rejects_invalid_catalog(data: list[object]) -> None:
     with pytest.raises(DomainError) as exc:
-        await probe_mod._discover_models(  # pyright: ignore[reportPrivateUsage]
-            _sdk_with_response(data), "/tmp"
-        )
+        await probe_mod._discover_models(_sdk_with_response(data), "/tmp")
     assert exc.value.code is ErrorCode.PROVIDER_INCOMPATIBLE
 
 
@@ -114,7 +112,7 @@ def test_import_and_runtime_version_helpers(monkeypatch: pytest.MonkeyPatch) -> 
         "_import_openai_codex",
         lambda: SimpleNamespace(__version__="0.154.0"),
     )
-    assert probe_mod._import_openai_codex().__version__ == "0.154.0"  # pyright: ignore[reportPrivateUsage]
+    assert probe_mod._import_openai_codex().__version__ == "0.154.0"
 
     def _missing_import() -> object:
         raise DomainError(
@@ -125,7 +123,7 @@ def test_import_and_runtime_version_helpers(monkeypatch: pytest.MonkeyPatch) -> 
 
     monkeypatch.setattr(probe_mod, "_import_openai_codex", _missing_import)
     with pytest.raises(DomainError):
-        probe_mod._import_openai_codex()  # pyright: ignore[reportPrivateUsage]
+        probe_mod._import_openai_codex()
 
     def version(name: str) -> str:
         if name == "openai-codex-cli-bin":
@@ -136,7 +134,7 @@ def test_import_and_runtime_version_helpers(monkeypatch: pytest.MonkeyPatch) -> 
     # Restore real helper body for runtime version fallback.
     monkeypatch.undo()
     monkeypatch.setattr(importlib.metadata, "version", version)
-    assert probe_mod._runtime_version() == "0.154.0"  # pyright: ignore[reportPrivateUsage]
+    assert probe_mod._runtime_version() == "0.154.0"
 
 
 @pytest.mark.asyncio
@@ -154,7 +152,7 @@ async def test_discovery_failure_reports_cause() -> None:
     sdk = SimpleNamespace(__version__="0.154.0", AsyncCodex=_FailingClient, CodexConfig=_Config)
 
     with pytest.raises(DomainError) as exc:
-        await probe_mod._discover_models(sdk, "/tmp")  # pyright: ignore[reportPrivateUsage]
+        await probe_mod._discover_models(sdk, "/tmp")
 
     assert exc.value.code is ErrorCode.PROVIDER_INCOMPATIBLE
     assert exc.value.message == (

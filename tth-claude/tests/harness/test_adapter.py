@@ -232,7 +232,7 @@ def test_sdk_user_tool_result_completes_started_tool_with_utf8_tail(is_error: bo
     normalizer.set_session("session-1")
     turn_id = uuid4()
     normalizer.begin_turn(turn_id)
-    start = adapter._coerce_message(  # pyright: ignore[reportPrivateUsage]
+    start = adapter._coerce_message(
         AssistantMessage(
             content=[ToolUseBlock(id="tool-1", name="shell", input={})], model="claude"
         )
@@ -241,7 +241,7 @@ def test_sdk_user_tool_result_completes_started_tool_with_utf8_tail(is_error: bo
     started = next(
         event for event in normalizer.on_message(start) if isinstance(event, ToolStartedPayload)
     )
-    result = adapter._coerce_message(  # pyright: ignore[reportPrivateUsage]
+    result = adapter._coerce_message(
         UserMessage(
             content=[
                 ToolResultBlock(
@@ -277,19 +277,19 @@ async def test_can_use_tool_and_answer_interaction() -> None:
         kind=HarnessKind.CLAUDE,
         native_session_id="claude-1",
     )
-    adapter._session = session  # pyright: ignore[reportPrivateUsage]
-    adapter._closed = False  # pyright: ignore[reportPrivateUsage]
-    adapter._normalizer.set_session("claude-1")  # pyright: ignore[reportPrivateUsage]
-    adapter._normalizer.begin_turn(uuid4())  # pyright: ignore[reportPrivateUsage]
+    adapter._session = session
+    adapter._closed = False
+    adapter._normalizer.set_session("claude-1")
+    adapter._normalizer.begin_turn(uuid4())
 
     task = asyncio.create_task(
-        adapter._can_use_tool(  # pyright: ignore[reportPrivateUsage]
+        adapter._can_use_tool(
             "Bash",
             {"command": "ls"},
             SimpleNamespace(tool_use_id="tool-9"),
         )
     )
-    event = await asyncio.wait_for(adapter._event_q.get(), timeout=1.0)  # pyright: ignore[reportPrivateUsage]
+    event = await asyncio.wait_for(adapter._event_q.get(), timeout=1.0)
     assert isinstance(event, HarnessInteractionRequest)
     interaction_id = event.payload.interaction_id
     await adapter.answer_interaction(
@@ -298,7 +298,7 @@ async def test_can_use_tool_and_answer_interaction() -> None:
     )
     result = await asyncio.wait_for(task, timeout=1.0)
     if isinstance(result, dict):
-        assert result.get("behavior") == "allow"  # pyright: ignore[reportUnknownMemberType]
+        assert result.get("behavior") == "allow"
     else:
         assert type(result).__name__ == "PermissionResultAllow"
 
@@ -323,11 +323,11 @@ async def test_close_cancels_pending_and_disconnect_branches() -> None:
         kind=HarnessKind.CLAUDE,
         native_session_id="claude-1",
     )
-    adapter._session = session  # pyright: ignore[reportPrivateUsage]
-    adapter._closed = False  # pyright: ignore[reportPrivateUsage]
+    adapter._session = session
+    adapter._closed = False
     interaction_id = uuid4()
     future: asyncio.Future[InteractionAnswer] = asyncio.get_running_loop().create_future()
-    adapter._pending_interactions[interaction_id] = future  # pyright: ignore[reportPrivateUsage]
+    adapter._pending_interactions[interaction_id] = future
 
     async def disconnect() -> None:
         return None
@@ -341,8 +341,8 @@ async def test_close_cancels_pending_and_disconnect_branches() -> None:
 
     # __aexit__ close path
     adapter2 = ClaudeAdapter()
-    adapter2._session = session  # pyright: ignore[reportPrivateUsage]
-    adapter2._closed = False  # pyright: ignore[reportPrivateUsage]
+    adapter2._session = session
+    adapter2._closed = False
     exited: list[object] = []
 
     async def aexit(*_a: object) -> None:
@@ -359,7 +359,7 @@ def test_coerce_message_branches() -> None:
 
     adapter = ClaudeAdapter()
 
-    assert adapter._coerce_message({"type": "assistant", "content": []}) == {  # pyright: ignore[reportPrivateUsage]
+    assert adapter._coerce_message({"type": "assistant", "content": []}) == {
         "type": "assistant",
         "content": [],
     }
@@ -368,7 +368,7 @@ def test_coerce_message_branches() -> None:
         def model_dump(self) -> dict[str, object]:
             return {"type": "result", "subtype": "success"}
 
-    coerced = adapter._coerce_message(_Dump())  # pyright: ignore[reportPrivateUsage]
+    coerced = adapter._coerce_message(_Dump())
     assert coerced is not None
     assert coerced["type"] == "result"
 
@@ -394,7 +394,7 @@ def test_coerce_message_branches() -> None:
         session_id = "s1"
         message_id = "m1"
 
-    coerced = adapter._coerce_message(AssistantMessage())  # pyright: ignore[reportPrivateUsage]
+    coerced = adapter._coerce_message(AssistantMessage())
     assert coerced is not None
     assert coerced["type"] == "assistant"
     assert coerced["content"][0] == {"type": "text", "text": "hi"}
@@ -409,33 +409,31 @@ def test_coerce_message_branches() -> None:
         num_turns = 1
         stop_reason = "end_turn"
         total_cost_usd = 0.1
-        usage = None
+        usage: None = None
         model_usage = {"claude": {"inputTokens": 3, "outputTokens": 1}}
         result = "done"
-        errors = None
+        errors: None = None
 
-    result_msg = adapter._coerce_message(ResultMessage())  # pyright: ignore[reportPrivateUsage]
+    result_msg = adapter._coerce_message(ResultMessage())
     assert result_msg is not None
     assert result_msg["type"] == "result"
     assert result_msg["total_cost_usd"] == 0.1
     assert result_msg["model_usage"] == {"claude": {"inputTokens": 3, "outputTokens": 1}}
 
-    system_msg = adapter._coerce_message(  # pyright: ignore[reportPrivateUsage]
-        SystemMessage(subtype="init", data={"a": 1})
-    )
+    system_msg = adapter._coerce_message(SystemMessage(subtype="init", data={"a": 1}))
     assert system_msg is not None
     assert system_msg["subtype"] == "init"
 
     class RateLimitEvent:
         pass
 
-    assert adapter._coerce_message(RateLimitEvent()) is None  # pyright: ignore[reportPrivateUsage]
+    assert adapter._coerce_message(RateLimitEvent()) is None
 
     class Unknown:
         pass
 
     with pytest.raises(DomainError) as exc:
-        adapter._coerce_message(Unknown())  # pyright: ignore[reportPrivateUsage]
+        adapter._coerce_message(Unknown())
     assert exc.value.code is ErrorCode.UNSUPPORTED_NATIVE_EVENT
 
 
@@ -461,7 +459,7 @@ def test_sdk_task_messages_preserve_active_turn(subtype: str) -> None:
     turn_id = uuid4()
     normalizer.begin_turn(turn_id)
 
-    coerced = adapter._coerce_message(message)  # pyright: ignore[reportPrivateUsage]
+    coerced = adapter._coerce_message(message)
     assert coerced is not None
     assert coerced == {"type": "system", "subtype": subtype, "data": raw}
     assert normalizer.on_message(coerced) == []
@@ -546,11 +544,11 @@ async def test_yolo_routes_ask_user_question_and_auto_allows_other_tools() -> No
         kind=HarnessKind.CLAUDE,
         native_session_id="claude-1",
     )
-    adapter._session = session  # pyright: ignore[reportPrivateUsage]
-    adapter._normalizer.set_session("claude-1")  # pyright: ignore[reportPrivateUsage]
-    adapter._normalizer.begin_turn(uuid4())  # pyright: ignore[reportPrivateUsage]
+    adapter._session = session
+    adapter._normalizer.set_session("claude-1")
+    adapter._normalizer.begin_turn(uuid4())
 
-    allowed = await adapter._can_use_tool_yolo(  # pyright: ignore[reportPrivateUsage]
+    allowed = await adapter._can_use_tool_yolo(
         "Bash",
         {"command": "ls"},
         SimpleNamespace(tool_use_id="tool-1"),
@@ -573,13 +571,13 @@ async def test_yolo_routes_ask_user_question_and_auto_allows_other_tools() -> No
         ]
     }
     task = asyncio.create_task(
-        adapter._can_use_tool_yolo(  # pyright: ignore[reportPrivateUsage]
+        adapter._can_use_tool_yolo(
             "AskUserQuestion",
             tool_input,
             SimpleNamespace(tool_use_id="tool-2"),
         )
     )
-    event = await asyncio.wait_for(adapter._event_q.get(), timeout=1.0)  # pyright: ignore[reportPrivateUsage]
+    event = await asyncio.wait_for(adapter._event_q.get(), timeout=1.0)
     assert isinstance(event, HarnessInteractionRequest)
     assert event.payload.kind is InteractionKind.STRUCTURED_QUESTION
     await adapter.answer_interaction(

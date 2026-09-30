@@ -36,7 +36,7 @@ from tth_types.harness import (
 
 from tth_cursor.acp.normalizer import (
     AcpSessionNormalizer,
-    _optional_int,  # pyright: ignore[reportPrivateUsage]
+    _optional_int,
 )
 
 
@@ -316,7 +316,7 @@ def test_prompt_terminals_and_protocol_edges() -> None:
     assert unsupported.value.code is ErrorCode.UNSUPPORTED_NATIVE_EVENT
 
     # Duplicate offset short-circuits.
-    n.import_seen([], [f"sess-1:{n._stream_offset + 1}"])  # pyright: ignore[reportPrivateUsage]
+    n.import_seen([], [f"sess-1:{n._stream_offset + 1}"])
     assert (
         n.on_session_update(
             {
@@ -403,9 +403,9 @@ def test_permission_action_normalization_and_optional_int_edges() -> None:
     assert isinstance(bad_op.request, ApprovalRequestPayload)
     assert bad_op.request.action is None
 
-    assert _optional_int(None) is None  # pyright: ignore[reportPrivateUsage]
-    assert _optional_int(True) is None  # pyright: ignore[reportPrivateUsage]
-    assert _optional_int(7) == 7  # pyright: ignore[reportPrivateUsage]
-    assert _optional_int("9") == 9  # pyright: ignore[reportPrivateUsage]
-    assert _optional_int("x") is None  # pyright: ignore[reportPrivateUsage]
-    assert _optional_int(object()) is None  # pyright: ignore[reportPrivateUsage]
+    assert _optional_int(None) is None
+    assert _optional_int(True) is None
+    assert _optional_int(7) == 7
+    assert _optional_int("9") == 9
+    assert _optional_int("x") is None
+    assert _optional_int(object()) is None

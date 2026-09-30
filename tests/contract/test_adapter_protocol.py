@@ -102,5 +102,5 @@ async def test_fake_adapter_satisfies_protocol_runtime() -> None:
     assert await adapter.steer(session, SteerRequest(turn_id=uuid4(), prompt="more"))
     events = [e async for e in adapter.events(session)]
     assert len(events) == 1
-    assert events[0].type == "turn_started"
+    assert isinstance(events[0], TurnStartedPayload)
     await adapter.close(session)

@@ -33,7 +33,7 @@ from tth_types.harness import (
     LaunchSnapshot,
 )
 
-from tests.fakes import _FakeAcpProcess  # pyright: ignore[reportPrivateUsage]
+from tests.fakes import _FakeAcpProcess
 from tth_cursor.acp.jsonrpc import JsonRpcRemoteError
 from tth_cursor.acp.pending import PendingAcpApproval
 from tth_cursor.harness import adapter as cursor_adapter_mod
@@ -41,8 +41,8 @@ from tth_cursor.harness.adapter import CursorAdapter
 from tth_cursor.harness.argv import build_cursor_argv
 from tth_cursor.harness.compatibility import match_release
 
-_CursorModelSelection = cursor_adapter_mod._CursorModelSelection  # pyright: ignore[reportPrivateUsage]
-_parse_model_selector = cursor_adapter_mod._parse_model_selector  # pyright: ignore[reportPrivateUsage]
+_CursorModelSelection = cursor_adapter_mod._CursorModelSelection
+_parse_model_selector = cursor_adapter_mod._parse_model_selector
 
 
 def _as_str_dict(value: object) -> dict[str, Any]:
@@ -89,7 +89,7 @@ def _launch() -> LaunchSnapshot:
 @pytest.mark.asyncio
 async def test_cursor_update_todos_extension_is_acked_without_interaction() -> None:
     adapter = CursorAdapter()
-    result = await adapter._on_update_todos_request(  # pyright: ignore[reportPrivateUsage]
+    result = await adapter._on_update_todos_request(
         SimpleNamespace(
             id="rpc-todos",
             params={
@@ -101,7 +101,7 @@ async def test_cursor_update_todos_extension_is_acked_without_interaction() -> N
     )
     assert result == {}
     with pytest.raises(asyncio.QueueEmpty):
-        adapter._event_q.get_nowait()  # pyright: ignore[reportPrivateUsage]
+        adapter._event_q.get_nowait()
 
 
 @pytest.mark.asyncio
@@ -113,16 +113,16 @@ async def test_cursor_ask_question_extension_blocks_until_canonical_answer() -> 
         kind=HarnessKind.CURSOR,
         native_session_id="cursor-session",
     )
-    adapter._session = session  # pyright: ignore[reportPrivateUsage]
-    adapter._normalizer.set_session("cursor-session")  # pyright: ignore[reportPrivateUsage]
-    adapter._normalizer.begin_turn(uuid4())  # pyright: ignore[reportPrivateUsage]
+    adapter._session = session
+    adapter._normalizer.set_session("cursor-session")
+    adapter._normalizer.begin_turn(uuid4())
     responses: list[tuple[object, object]] = []
 
     async def respond(request_id: object, result: object) -> None:
         responses.append((request_id, result))
 
     adapter._connection = SimpleNamespace(respond=respond)  # type: ignore[assignment]
-    await adapter._on_question_request(  # pyright: ignore[reportPrivateUsage]
+    await adapter._on_question_request(
         SimpleNamespace(
             id="rpc-question",
             params={
@@ -142,7 +142,7 @@ async def test_cursor_ask_question_extension_blocks_until_canonical_answer() -> 
             },
         )
     )
-    interaction = adapter._event_q.get_nowait()  # pyright: ignore[reportPrivateUsage]
+    interaction = adapter._event_q.get_nowait()
     assert isinstance(interaction, HarnessInteractionRequest)
     assert interaction.payload.request.questions[0].id == "style"  # type: ignore[attr-defined]
     await adapter.answer_interaction(
@@ -175,8 +175,8 @@ async def _probed_adapter(
 ) -> tuple[CursorAdapter, _FakeAcpProcess]:
     adapter = CursorAdapter()
     release = match_release("2026.08.04-aaa8809", platform="linux")
-    adapter._release = release  # pyright: ignore[reportPrivateUsage]
-    adapter._capabilities = release.to_harness_capabilities()  # pyright: ignore[reportPrivateUsage]
+    adapter._release = release
+    adapter._capabilities = release.to_harness_capabilities()
     process = proc or _FakeAcpProcess(
         agent_name="cursor",
         agent_version="2026.08.04-aaa8809",
@@ -347,7 +347,7 @@ async def test_start_applies_model_parameters_then_mode() -> None:
     ]
     assert session.model == "composer-2.5[fast=true]"
     assert session.mode == "ask"
-    assert adapter._session_model_selection == _CursorModelSelection(  # pyright: ignore[reportPrivateUsage]
+    assert adapter._session_model_selection == _CursorModelSelection(
         "composer-2.5",
         (("fast", "true"),),
     )
@@ -410,7 +410,7 @@ async def test_resume_applies_authoritative_configuration() -> None:
         ("reasoning", "high"),
         ("mode", "plan"),
     ]
-    assert adapter._session_model_selection == _CursorModelSelection(  # pyright: ignore[reportPrivateUsage]
+    assert adapter._session_model_selection == _CursorModelSelection(
         "gpt-5.6-sol",
         (("context", "272k"), ("reasoning", "high"), ("fast", "false")),
     )
@@ -429,8 +429,8 @@ async def test_no_configured_values_capture_baseline_without_setters() -> None:
         )
     )
     assert _setter_calls(proc) == []
-    assert adapter._session_model_selection == _CursorModelSelection("default")  # pyright: ignore[reportPrivateUsage]
-    assert adapter._current_model_selection == adapter._session_model_selection  # pyright: ignore[reportPrivateUsage]
+    assert adapter._session_model_selection == _CursorModelSelection("default")
+    assert adapter._current_model_selection == adapter._session_model_selection
     await adapter.close(session)
 
 
@@ -447,7 +447,7 @@ async def test_unknown_model_fails_before_session_return() -> None:
             )
         )
     assert exc.value.code is ErrorCode.PROVIDER_INCOMPATIBLE
-    assert adapter._session is None  # pyright: ignore[reportPrivateUsage]
+    assert adapter._session is None
     assert not any(msg.get("method") == "session/prompt" for msg in proc.requests)
 
 
@@ -464,7 +464,7 @@ async def test_unknown_mode_fails_before_session_return() -> None:
             )
         )
     assert exc.value.code is ErrorCode.PROVIDER_INCOMPATIBLE
-    assert adapter._session is None  # pyright: ignore[reportPrivateUsage]
+    assert adapter._session is None
 
 
 @pytest.mark.asyncio
@@ -482,7 +482,7 @@ async def test_unknown_parameter_id_fails_after_model_before_prompt() -> None:
     assert exc.value.code is ErrorCode.PROVIDER_INCOMPATIBLE
     assert ("model", "composer-2.5") in _setter_pairs(proc)
     assert not any(cfg == "max" for cfg, _ in _setter_pairs(proc))
-    assert adapter._session is None  # pyright: ignore[reportPrivateUsage]
+    assert adapter._session is None
 
 
 @pytest.mark.asyncio
@@ -506,12 +506,12 @@ async def test_unsupported_parameter_value_fails() -> None:
 async def test_setter_jsonrpc_rejection_maps_to_provider_incompatible() -> None:
     adapter, proc = await _probed_adapter()
 
-    original = proc._respond_set_config_option  # pyright: ignore[reportPrivateUsage]
+    original = proc._respond_set_config_option
 
     async def reject_mode(req_id: object, params: object) -> None:
         params_map = _as_str_dict(params)
         if params_map.get("configId") == "mode":
-            await proc._reply_error(req_id, -32000, "rejected")  # pyright: ignore[reportPrivateUsage]
+            await proc._reply_error(req_id, -32000, "rejected")
             return
         await original(req_id, params)
 
@@ -536,7 +536,7 @@ async def test_malformed_setter_response_maps_to_protocol_error() -> None:
 
     async def bad_reply(req_id: object, params: object) -> None:
         del params
-        await proc._reply(req_id, {"configOptions": "nope"})  # pyright: ignore[reportPrivateUsage]
+        await proc._reply(req_id, {"configOptions": "nope"})
 
     proc._respond_set_config_option = bad_reply  # type: ignore[method-assign]
     with pytest.raises(DomainError) as exc:
@@ -561,12 +561,12 @@ async def test_setter_wrong_current_value_maps_to_protocol_error() -> None:
         value = params_map.get("value")
         # Apply state but report a stale currentValue for the requested option.
         if config_id == "model" and isinstance(value, str):
-            proc._reset_cursor_params_for_model(value)  # pyright: ignore[reportPrivateUsage]
-        options = proc._cursor_config_options()  # pyright: ignore[reportPrivateUsage]
+            proc._reset_cursor_params_for_model(value)
+        options = proc._cursor_config_options()
         for item in options:
             if item["id"] == config_id:
                 item["currentValue"] = "stale-mismatch"
-        await proc._reply(req_id, {"configOptions": options})  # pyright: ignore[reportPrivateUsage]
+        await proc._reply(req_id, {"configOptions": options})
 
     proc._respond_set_config_option = wrong_current  # type: ignore[method-assign]
     with pytest.raises(DomainError) as exc:
@@ -603,11 +603,11 @@ async def test_turn_override_applied_before_prompt() -> None:
     assert "session/prompt" in methods
     assert methods.index("session/set_config_option") < methods.index("session/prompt")
     assert _setter_pairs(proc) == [("fast", "true")]
-    assert adapter._current_model_selection == _CursorModelSelection(  # pyright: ignore[reportPrivateUsage]
+    assert adapter._current_model_selection == _CursorModelSelection(
         "composer-2.5",
         (("fast", "true"),),
     )
-    assert adapter._session_model_selection == _CursorModelSelection(  # pyright: ignore[reportPrivateUsage]
+    assert adapter._session_model_selection == _CursorModelSelection(
         "composer-2.5",
         (("fast", "false"),),
     )
@@ -634,7 +634,7 @@ async def test_second_turn_without_override_restores_baseline() -> None:
     proc.requests.clear()
     await adapter.submit(session, TurnRequest(turn_id=uuid4(), prompt="two"))
     assert _setter_pairs(proc) == [("fast", "false")]
-    assert adapter._current_model_selection == adapter._session_model_selection  # pyright: ignore[reportPrivateUsage]
+    assert adapter._current_model_selection == adapter._session_model_selection
     await adapter.close(session)
 
 
@@ -671,13 +671,13 @@ async def test_configuration_failure_does_not_begin_turn_or_prompt() -> None:
         )
     )
     begin_calls: list[object] = []
-    original_begin = adapter._normalizer.begin_turn  # pyright: ignore[reportPrivateUsage]
+    original_begin = adapter._normalizer.begin_turn
 
     def tracking_begin(turn_id: object) -> None:
         begin_calls.append(turn_id)
         original_begin(turn_id)  # type: ignore[arg-type]
 
-    adapter._normalizer.begin_turn = tracking_begin  # type: ignore[method-assign]  # pyright: ignore[reportPrivateUsage]
+    adapter._normalizer.begin_turn = tracking_begin  # type: ignore[method-assign]
     proc.requests.clear()
     with pytest.raises(DomainError) as exc:
         await adapter.submit(
@@ -713,7 +713,7 @@ async def test_failed_partial_override_is_restored_before_next_prompt() -> None:
         )
     assert exc.value.code is ErrorCode.PROVIDER_INCOMPATIBLE
     assert _setter_pairs(proc) == [("model", "gpt-5.6-sol"), ("reasoning", "high")]
-    assert adapter._current_model_selection == _CursorModelSelection(  # pyright: ignore[reportPrivateUsage]
+    assert adapter._current_model_selection == _CursorModelSelection(
         "gpt-5.6-sol",
         (("context", "272k"), ("reasoning", "high"), ("fast", "false")),
     )
@@ -721,7 +721,7 @@ async def test_failed_partial_override_is_restored_before_next_prompt() -> None:
     proc.requests.clear()
     await adapter.submit(session, TurnRequest(turn_id=uuid4(), prompt="restored"))
     assert _setter_pairs(proc) == [("model", "composer-2.5")]
-    assert adapter._current_model_selection == adapter._session_model_selection  # pyright: ignore[reportPrivateUsage]
+    assert adapter._current_model_selection == adapter._session_model_selection
     assert any(msg.get("method") == "session/prompt" for msg in proc.requests)
     await adapter.close(session)
 
@@ -741,15 +741,13 @@ async def test_build_argv_ignores_model_and_mode() -> None:
 async def test_prompt_protocol_failure_publishes_unknown_before_stream_close() -> None:
     adapter = CursorAdapter()
     turn_id = uuid4()
-    adapter._normalizer.set_session("cursor-session")  # pyright: ignore[reportPrivateUsage]
-    adapter._normalizer.begin_turn(turn_id)  # pyright: ignore[reportPrivateUsage]
+    adapter._normalizer.set_session("cursor-session")
+    adapter._normalizer.begin_turn(turn_id)
 
-    await adapter._emit_prompt_outcome_unknown_and_close(  # pyright: ignore[reportPrivateUsage]
-        "connection closed"
-    )
+    await adapter._emit_prompt_outcome_unknown_and_close("connection closed")
 
-    event = await adapter._event_q.get()  # pyright: ignore[reportPrivateUsage]
-    end = await adapter._event_q.get()  # pyright: ignore[reportPrivateUsage]
+    event = await adapter._event_q.get()
+    end = await adapter._event_q.get()
     assert isinstance(event, TurnOutcomeUnknownPayload)
     assert event.turn_id == turn_id
     assert event.delivery_phase == "delivered"
@@ -759,8 +757,8 @@ async def test_prompt_protocol_failure_publishes_unknown_before_stream_close() -
 @pytest.mark.asyncio
 async def test_prompt_completion_usage_precedes_terminal() -> None:
     adapter = CursorAdapter()
-    adapter._normalizer.set_session("cursor-session")  # pyright: ignore[reportPrivateUsage]
-    adapter._normalizer.begin_turn(uuid4())  # pyright: ignore[reportPrivateUsage]
+    adapter._normalizer.set_session("cursor-session")
+    adapter._normalizer.begin_turn(uuid4())
     result = asyncio.get_running_loop().create_future()
     result.set_result(
         {
@@ -769,10 +767,10 @@ async def test_prompt_completion_usage_precedes_terminal() -> None:
         }
     )
 
-    await adapter._watch_prompt(result)  # pyright: ignore[reportPrivateUsage]
+    await adapter._watch_prompt(result)
 
-    assert isinstance(adapter._event_q.get_nowait(), UsageUpdatedPayload)  # pyright: ignore[reportPrivateUsage]
-    assert isinstance(adapter._event_q.get_nowait(), TurnCompletedPayload)  # pyright: ignore[reportPrivateUsage]
+    assert isinstance(adapter._event_q.get_nowait(), UsageUpdatedPayload)
+    assert isinstance(adapter._event_q.get_nowait(), TurnCompletedPayload)
 
 
 @pytest.mark.asyncio
@@ -784,10 +782,10 @@ async def test_permission_request_and_answer_interaction() -> None:
         kind=HarnessKind.CURSOR,
         native_session_id="cursor-session",
     )
-    adapter._session = session  # pyright: ignore[reportPrivateUsage]
-    adapter._closed = False  # pyright: ignore[reportPrivateUsage]
-    adapter._normalizer.set_session("cursor-session")  # pyright: ignore[reportPrivateUsage]
-    adapter._normalizer.begin_turn(uuid4())  # pyright: ignore[reportPrivateUsage]
+    adapter._session = session
+    adapter._closed = False
+    adapter._normalizer.set_session("cursor-session")
+    adapter._normalizer.begin_turn(uuid4())
     responded: list[tuple[object, object]] = []
 
     async def respond(rpc_id: object, result: object) -> None:
@@ -795,7 +793,7 @@ async def test_permission_request_and_answer_interaction() -> None:
 
     adapter._connection = SimpleNamespace(respond=respond)  # type: ignore[assignment]
 
-    await adapter._on_permission_request(  # pyright: ignore[reportPrivateUsage]
+    await adapter._on_permission_request(
         SimpleNamespace(
             id="rpc-9",
             params={
@@ -805,7 +803,7 @@ async def test_permission_request_and_answer_interaction() -> None:
             },
         )
     )
-    event = adapter._event_q.get_nowait()  # pyright: ignore[reportPrivateUsage]
+    event = adapter._event_q.get_nowait()
     assert isinstance(event, HarnessInteractionRequest)
     assert event.provider_correlation == {
         "json_rpc_request_id": "rpc-9",
@@ -819,7 +817,7 @@ async def test_permission_request_and_answer_interaction() -> None:
         InteractionAnswer(interaction_id=interaction_id, decision=ApprovalDecision.ALLOW_ONCE),
     )
     assert responded == [("rpc-9", {"outcome": {"outcome": "selected", "optionId": "allow-once"}})]
-    assert interaction_id not in adapter._pending_interactions  # pyright: ignore[reportPrivateUsage]
+    assert interaction_id not in adapter._pending_interactions
 
     with pytest.raises(DomainError) as exc:
         await adapter.answer_interaction(
@@ -866,10 +864,10 @@ async def test_close_cancels_pending_and_watch_prompt_branches() -> None:
         kind=HarnessKind.CURSOR,
         native_session_id="cursor-session",
     )
-    adapter._session = session  # pyright: ignore[reportPrivateUsage]
-    adapter._closed = False  # pyright: ignore[reportPrivateUsage]
-    adapter._normalizer.set_session("cursor-session")  # pyright: ignore[reportPrivateUsage]
-    adapter._normalizer.begin_turn(uuid4())  # pyright: ignore[reportPrivateUsage]
+    adapter._session = session
+    adapter._closed = False
+    adapter._normalizer.set_session("cursor-session")
+    adapter._normalizer.begin_turn(uuid4())
 
     notified: list[tuple[str, object]] = []
     responded: list[tuple[object, object]] = []
@@ -888,13 +886,13 @@ async def test_close_cancels_pending_and_watch_prompt_branches() -> None:
         notify=notify,
         close=close,
     )
-    adapter._pending_interactions[uuid4()] = PendingAcpApproval(  # pyright: ignore[reportPrivateUsage]
+    adapter._pending_interactions[uuid4()] = PendingAcpApproval(
         rpc_id="rpc-pending",
         options=({"optionId": "allow-once", "kind": "allow_once"},),
     )
 
     # Unmapped decision rejected before native respond.
-    await adapter._on_permission_request(  # pyright: ignore[reportPrivateUsage]
+    await adapter._on_permission_request(
         SimpleNamespace(
             id="rpc-map",
             params={
@@ -903,7 +901,7 @@ async def test_close_cancels_pending_and_watch_prompt_branches() -> None:
             },
         )
     )
-    event = adapter._event_q.get_nowait()  # pyright: ignore[reportPrivateUsage]
+    event = adapter._event_q.get_nowait()
     assert isinstance(event, HarnessInteractionRequest)
     with pytest.raises(DomainError) as unmapped:
         await adapter.answer_interaction(
@@ -920,29 +918,29 @@ async def test_close_cancels_pending_and_watch_prompt_branches() -> None:
     assert any(rpc_id == "rpc-pending" for rpc_id, _ in responded)
 
     # watch_prompt error branches
-    adapter._closed = False  # pyright: ignore[reportPrivateUsage]
-    adapter._normalizer.begin_turn(uuid4())  # pyright: ignore[reportPrivateUsage]
+    adapter._closed = False
+    adapter._normalizer.begin_turn(uuid4())
     remote = asyncio.get_running_loop().create_future()
     remote.set_exception(JsonRpcRemoteError(code=-1, message="remote boom"))
-    await adapter._watch_prompt(remote)  # pyright: ignore[reportPrivateUsage]
-    failed = adapter._event_q.get_nowait()  # pyright: ignore[reportPrivateUsage]
+    await adapter._watch_prompt(remote)
+    failed = adapter._event_q.get_nowait()
     assert isinstance(failed, TurnFailedPayload)
 
-    adapter._normalizer.begin_turn(uuid4())  # pyright: ignore[reportPrivateUsage]
+    adapter._normalizer.begin_turn(uuid4())
     generic = asyncio.get_running_loop().create_future()
     generic.set_exception(RuntimeError("explode"))
-    await adapter._watch_prompt(generic)  # pyright: ignore[reportPrivateUsage]
-    assert isinstance(adapter._event_q.get_nowait(), TurnFailedPayload)  # pyright: ignore[reportPrivateUsage]
+    await adapter._watch_prompt(generic)
+    assert isinstance(adapter._event_q.get_nowait(), TurnFailedPayload)
 
-    adapter._normalizer.begin_turn(uuid4())  # pyright: ignore[reportPrivateUsage]
+    adapter._normalizer.begin_turn(uuid4())
     ok = asyncio.get_running_loop().create_future()
     ok.set_result({"stopReason": "end_turn"})
-    await adapter._watch_prompt(ok)  # pyright: ignore[reportPrivateUsage]
+    await adapter._watch_prompt(ok)
 
     await adapter.close(session)
     await adapter.close(session)  # idempotent
     with pytest.raises(DomainError):
-        adapter._require_session(session)  # pyright: ignore[reportPrivateUsage]
+        adapter._require_session(session)
 
 
 @pytest.mark.asyncio

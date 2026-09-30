@@ -26,7 +26,6 @@ from tth_types.events import (
 from tth_codex.harness.adapter import CodexAdapter
 
 # Exercise the adapter's native event boundary without a live model request.
-# pyright: reportPrivateUsage=false
 
 
 @pytest.mark.parametrize("will_retry", [True, False])

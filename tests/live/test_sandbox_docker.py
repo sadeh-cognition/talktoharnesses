@@ -82,8 +82,8 @@ async def test_gateway_boot_reuse_network_denials_and_command_guard(
             # Retry the blocking step of preparation. A recreated gateway is
             # published on a new host port, so from here on it is reached
             # through the manager's base URL, never `endpoint.base_url`.
-            await asyncio.to_thread(manager._ensure_container, HarnessKind.CODEX, token)  # pyright: ignore[reportPrivateUsage]
-            await manager._wait_healthy(HarnessKind.CODEX, manager._base_url(HarnessKind.CODEX))  # pyright: ignore[reportPrivateUsage]
+            await asyncio.to_thread(manager._ensure_container, HarnessKind.CODEX, token)
+            await manager._wait_healthy(HarnessKind.CODEX, manager._base_url(HarnessKind.CODEX))
 
         def private_aliases(target: Container) -> list[str]:
             attachment = target.attrs["NetworkSettings"]["Networks"].get(name + "-network")

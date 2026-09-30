@@ -9,9 +9,9 @@ from tempfile import TemporaryDirectory
 from typing import Any
 
 import pytest
-from codex_cli_bin import bundled_codex_path  # pyright: ignore[reportMissingTypeStubs]
+from codex_cli_bin import bundled_codex_path
 
-from tth_codex.harness.adapter import _codex_sandbox_params  # pyright: ignore[reportPrivateUsage]
+from tth_codex.harness.adapter import _codex_sandbox_params
 from tth_codex.harness.permissions import git_workspace_config
 
 
@@ -130,7 +130,7 @@ async def test_start_and_resume_select_git_profile(
     from types import SimpleNamespace
 
     from tth_codex.harness.adapter import (
-        _build_broker_async_codex,  # pyright: ignore[reportPrivateUsage]
+        _build_broker_async_codex,
     )
 
     client = _build_broker_async_codex(None, yolo=True)

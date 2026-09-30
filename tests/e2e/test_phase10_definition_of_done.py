@@ -156,25 +156,25 @@ def service(db: Any) -> Any:
     broker = InProcessCommittedEventBroker(poll_interval=10.0, keepalive_interval=30.0)
     runtime = RuntimeManager(persistence, registry, clock=_now)
     svc = TalkToHarnessesService(persistence, registry, broker, _now, runtime)
-    svc._started = True  # pyright: ignore[reportPrivateUsage]
-    svc._worker_id = "p10"  # pyright: ignore[reportPrivateUsage]
+    svc._started = True
+    svc._worker_id = "p10"
     coordinator = svc.coordinator
-    coordinator._lease_healthy = True  # pyright: ignore[reportPrivateUsage]
-    coordinator._heartbeat_healthy = True  # pyright: ignore[reportPrivateUsage]
-    coordinator._initial_recovery_complete = True  # pyright: ignore[reportPrivateUsage]
-    coordinator._draining = False  # pyright: ignore[reportPrivateUsage]
-    coordinator._phase = WorkerPhase.RUNNING  # pyright: ignore[reportPrivateUsage]
+    coordinator._lease_healthy = True
+    coordinator._heartbeat_healthy = True
+    coordinator._initial_recovery_complete = True
+    coordinator._draining = False
+    coordinator._phase = WorkerPhase.RUNNING
     svc.processor.initialize_worker("p10")
-    svc.processor._running = True  # pyright: ignore[reportPrivateUsage]
-    svc.processor._claims_enabled = True  # pyright: ignore[reportPrivateUsage]
+    svc.processor._running = True
+    svc.processor._claims_enabled = True
 
     class _HealthyClaimTask:
         def done(self) -> bool:
             return False
 
-    svc.processor._claim_task = _HealthyClaimTask()  # pyright: ignore[reportAttributeAccessIssue, reportPrivateUsage]
-    svc._readiness.notify_success(_now())  # pyright: ignore[reportPrivateUsage]
-    asgi_mod._service = svc  # pyright: ignore[reportPrivateUsage]
+    svc.processor._claim_task = _HealthyClaimTask()  # pyrefly: ignore[bad-assignment]
+    svc._readiness.notify_success(_now())
+    asgi_mod._service = svc
 
     async def _start_broker() -> None:
         await broker.start()
@@ -193,12 +193,12 @@ async def _execute_command(
     command_id: UUID,
 ) -> None:
     """Claim and execute one accepted command through the real processor path."""
-    persistence = service._persistence  # pyright: ignore[reportPrivateUsage]
+    persistence = service._persistence
     claimed = await persistence.claim_commands("p10", 8, lease_duration=30.0)
     selected = next(item for item in claimed if item.command.id == command_id)
     service.processor.set_fence(conversation_id, selected.fence)
     await asyncio.wait_for(
-        service.processor._execute_command(selected.command),  # pyright: ignore[reportPrivateUsage]
+        service.processor._execute_command(selected.command),
         timeout=5.0,
     )
 
@@ -394,7 +394,7 @@ async def test_service_journey_owner_isolation(
     assert any(event.type == "turn_interrupted" for event in interrupted)
 
     await service.processor.cancel_pump(conversation_id)
-    await service._runtime.close(conversation_id, reason="phase10-restart")  # pyright: ignore[reportPrivateUsage]
+    await service._runtime.close(conversation_id, reason="phase10-restart")
     resumed_turn = await service.submit_turn(
         owner_a,
         conversation_id,

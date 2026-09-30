@@ -69,7 +69,7 @@ def _seed_active(persistence: MemoryPersistence) -> tuple[ConversationState, Com
 @pytest.mark.asyncio
 async def test_stale_fence_rejected_after_takeover() -> None:
     persistence = MemoryPersistence()
-    persistence._sqlite_mode = False  # pyright: ignore[reportPrivateUsage]
+    persistence._sqlite_mode = False
     state, _command = _seed_active(persistence)
     cid = state.conversation.id
 
@@ -119,7 +119,7 @@ async def test_stale_fence_rejected_after_takeover() -> None:
 @pytest.mark.asyncio
 async def test_renew_and_lost_lease_behavior() -> None:
     persistence = MemoryPersistence()
-    persistence._sqlite_mode = False  # pyright: ignore[reportPrivateUsage]
+    persistence._sqlite_mode = False
     state, _command = _seed_active(persistence)
     cid = state.conversation.id
 
@@ -163,7 +163,7 @@ async def test_renew_and_lost_lease_behavior() -> None:
 @pytest.mark.asyncio
 async def test_second_worker_cannot_claim_live_owned_conversation() -> None:
     persistence = MemoryPersistence()
-    persistence._sqlite_mode = False  # pyright: ignore[reportPrivateUsage]
+    persistence._sqlite_mode = False
     _state, command = _seed_active(persistence)
 
     claimed_a = await persistence.claim_commands("worker-a", 1, lease_duration=60.0)

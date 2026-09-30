@@ -264,7 +264,7 @@ async def test_import_seeds_candidate_then_commits(tmp_path: Path) -> None:
     (adapter,) = adapters[created:]
     assert adapter.submissions
     assert "[user]: build the thing" in adapter.submissions[0].prompt
-    promoted = service._runtime.get_runtime(imported_id)  # pyright: ignore[reportPrivateUsage]
+    promoted = service._runtime.get_runtime(imported_id)
     assert promoted is not None
     await service.stop()
 
@@ -302,10 +302,10 @@ async def test_import_promotes_candidate_when_publication_fails(tmp_path: Path) 
 
     conversation_id = snapshot.detail.conversation.id
     assert conversation_id in persistence.states
-    assert service._runtime.get_runtime(conversation_id) is not None  # pyright: ignore[reportPrivateUsage]
+    assert service._runtime.get_runtime(conversation_id) is not None
     binding = persistence.states[conversation_id].binding
     assert binding is not None
-    assert service._runtime.get_candidate(binding.id) is None  # pyright: ignore[reportPrivateUsage]
+    assert service._runtime.get_candidate(binding.id) is None
     await service.stop()
 
 

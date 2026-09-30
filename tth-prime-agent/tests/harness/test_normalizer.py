@@ -143,12 +143,12 @@ def test_errors_and_tool_arguments_are_redacted() -> None:
     )
     terminal = normalizer.on_event({"type": "agent_end"})
 
-    assert warning[0].message == "extension leaked ***"  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType]
+    assert warning[0].message == "extension leaked ***"  # pyrefly: ignore[missing-attribute]
     tool = next(event for event in requested if isinstance(event, ToolRequestedPayload))
     assert tool.arguments == {"***-key": ["prefix-***-suffix", {"token": "***"}]}
     assert pending == []
     assert terminal[-1].type == "turn_failed"
-    assert terminal[-1].message == "assistant leaked ***"  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType]
+    assert terminal[-1].message == "assistant leaked ***"
 
 
 def test_auto_retry_keeps_turn_active_until_success() -> None:

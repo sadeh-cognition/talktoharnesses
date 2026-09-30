@@ -122,7 +122,7 @@ async def test_restart_readiness_never_enters_preparation(
         lambda: now,
         adapter_factory=partial(running_sandbox_adapter, manager),
     )
-    assert await monitor._probe_one(harness) == (availability == "ready")  # pyright: ignore[reportPrivateUsage]
+    assert await monitor._probe_one(harness) == (availability == "ready")
     prepare.assert_not_called()
     assert len(requests) == 1
     assert all(client.is_closed for client in clients)

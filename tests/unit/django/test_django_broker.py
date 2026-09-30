@@ -71,7 +71,7 @@ async def test_postgres_notify_runs_off_the_event_loop_thread() -> None:
 
 def test_psycopg_conninfo_builds_from_django_settings() -> None:
     from talktoharnesses.django.broker import (
-        _psycopg_conninfo,  # pyright: ignore[reportPrivateUsage]
+        _psycopg_conninfo,
     )
 
     conninfo = _psycopg_conninfo(
@@ -89,7 +89,7 @@ def test_psycopg_conninfo_builds_from_django_settings() -> None:
     assert "password=p" in conninfo
     assert "host=localhost" in conninfo
     assert "port=5432" in conninfo
-    assert _psycopg_conninfo({"NAME": "", "USER": None}) == ""  # pyright: ignore[reportPrivateUsage]
+    assert _psycopg_conninfo({"NAME": "", "USER": None}) == ""
 
 
 @pytest.mark.asyncio
@@ -106,13 +106,13 @@ async def test_handle_pg_notify_schedules_local_wakeup() -> None:
 
     task = asyncio.create_task(consume())
     await asyncio.sleep(0)
-    broker._handle_pg_notify(f"{cid}:7")  # pyright: ignore[reportPrivateUsage]
+    broker._handle_pg_notify(f"{cid}:7")
     await asyncio.wait_for(task, timeout=2.0)
     assert got == [7]
     # Malformed payloads are ignored.
-    broker._handle_pg_notify(None)  # pyright: ignore[reportPrivateUsage]
-    broker._handle_pg_notify("not-a-uuid")  # pyright: ignore[reportPrivateUsage]
-    broker._handle_pg_notify("bad:seq")  # pyright: ignore[reportPrivateUsage]
+    broker._handle_pg_notify(None)
+    broker._handle_pg_notify("not-a-uuid")
+    broker._handle_pg_notify("bad:seq")
     await broker.stop()
 
 
@@ -123,7 +123,7 @@ async def test_start_stop_postgresql_vendor_branch() -> None:
 
     def fake_listen() -> None:
         started.set()
-        broker._pg_stop.wait(timeout=2.0)  # pyright: ignore[reportPrivateUsage]
+        broker._pg_stop.wait(timeout=2.0)
 
     with (
         patch("talktoharnesses.django.broker.connection") as db_connection,
@@ -132,9 +132,9 @@ async def test_start_stop_postgresql_vendor_branch() -> None:
         db_connection.vendor = "postgresql"
         await broker.start()
         assert started.wait(timeout=1.0)
-        assert broker._pg_thread is not None  # pyright: ignore[reportPrivateUsage]
+        assert broker._pg_thread is not None
         await broker.stop()
-        assert broker._pg_thread is None  # pyright: ignore[reportPrivateUsage]
+        assert broker._pg_thread is None
         # Idempotent stop.
         await broker.stop()
 
@@ -159,7 +159,7 @@ def test_pg_notify_executes_parameterized_notify() -> None:
 
     with patch("talktoharnesses.django.broker.connection", _Conn()):
         cid = uuid4()
-        broker._pg_notify({cid: 9})  # pyright: ignore[reportPrivateUsage]
+        broker._pg_notify({cid: 9})
     assert executed
     assert "pg_notify" in executed[0][0]
     assert executed[0][1][1] == f"{cid}:9"
@@ -170,8 +170,8 @@ def test_pg_listen_loop_handles_notify_and_import_error() -> None:
     import types
 
     broker = DjangoCommittedEventBroker()
-    broker._loop = None  # pyright: ignore[reportPrivateUsage]
-    broker._pg_stop.set()  # pyright: ignore[reportPrivateUsage]
+    broker._loop = None
+    broker._pg_stop.set()
 
     # Missing psycopg exits cleanly.
     with patch.dict(sys.modules, {"psycopg": None}):
@@ -186,7 +186,7 @@ def test_pg_listen_loop_handles_notify_and_import_error() -> None:
             return real_import(name, *args, **kwargs)  # type: ignore[arg-type]
 
         with patch("builtins.__import__", side_effect=_import):
-            broker._pg_listen_loop()  # pyright: ignore[reportPrivateUsage]
+            broker._pg_listen_loop()
 
     class _Notify:
         payload = f"{uuid4()}:3"
@@ -203,7 +203,7 @@ def test_pg_listen_loop_handles_notify_and_import_error() -> None:
             self._calls += 1
             if self._calls == 1:
                 return [_Notify()]
-            broker._pg_stop.set()  # pyright: ignore[reportPrivateUsage]
+            broker._pg_stop.set()
             return []
 
         def __enter__(self) -> _Conn:
@@ -212,12 +212,12 @@ def test_pg_listen_loop_handles_notify_and_import_error() -> None:
         def __exit__(self, *_exc: object) -> None:
             return None
 
-    broker._pg_stop.clear()  # pyright: ignore[reportPrivateUsage]
+    broker._pg_stop.clear()
     handled: list[str | None] = []
 
     def capture(payload: str | None) -> None:
         handled.append(payload)
-        broker._pg_stop.set()  # pyright: ignore[reportPrivateUsage]
+        broker._pg_stop.set()
 
     fake = types.ModuleType("psycopg")
 
@@ -237,5 +237,5 @@ def test_pg_listen_loop_handles_notify_and_import_error() -> None:
             "HOST": "localhost",
             "PORT": "5432",
         }
-        broker._pg_listen_loop()  # pyright: ignore[reportPrivateUsage]
+        broker._pg_listen_loop()
     assert handled

@@ -90,13 +90,13 @@ def test_effective_access_fallback_and_stat_failure(tmp_path: Path, owned_python
         raise TypeError("no effective_ids")
 
     with patch.object(paths_mod.os, "access", side_effect=_access_raises):
-        assert paths_mod._effective_access(owned_python) is True  # pyright: ignore[reportPrivateUsage]
+        assert paths_mod._effective_access(owned_python) is True
 
     with (
         patch.object(Path, "stat", side_effect=OSError("gone")),
         pytest.raises(DomainError) as ei,
     ):
-        paths_mod._check_ownership(tmp_path / "x")  # pyright: ignore[reportPrivateUsage]
+        paths_mod._check_ownership(tmp_path / "x")
     assert ei.value.code is ErrorCode.INVALID_EXECUTABLE
 
     with (
@@ -107,7 +107,7 @@ def test_effective_access_fallback_and_stat_failure(tmp_path: Path, owned_python
         ),
         pytest.raises(DomainError) as win,
     ):
-        paths_mod._check_ownership_windows(owned_python)  # pyright: ignore[reportPrivateUsage]
+        paths_mod._check_ownership_windows(owned_python)
     assert win.value.code is ErrorCode.INVALID_EXECUTABLE
 
     with (
@@ -118,7 +118,7 @@ def test_effective_access_fallback_and_stat_failure(tmp_path: Path, owned_python
         ),
         pytest.raises(DomainError) as win2,
     ):
-        paths_mod._check_ownership_windows(owned_python)  # pyright: ignore[reportPrivateUsage]
+        paths_mod._check_ownership_windows(owned_python)
     assert win2.value.code is ErrorCode.INVALID_EXECUTABLE
 
     with (
@@ -129,7 +129,7 @@ def test_effective_access_fallback_and_stat_failure(tmp_path: Path, owned_python
         ),
         pytest.raises(DomainError) as mismatch,
     ):
-        paths_mod._check_ownership_windows(owned_python)  # pyright: ignore[reportPrivateUsage]
+        paths_mod._check_ownership_windows(owned_python)
     assert mismatch.value.code is ErrorCode.EXECUTABLE_OWNER_MISMATCH
 
 

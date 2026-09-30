@@ -331,7 +331,7 @@ class MuseNormalizer:
         if tail:
             result.extend(self._delta(item, tail))
         summary = item.get("summary")
-        lines = cast(list[object], summary) if isinstance(summary, list) else []
+        lines: list[object] = cast(list[object], summary) if isinstance(summary, list) else []
         text = self.redact(str(item.get("text") or "") or "\n".join(str(line) for line in lines))
         if kind == "agentMessage":
             self._has_message = self._has_message or bool(text)

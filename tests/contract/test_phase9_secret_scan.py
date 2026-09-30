@@ -37,13 +37,13 @@ SECRET = "P9_SECRET_FIXTURE_sk-live-do-not-echo-xyz987"
 
 
 def _force_tracer_provider(provider: trace.TracerProvider) -> None:
-    trace._TRACER_PROVIDER = provider  # pyright: ignore[reportPrivateUsage]
-    trace._TRACER_PROVIDER_SET_ONCE._done = True  # pyright: ignore[reportPrivateUsage]
+    trace._TRACER_PROVIDER = provider
+    trace._TRACER_PROVIDER_SET_ONCE._done = True
 
 
 def _force_meter_provider(provider: metrics.MeterProvider) -> None:
-    metrics_internal._METER_PROVIDER = provider  # pyright: ignore[reportPrivateUsage]
-    metrics_internal._METER_PROVIDER_SET_ONCE._done = True  # pyright: ignore[reportPrivateUsage]
+    metrics_internal._METER_PROVIDER = provider
+    metrics_internal._METER_PROVIDER_SET_ONCE._done = True
 
 
 def test_http_error_body_does_not_contain_secret() -> None:

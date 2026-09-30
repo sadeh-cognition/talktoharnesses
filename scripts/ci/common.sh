@@ -18,7 +18,7 @@ ci_static() {
   uv lock --check
   uv run ruff check .
   uv run ruff format --check .
-  uv run pyright
+  uv run pyrefly check
   uv run pytest tests/test_migration_drift.py -q --tb=short
   uv run python scripts/render_supported.py ${validate:+--validate "$validate"} --check
   uv run python scripts/check_split_drift.py

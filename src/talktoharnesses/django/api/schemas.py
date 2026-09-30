@@ -43,7 +43,7 @@ class HarnessMcpServerBody(HarnessMcpServer):
 
     # Narrows the element type to the coercing body model; the tuple stays
     # covariant with the domain field.
-    headers: tuple[HarnessMcpHeaderBody, ...] = ()  # pyright: ignore[reportIncompatibleVariableOverride]
+    headers: tuple[HarnessMcpHeaderBody, ...] = ()  # pyrefly: ignore[bad-override-mutable-attribute]
 
 
 class HarnessConfigurationBody(BaseModel):

@@ -130,7 +130,7 @@ class RequestResponseLoggingMiddleware:
     def __init__(self, get_response: Callable[[HttpRequest], Any]) -> None:
         self.get_response = get_response
         # ASGI awaits this instance only after markcoroutinefunction (Django MiddlewareMixin).
-        self.async_mode = iscoroutinefunction(self.get_response)  # pyright: ignore[reportDeprecated]
+        self.async_mode = iscoroutinefunction(self.get_response)
         if self.async_mode:
             markcoroutinefunction(self)
 

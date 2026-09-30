@@ -105,7 +105,7 @@ def _build_argv(
     if not callable(build):
         return None
     built = cast(Callable[[HarnessConfiguration], object], build)(configuration)
-    if isinstance(built, tuple | list):
+    if isinstance(built, (tuple, list)):
         return tuple(str(part) for part in cast(tuple[object, ...] | list[object], built))
     raise DomainError(ErrorCode.INVALID_STATE, "build_argv must return a sequence of strings")
 

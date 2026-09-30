@@ -344,8 +344,8 @@ def test_permission_advertises_cancel_even_without_selected_option() -> None:
 @pytest.mark.asyncio
 async def test_adapter_wraps_permission_correlation_in_private_envelope() -> None:
     adapter = GrokAdapter()
-    adapter._normalizer.set_session("s")  # pyright: ignore[reportPrivateUsage]
-    adapter._normalizer.begin_turn(uuid4())  # pyright: ignore[reportPrivateUsage]
+    adapter._normalizer.set_session("s")
+    adapter._normalizer.begin_turn(uuid4())
     request = SimpleNamespace(
         id="rpc-7",
         params={
@@ -355,8 +355,8 @@ async def test_adapter_wraps_permission_correlation_in_private_envelope() -> Non
         },
     )
 
-    await adapter._on_permission_request(request)  # pyright: ignore[reportPrivateUsage]
-    event = adapter._event_q.get_nowait()  # pyright: ignore[reportPrivateUsage]
+    await adapter._on_permission_request(request)
+    event = adapter._event_q.get_nowait()
 
     assert isinstance(event, HarnessInteractionRequest)
     assert event.provider_correlation == {
@@ -408,20 +408,18 @@ def test_delivered_protocol_fault_is_outcome_unknown() -> None:
 
 def test_initialize_requires_pinned_identity_and_resume_capability() -> None:
     adapter = GrokAdapter()
-    adapter._release = match_release(  # pyright: ignore[reportPrivateUsage]
-        "grok 1.0.0 (3cd0d0cbce) [stable]", platform="linux"
-    )
+    adapter._release = match_release("grok 1.0.0 (3cd0d0cbce) [stable]", platform="linux")
     with pytest.raises(DomainError) as exc:
-        adapter._validate_initialize_identity({})  # pyright: ignore[reportPrivateUsage]
+        adapter._validate_initialize_identity({})
     assert exc.value.code is ErrorCode.PROVIDER_INCOMPATIBLE
 
-    adapter._validate_initialize_identity(  # pyright: ignore[reportPrivateUsage]
+    adapter._validate_initialize_identity(
         {
             "agentInfo": {"name": "grok", "version": "1.0.0"},
             "agentCapabilities": {"loadSession": True},
         }
     )
-    adapter._validate_initialize_identity(  # pyright: ignore[reportPrivateUsage]
+    adapter._validate_initialize_identity(
         {
             "_meta": {"agentVersion": "1.0.0"},
             "agentCapabilities": {"loadSession": True},
@@ -446,10 +444,10 @@ async def test_grok_close_interrupt_and_watch_prompt_branches() -> None:
         kind=adapter.kind,
         native_session_id="s",
     )
-    adapter._session = session  # pyright: ignore[reportPrivateUsage]
-    adapter._closed = False  # pyright: ignore[reportPrivateUsage]
-    adapter._normalizer.set_session("s")  # pyright: ignore[reportPrivateUsage]
-    adapter._normalizer.begin_turn(uuid4())  # pyright: ignore[reportPrivateUsage]
+    adapter._session = session
+    adapter._closed = False
+    adapter._normalizer.set_session("s")
+    adapter._normalizer.begin_turn(uuid4())
 
     responded: list[object] = []
     notified: list[object] = []
@@ -467,30 +465,30 @@ async def test_grok_close_interrupt_and_watch_prompt_branches() -> None:
         respond=respond, notify=notify, close=close
     )
     pending_id = uuid4()
-    adapter._pending_interactions[pending_id] = PendingAcpApproval(  # pyright: ignore[reportPrivateUsage]
+    adapter._pending_interactions[pending_id] = PendingAcpApproval(
         rpc_id="rpc-1",
         options=({"optionId": "allow-once", "kind": "allow_once"},),
     )
     await adapter.interrupt(session)
     assert responded and notified
 
-    adapter._closed = False  # pyright: ignore[reportPrivateUsage]
-    adapter._normalizer.begin_turn(uuid4())  # pyright: ignore[reportPrivateUsage]
+    adapter._closed = False
+    adapter._normalizer.begin_turn(uuid4())
     remote = asyncio.get_running_loop().create_future()
     remote.set_exception(JsonRpcRemoteError(code=-1, message="remote"))
-    await adapter._watch_prompt(remote)  # pyright: ignore[reportPrivateUsage]
-    assert isinstance(adapter._event_q.get_nowait(), TurnFailedPayload)  # pyright: ignore[reportPrivateUsage]
+    await adapter._watch_prompt(remote)
+    assert isinstance(adapter._event_q.get_nowait(), TurnFailedPayload)
 
-    adapter._normalizer.begin_turn(uuid4())  # pyright: ignore[reportPrivateUsage]
+    adapter._normalizer.begin_turn(uuid4())
     generic = asyncio.get_running_loop().create_future()
     generic.set_exception(RuntimeError("x"))
-    await adapter._watch_prompt(generic)  # pyright: ignore[reportPrivateUsage]
-    assert isinstance(adapter._event_q.get_nowait(), TurnFailedPayload)  # pyright: ignore[reportPrivateUsage]
+    await adapter._watch_prompt(generic)
+    assert isinstance(adapter._event_q.get_nowait(), TurnFailedPayload)
 
-    adapter._normalizer.begin_turn(uuid4())  # pyright: ignore[reportPrivateUsage]
+    adapter._normalizer.begin_turn(uuid4())
     ok = asyncio.get_running_loop().create_future()
     ok.set_result({"stopReason": "end_turn"})
-    await adapter._watch_prompt(ok)  # pyright: ignore[reportPrivateUsage]
+    await adapter._watch_prompt(ok)
 
     with pytest.raises(DomainError):
         await adapter.answer_interaction(

@@ -63,7 +63,7 @@ async def test_a_dropped_stream_detaches_the_session_until_the_grace_period_ends
     client = AsyncClient()
     sid = (await _create(client, _request(str(tmp_path)))).session_id
     store = get_session_store()
-    store._policy = store._policy.model_copy(update={"detach_grace": 0.05})  # pyright: ignore[reportPrivateUsage]
+    store._policy = store._policy.model_copy(update={"detach_grace": 0.05})
     await store.get(sid).enqueue(FRAME_HARNESS_EVENT, "{}")
     response: Any = await client.get(f"/v1/sessions/{sid}/events")
     content: AsyncIterator[bytes] = response.streaming_content

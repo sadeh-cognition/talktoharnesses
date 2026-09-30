@@ -370,7 +370,7 @@ class PrimeAgentAdapter:
                     try:
                         envelope = _mapping(json.loads(str(option_items[0])))
                     except json.JSONDecodeError:
-                        envelope = {}
+                        envelope = dict[str, Any]()
                     question = envelope.get("question")
                     if envelope.get("type") == _HOST_QUESTION and isinstance(question, dict):
                         questions = canonical_questions([_mapping(cast(object, question))])
@@ -382,7 +382,7 @@ class PrimeAgentAdapter:
                     try:
                         decoded = _mapping(json.loads(native_value))
                     except json.JSONDecodeError:
-                        decoded = {}
+                        decoded = dict[str, Any]()
                     if decoded.get("label") and decoded.get("value"):
                         canonical_option = {
                             "label": str(decoded["label"]),

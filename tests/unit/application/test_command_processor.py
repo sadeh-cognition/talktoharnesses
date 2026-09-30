@@ -164,7 +164,7 @@ class _Runtime:
     def __init__(self, persistence: MemoryPersistence, adapter: _Adapter) -> None:
         self.persistence = persistence
         self.adapter = adapter
-        self.managed = None
+        self.managed: SimpleNamespace | None = None
         self.closed_replaced_reason: str | None = None
 
     def get_runtime(self, conversation_id: UUID):
@@ -281,9 +281,9 @@ async def test_lazy_start_delivers_coalesced_prompt_with_claim_and_dedupe_state(
     adapter = _Adapter()
     runtime = _Runtime(persistence, adapter)
     processor = CommandProcessor(persistence, _Publisher(), runtime)  # type: ignore[arg-type]
-    processor._worker_id = "worker-1"  # pyright: ignore[reportPrivateUsage]
+    processor._worker_id = "worker-1"
 
-    await processor._execute_command(claimed)  # pyright: ignore[reportPrivateUsage]
+    await processor._execute_command(claimed)
     final = await persistence.get_worker_snapshot(state.conversation.id)
     for _ in range(100):
         final = await persistence.get_worker_snapshot(state.conversation.id)
@@ -327,7 +327,7 @@ async def test_event_batch_rebases_after_concurrent_lifecycle_commit() -> None:
     publisher = _Publisher()
     processor = CommandProcessor(persistence, publisher, runtime)  # type: ignore[arg-type]
 
-    await processor._event_pump(state.conversation.id)  # pyright: ignore[reportPrivateUsage]
+    await processor._event_pump(state.conversation.id)
 
     event_types = [event.type for event in persistence.events[state.conversation.id]]
     assert event_types == ["provider_warning", "assistant_message_delta"]
@@ -362,7 +362,7 @@ async def test_event_batch_discards_stale_runtime_after_rotation_conflict() -> N
     publisher = _Publisher()
     processor = CommandProcessor(persistence, publisher, runtime)  # type: ignore[arg-type]
 
-    await processor._event_pump(state.conversation.id)  # pyright: ignore[reportPrivateUsage]
+    await processor._event_pump(state.conversation.id)
 
     assert [event.type for event in persistence.events[state.conversation.id]] == [
         "provider_warning"
@@ -400,7 +400,7 @@ async def test_stop_waits_for_in_flight_command_tasks() -> None:
     await processor.stop()
 
     assert runtime.cancelled.is_set()
-    assert not processor._command_tasks  # pyright: ignore[reportPrivateUsage]
+    assert not processor._command_tasks
 
 
 def _bound_state(*, steer: bool = False):
@@ -467,9 +467,9 @@ async def test_queued_submit_does_not_run_against_active_turn() -> None:
         ),
     )
     processor = CommandProcessor(persistence, _Publisher(), runtime)  # type: ignore[arg-type]
-    processor._worker_id = "worker-1"  # pyright: ignore[reportPrivateUsage]
+    processor._worker_id = "worker-1"
 
-    await processor._execute_command(claimed)  # pyright: ignore[reportPrivateUsage]
+    await processor._execute_command(claimed)
 
     assert adapter.submissions == []
     stored = persistence.commands[claimed.id]
@@ -486,9 +486,7 @@ async def test_queued_submit_does_not_run_against_active_turn() -> None:
         terminal.events,
         tuple(terminal.state.commands.values()),
     )
-    await processor._wake_queued_submit(  # pyright: ignore[reportPrivateUsage]
-        state.conversation.id
-    )
+    await processor._wake_queued_submit(state.conversation.id)
     assert persistence.commands[claimed.id].status is CommandStatus.ACCEPTED
     assert claimed.id in persistence.accepted_queue
     aggregate = await persistence.get_worker_snapshot(state.conversation.id)
@@ -527,9 +525,9 @@ async def test_unsupported_command_is_settled() -> None:
         ),
     )
     processor = CommandProcessor(persistence, _Publisher(), runtime)  # type: ignore[arg-type]
-    processor._worker_id = "worker-1"  # pyright: ignore[reportPrivateUsage]
+    processor._worker_id = "worker-1"
 
-    await processor._execute_command(command)  # pyright: ignore[reportPrivateUsage]
+    await processor._execute_command(command)
 
     stored = persistence.commands[command.id]
     assert stored.status is CommandStatus.SETTLED
@@ -636,7 +634,7 @@ async def test_reclaimed_in_flight_command_is_not_delivered_twice() -> None:
         lease_seconds=0.2,
         poll_interval=0.02,
     )
-    processor._spawn_lease_keepalive = lambda command: None  # type: ignore[method-assign] # pyright: ignore[reportPrivateUsage]
+    processor._spawn_lease_keepalive = lambda command: None  # type: ignore[method-assign]
 
     heartbeat = _refresh_ownership(persistence, state.conversation.id)
     await processor.start("worker-1")
@@ -678,9 +676,9 @@ async def test_lease_keepalive_renews_during_slow_start() -> None:
         runtime,  # type: ignore[arg-type]
         lease_seconds=0.15,
     )
-    processor._worker_id = "worker-1"  # pyright: ignore[reportPrivateUsage]
+    processor._worker_id = "worker-1"
 
-    await processor._execute_command(claimed)  # pyright: ignore[reportPrivateUsage]
+    await processor._execute_command(claimed)
     await processor.stop()
 
     stored = persistence.commands[claimed.id]
@@ -727,7 +725,7 @@ def _guard_fixture(
         ),
     )
     processor = CommandProcessor(persistence, _Publisher(), runtime)  # type: ignore[arg-type]
-    processor._worker_id = "worker-1"  # pyright: ignore[reportPrivateUsage]
+    processor._worker_id = "worker-1"
     claimed = durable.model_copy(
         update={"status": CommandStatus.CLAIMED, "delivery_started_at": None}
     )
@@ -742,7 +740,7 @@ async def test_delivered_command_is_not_redelivered() -> None:
         delivered=True,
     )
 
-    await processor._execute_command(claimed)  # pyright: ignore[reportPrivateUsage]
+    await processor._execute_command(claimed)
     await processor.stop()
 
     assert adapter.submissions == []
@@ -756,7 +754,7 @@ async def test_ambiguous_prior_delivery_marks_outcome_unknown() -> None:
         delivery_started=True,
     )
 
-    await processor._execute_command(claimed)  # pyright: ignore[reportPrivateUsage]
+    await processor._execute_command(claimed)
     await processor.stop()
 
     assert adapter.submissions == []
@@ -774,7 +772,7 @@ async def test_settled_command_is_skipped() -> None:
         delivered=True,
     )
 
-    await processor._execute_command(claimed)  # pyright: ignore[reportPrivateUsage]
+    await processor._execute_command(claimed)
     await processor.stop()
 
     assert adapter.submissions == []
@@ -820,9 +818,9 @@ async def test_steer_failure_queues_instead_of_delivered() -> None:
         ),
     )
     processor = CommandProcessor(persistence, _Publisher(), runtime)  # type: ignore[arg-type]
-    processor._worker_id = "worker-1"  # pyright: ignore[reportPrivateUsage]
+    processor._worker_id = "worker-1"
 
-    await processor._execute_command(claimed)  # pyright: ignore[reportPrivateUsage]
+    await processor._execute_command(claimed)
 
     assert len(adapter.steers) == 1
     snap = await persistence.get_worker_snapshot(state.conversation.id)
@@ -915,9 +913,9 @@ async def test_startup_error_settles_command_instead_of_retrying(
 
     publisher = _Publisher()
     processor = CommandProcessor(persistence, publisher, _SandboxlessRuntime())  # type: ignore[arg-type]
-    processor._worker_id = "worker-1"  # pyright: ignore[reportPrivateUsage]
+    processor._worker_id = "worker-1"
 
-    await processor._handle_command(claimed)  # pyright: ignore[reportPrivateUsage]
+    await processor._handle_command(claimed)
     await processor.stop()
 
     stored = persistence.commands[claimed.id]
@@ -941,7 +939,7 @@ async def test_startup_error_settles_command_instead_of_retrying(
         assert failures[0].message == (
             "workspace setup script (.tth/setup.sh) exited with an error"
         )
-    await processor._handle_command(claimed)  # pyright: ignore[reportPrivateUsage]
+    await processor._handle_command(claimed)
     assert len(publisher.events) == 1
 
 
@@ -1005,9 +1003,9 @@ async def test_sandbox_preparing_keeps_command_claimed_for_retry() -> None:
 
     publisher = _Publisher()
     processor = CommandProcessor(persistence, publisher, _PreparingRuntime())  # type: ignore[arg-type]
-    processor._worker_id = "worker-1"  # pyright: ignore[reportPrivateUsage]
+    processor._worker_id = "worker-1"
 
-    await processor._handle_command(claimed)  # pyright: ignore[reportPrivateUsage]
+    await processor._handle_command(claimed)
     await processor.stop()
 
     stored = persistence.commands[claimed.id]
@@ -1070,9 +1068,9 @@ async def test_transient_startup_error_keeps_command_claimed_below_attempt_cap(
     publisher = _Publisher()
     runtime = _FailingStartRuntime(DomainError(code, "split request failed"))
     processor = CommandProcessor(persistence, publisher, runtime)  # type: ignore[arg-type]
-    processor._worker_id = "worker-1"  # pyright: ignore[reportPrivateUsage]
+    processor._worker_id = "worker-1"
 
-    await processor._handle_command(claimed)  # pyright: ignore[reportPrivateUsage]
+    await processor._handle_command(claimed)
     await processor.stop()
 
     assert persistence.commands[claimed.id].status is CommandStatus.CLAIMED
@@ -1107,9 +1105,9 @@ async def test_startup_failure_fails_active_turn_for_non_turn_command() -> None:
     publisher = _Publisher()
     runtime = _FailingStartRuntime(DomainError(ErrorCode.SANDBOX_UNAVAILABLE, "gone"))
     processor = CommandProcessor(persistence, publisher, runtime)  # type: ignore[arg-type]
-    processor._worker_id = "worker-1"  # pyright: ignore[reportPrivateUsage]
+    processor._worker_id = "worker-1"
 
-    await processor._handle_command(claimed)  # pyright: ignore[reportPrivateUsage]
+    await processor._handle_command(claimed)
     await processor.stop()
 
     assert persistence.commands[claimed.id].status is CommandStatus.SETTLED
@@ -1149,9 +1147,9 @@ async def test_startup_failure_fails_waiting_active_turn_and_queued_turn() -> No
     publisher = _Publisher()
     runtime = _FailingStartRuntime(DomainError(ErrorCode.SANDBOX_PATH_NOT_MOUNTED, "nope"))
     processor = CommandProcessor(persistence, publisher, runtime)  # type: ignore[arg-type]
-    processor._worker_id = "worker-1"  # pyright: ignore[reportPrivateUsage]
+    processor._worker_id = "worker-1"
 
-    await processor._handle_command(claimed)  # pyright: ignore[reportPrivateUsage]
+    await processor._handle_command(claimed)
     await processor.stop()
 
     assert persistence.commands[claimed.id].status is CommandStatus.SETTLED
@@ -1188,7 +1186,7 @@ async def test_startup_failure_cancels_lease_keepalive_before_settling() -> None
         runtime,  # type: ignore[arg-type]
         lease_seconds=0.03,
     )
-    processor._worker_id = "worker-1"  # pyright: ignore[reportPrivateUsage]
+    processor._worker_id = "worker-1"
 
     keepalive_alive_at_settle: list[bool] = []
     original_commit = persistence.commit_turn_batch
@@ -1205,7 +1203,7 @@ async def test_startup_failure_cancels_lease_keepalive_before_settling() -> None
 
     persistence.commit_turn_batch = observing_commit  # type: ignore[method-assign]
 
-    await processor._handle_command(claimed)  # pyright: ignore[reportPrivateUsage]
+    await processor._handle_command(claimed)
     await processor.stop()
 
     assert keepalive_alive_at_settle == [False]
@@ -1220,7 +1218,7 @@ async def test_stale_owner_cancels_sibling_tasks_and_refuses_unfenced_writes() -
     persistence = MemoryPersistence()
     persistence.seed(state)
     processor = CommandProcessor(persistence, _Publisher(), _Runtime(persistence, _Adapter()))  # type: ignore[arg-type]
-    processor._worker_id = "worker-1"  # pyright: ignore[reportPrivateUsage]
+    processor._worker_id = "worker-1"
     processor.set_fence(conversation_id, 7)
 
     started = asyncio.Event()
@@ -1231,20 +1229,20 @@ async def test_stale_owner_cancels_sibling_tasks_and_refuses_unfenced_writes() -
 
     sibling_id = uuid4()
     task = asyncio.create_task(in_flight())
-    processor._command_tasks[sibling_id] = task  # pyright: ignore[reportPrivateUsage]
-    processor._task_conversations[sibling_id] = conversation_id  # pyright: ignore[reportPrivateUsage]
+    processor._command_tasks[sibling_id] = task
+    processor._task_conversations[sibling_id] = conversation_id
     await started.wait()
 
-    await processor._on_stale_owner(conversation_id)  # pyright: ignore[reportPrivateUsage]
+    await processor._on_stale_owner(conversation_id)
 
     assert task.cancelled()
     with pytest.raises(DomainError) as exc:
-        processor._fence_kwargs(conversation_id)  # pyright: ignore[reportPrivateUsage]
+        processor._fence_kwargs(conversation_id)
     assert exc.value.code is ErrorCode.STALE_OWNER
 
     # A fresh claim installs a new fence and lifts the refusal.
     processor.set_fence(conversation_id, 8)
-    assert processor._fence_kwargs(conversation_id) == {  # pyright: ignore[reportPrivateUsage]
+    assert processor._fence_kwargs(conversation_id) == {
         "worker_id": "worker-1",
         "fence": 8,
     }

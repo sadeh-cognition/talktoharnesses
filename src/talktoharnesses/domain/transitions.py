@@ -84,10 +84,14 @@ class ConversationState(BaseModel):
     active_turn: Turn | None = None
     queued_turn: Turn | None = None
     queued_user_text: str | None = None
-    commands: dict[UUID, Command] = Field(default_factory=lambda: {})
-    interactions: dict[UUID, PendingInteraction] = Field(default_factory=lambda: {})
-    answers: dict[UUID, InteractionAnswer] = Field(default_factory=lambda: {})
-    activities: dict[UUID, BackgroundActivity] = Field(default_factory=lambda: {})
+    commands: dict[UUID, Command] = Field(default_factory=dict[UUID, Command])
+    interactions: dict[UUID, PendingInteraction] = Field(
+        default_factory=dict[UUID, PendingInteraction]
+    )
+    answers: dict[UUID, InteractionAnswer] = Field(default_factory=dict[UUID, InteractionAnswer])
+    activities: dict[UUID, BackgroundActivity] = Field(
+        default_factory=dict[UUID, BackgroundActivity]
+    )
     capabilities: HarnessCapabilities | None = None
     idle_reap_eligible: bool = True
     # Native provider identity / stream-offset dedupe (Phase 4).

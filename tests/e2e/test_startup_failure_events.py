@@ -11,7 +11,7 @@ import pytest
 from tests.runtime.memory_persistence import MemoryPersistence
 from tests.unit.remote.test_remote_adapter import (
     FakeSplit,
-    _adapter,  # pyright: ignore[reportPrivateUsage]
+    _adapter,
 )
 from tth_types.split_api import SplitError
 
@@ -144,8 +144,8 @@ async def test_startup_failure_reaches_live_and_reconnecting_client(
     await broker.start()
     try:
         async with AsyncTalkToHarnessesClient("http://tth.test/api/v1/") as client:
-            await client._client.aclose()  # pyright: ignore[reportPrivateUsage]
-            client._client = httpx.AsyncClient(  # pyright: ignore[reportPrivateUsage]
+            await client._client.aclose()
+            client._client = httpx.AsyncClient(
                 base_url="http://tth.test/api/v1/",
                 transport=httpx.MockTransport(client_transport),
             )

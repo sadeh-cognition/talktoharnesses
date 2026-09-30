@@ -106,13 +106,13 @@ async def test_unsubscribe_on_generator_close() -> None:
     # Register by priming the generator.
     task = asyncio.ensure_future(gen.__anext__())
     await asyncio.sleep(0)
-    assert cid in broker._subs  # pyright: ignore[reportPrivateUsage]
+    assert cid in broker._subs
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
     await gen.aclose()
     await asyncio.sleep(0)
-    assert cid not in broker._subs  # pyright: ignore[reportPrivateUsage]
+    assert cid not in broker._subs
     await broker.stop()
 
 

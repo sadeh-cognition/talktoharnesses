@@ -45,6 +45,7 @@ from talktoharnesses.providers.adapter import (
     TurnRequest,
 )
 from talktoharnesses.remote.adapter import RemoteHarnessAdapter
+from talktoharnesses.remote.handle import RemoteProcessHandle
 from talktoharnesses.remote.isolated_sandbox import IsolatedSandbox
 from talktoharnesses.remote.sandbox import SplitEndpoint
 from talktoharnesses.remote.scoped_sandboxes import ScopedSandboxManager
@@ -370,10 +371,10 @@ async def test_broken_event_stream_preserves_delivered_frames_and_closes_process
         handle = adapter.process_handle
         assert handle is not None
 
-        async def process_events() -> list[ProcessEvent]:
+        async def process_events(handle: RemoteProcessHandle) -> list[ProcessEvent]:
             return [event async for event in handle.events()]
 
-        assert await asyncio.wait_for(process_events(), timeout=1) == []
+        assert await asyncio.wait_for(process_events(handle), timeout=1) == []
         # Losing the transport is not evidence that the process exited successfully.
         assert handle.returncode is None
         assert not handle.forced
@@ -681,13 +682,13 @@ async def test_aclose_releases_probe_only_client() -> None:
     split = FakeSplit()
     adapter = _adapter(split)
     await adapter.probe(_config())
-    client = adapter._client  # pyright: ignore[reportPrivateUsage]
+    client = adapter._client
     assert client is not None
 
     await adapter.aclose()
 
     assert client.is_closed
-    assert adapter._client is None  # pyright: ignore[reportPrivateUsage]
+    assert adapter._client is None
     # Idempotent, and also safe when the client was never opened.
     await adapter.aclose()
 
@@ -873,7 +874,7 @@ async def test_policy_scope_is_in_use_while_an_adapter_is_bound(
 
     adapter = RemoteHarnessAdapter(HarnessKind.CLAUDE, _resolving_to(scope, tmp_path, monkeypatch))
 
-    await adapter._bind_policy(_config())  # pyright: ignore[reportPrivateUsage]
+    await adapter._bind_policy(_config())
     assert scope.in_use
 
     await adapter.aclose()

@@ -53,5 +53,6 @@ class RuntimePolicy(BaseModel):
         if raw := env.get(IDLE_REAP_ENV):
             overrides["idle_reap"] = _positive(IDLE_REAP_ENV, raw, float)
         if raw := env.get(MAX_RUNTIMES_ENV):
-            overrides["max_runtimes"] = _positive(MAX_RUNTIMES_ENV, raw, int)
+            max_runtimes: int = _positive(MAX_RUNTIMES_ENV, raw, int)
+            overrides["max_runtimes"] = max_runtimes
         return cls.model_validate(overrides)

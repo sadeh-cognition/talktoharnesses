@@ -95,6 +95,7 @@ def canonical_answer_values(
     for question in questions:
         question_id = question.id
         raw = values.get(question_id)
+        selected: list[str]
         if isinstance(raw, str):
             selected = [raw.strip()] if raw.strip() else []
         elif isinstance(raw, list):

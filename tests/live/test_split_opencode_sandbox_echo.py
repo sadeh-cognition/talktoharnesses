@@ -110,7 +110,7 @@ async def test_process_bound_journey_through_sandboxed_split(live_http: LiveHttp
 
     # The proxy adopted the split-supervised process: a containerless pid from
     # the split's spawn is recorded on the managed runtime.
-    runtime = get_service()._runtime  # pyright: ignore[reportPrivateUsage]
+    runtime = get_service()._runtime
     managed = runtime.get_runtime(conversation_id)
     assert managed is not None
     assert managed.process is not None

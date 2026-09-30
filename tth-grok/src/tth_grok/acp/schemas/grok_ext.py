@@ -131,11 +131,11 @@ GrokPermissionToolInput = (
 
 
 class GrokPermissionToolCall(PermissionToolCall):
-    rawInput: GrokPermissionToolInput | None = None  # pyright: ignore[reportIncompatibleVariableOverride]
+    rawInput: GrokPermissionToolInput | None = None  # pyrefly: ignore[bad-override]
 
 
 class GrokPermissionRequestParams(PermissionRequestParams):
-    toolCall: GrokPermissionToolCall | None = None  # pyright: ignore[reportIncompatibleVariableOverride]
+    toolCall: GrokPermissionToolCall | None = None
 
 
 def is_allowlisted_grok_permission_request(params: dict[str, Any] | None) -> bool:

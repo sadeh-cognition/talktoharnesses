@@ -23,7 +23,7 @@ from tth_types.harness import (
     LaunchSnapshot,
 )
 
-from tests.fakes import _FakeAcpProcess  # pyright: ignore[reportPrivateUsage]
+from tests.fakes import _FakeAcpProcess
 from tth_grok.harness.adapter import GrokAdapter
 from tth_grok.harness.compatibility import match_release
 
@@ -36,7 +36,7 @@ class _UsageAcpProcess(_FakeAcpProcess):
     async def _respond(self, msg: dict[str, Any]) -> None:
         if msg.get("method") == "session/prompt":
             if self.stray_response:
-                await self._stdout_q.put(  # pyright: ignore[reportPrivateUsage]
+                await self._stdout_q.put(
                     b'{"jsonrpc":"2.0","id":"unmatched","result":{"stopReason":"cancelled"}}\n'
                 )
             params_obj = msg.get("params")
@@ -58,9 +58,7 @@ class _UsageAcpProcess(_FakeAcpProcess):
                     },
                 },
             }
-            await self._stdout_q.put(  # pyright: ignore[reportPrivateUsage]
-                (json.dumps(notification) + "\n").encode()
-            )
+            await self._stdout_q.put((json.dumps(notification) + "\n").encode())
         await super()._respond(msg)
 
 
@@ -69,8 +67,8 @@ class _UsageAcpProcess(_FakeAcpProcess):
 async def test_live_xai_usage_is_emitted_before_prompt_terminal(stray_response: bool) -> None:
     release = match_release("grok 1.0.5 (5115b46bc9) [stable]", platform="linux")
     adapter = GrokAdapter()
-    adapter._release = release  # pyright: ignore[reportPrivateUsage]
-    adapter._capabilities = release.to_harness_capabilities()  # pyright: ignore[reportPrivateUsage]
+    adapter._release = release
+    adapter._capabilities = release.to_harness_capabilities()
     process = _UsageAcpProcess(agent_version="1.0.5", stray_response=stray_response)
     adapter.bind_process(process)  # type: ignore[arg-type]
     configuration = HarnessConfiguration(kind=HarnessKind.GROK, working_directory="/tmp")
@@ -148,8 +146,8 @@ async def _started_adapter(
 ) -> tuple[GrokAdapter, Any]:
     release = match_release("grok 1.0.5 (5115b46bc9) [stable]", platform="linux")
     adapter = GrokAdapter()
-    adapter._release = release  # pyright: ignore[reportPrivateUsage]
-    adapter._capabilities = release.to_harness_capabilities()  # pyright: ignore[reportPrivateUsage]
+    adapter._release = release
+    adapter._capabilities = release.to_harness_capabilities()
     adapter.bind_process(proc)  # type: ignore[arg-type]
     request = StartSessionRequest(
         conversation_id=uuid4(),
@@ -216,7 +214,7 @@ async def test_logged_in_agent_advertising_methods_is_not_forced_to_authenticate
     resume: bool,
 ) -> None:
     proc = _FakeAcpProcess(agent_version="1.0.5", auth_methods=("cached_token",))
-    proc._authenticated = True  # pyright: ignore[reportPrivateUsage]
+    proc._authenticated = True
     adapter, session = await _started_adapter(proc, resume=resume)
     try:
         methods = [request["method"] for request in proc.requests]
@@ -290,8 +288,8 @@ async def test_start_passes_configured_mcp_servers_over_acp() -> None:
     proc = _FakeAcpProcess(agent_version="1.0.5")
     release = match_release("grok 1.0.5 (5115b46bc9) [stable]", platform="linux")
     adapter = GrokAdapter()
-    adapter._release = release  # pyright: ignore[reportPrivateUsage]
-    adapter._capabilities = release.to_harness_capabilities()  # pyright: ignore[reportPrivateUsage]
+    adapter._release = release
+    adapter._capabilities = release.to_harness_capabilities()
     adapter.bind_process(proc)  # type: ignore[arg-type]
     config = HarnessConfiguration(
         kind=HarnessKind.GROK,
@@ -304,7 +302,7 @@ async def test_start_passes_configured_mcp_servers_over_acp() -> None:
             ),
         ),
     )
-    assert adapter._capabilities.supports_mcp_servers is True  # pyright: ignore[reportPrivateUsage]
+    assert adapter._capabilities.supports_mcp_servers is True
 
     session = await adapter.start(
         StartSessionRequest(

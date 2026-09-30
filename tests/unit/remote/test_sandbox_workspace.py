@@ -296,7 +296,7 @@ def test_runner_module_imports_without_fcntl(monkeypatch: pytest.MonkeyPatch) ->
     import importlib
     import sys
 
-    assert "\nimport fcntl\n" not in sandbox_workspace._RUNNER_SOURCE  # pyright: ignore[reportPrivateUsage]
+    assert "\nimport fcntl\n" not in sandbox_workspace._RUNNER_SOURCE
     monkeypatch.setitem(sys.modules, "fcntl", None)
     importlib.reload(workspace_runner)
     assert workspace_runner.SETUP_FILE == ".tth/setup.sh"

@@ -170,7 +170,7 @@ class TalkToHarnessesService:
         # Split-computed version advisories from the most recent in-process probe.
         self._probe_advisories: dict[UUID, VersionAdvisory] = {}
         # Propagate into a pre-built runtime (production ASGI constructs it first).
-        runtime_manager._fault_callback = fault_callback  # pyright: ignore[reportPrivateUsage]
+        runtime_manager._fault_callback = fault_callback
         self._broker = InteractionBroker(persistence, publisher, clock=clock)
         self._processor = CommandProcessor(
             persistence,
@@ -178,7 +178,7 @@ class TalkToHarnessesService:
             runtime_manager,
             clock=clock,
             interaction_broker=self._broker,
-            lease_seconds=runtime_manager._policy.lease_duration,  # pyright: ignore[reportPrivateUsage]
+            lease_seconds=runtime_manager._policy.lease_duration,
             fault_callback=fault_callback,
         )
         self._coordinator = WorkerCoordinator(
@@ -187,7 +187,7 @@ class TalkToHarnessesService:
             publisher,
             self._processor,
             clock,
-            runtime_manager._policy,  # pyright: ignore[reportPrivateUsage]
+            runtime_manager._policy,
             fault_callback=fault_callback,
         )
         self._readiness = ReadinessProbeMonitor(
@@ -256,13 +256,13 @@ class TalkToHarnessesService:
             self._worker_id = worker_id
             self._started = True
         except BaseException:
-            deadline = time.monotonic() + self._runtime._policy.shutdown_budget  # pyright: ignore[reportPrivateUsage]
+            deadline = time.monotonic() + self._runtime._policy.shutdown_budget
             await self._shutdown_components(deadline)
             raise
 
     async def stop(self) -> None:
         """Stop claims, then processor/runtime, then broker resources (idempotent)."""
-        deadline = time.monotonic() + self._runtime._policy.shutdown_budget  # pyright: ignore[reportPrivateUsage]
+        deadline = time.monotonic() + self._runtime._policy.shutdown_budget
         await self._shutdown_components(deadline)
         self._started = False
         self._worker_id = None
