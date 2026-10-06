@@ -127,8 +127,10 @@ async def test_control_route_requires_distinct_host_token(tmp_path: Path) -> Non
 
 
 async def test_refresh_response_never_returns_tokens_or_unknown_secret_fields(
-    tmp_path: Path,
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
+    from talktoharnesses.gateway import server
+
     proxy = gateway(tmp_path)
     _, virtual = proxy.vault.snapshot()
     assert virtual is not None
@@ -141,11 +143,20 @@ async def test_refresh_response_never_returns_tokens_or_unknown_secret_fields(
         200, '{"access_token":"rotated","custom_secret":"never-return"}'
     )
     proxy.responseheaders(request)
-    proxy.response(request)
+    server.logger.addHandler(caplog.handler)
+    try:
+        proxy.response(request)
+    finally:
+        server.logger.removeHandler(caplog.handler)
     assert request.response.status_code == 403
     assert "never-return" not in (request.response.text or "")
     assert "rotated" not in (request.response.text or "")
     assert "refresh_lock" not in request.metadata
+    # The upstream already rotated the tokens, so the host keeps them anyway.
+    assert json.loads((tmp_path / "auth.json").read_text())["tokens"]["access_token"] == "rotated"
+    assert "credential_exchange_rejected provider=openai" in caplog.text
+    assert "custom_secret" in caplog.text
+    assert "never-return" not in caplog.text and "rotated" not in caplog.text
 
 
 def test_dns_private_results_fail_closed(monkeypatch: pytest.MonkeyPatch) -> None:

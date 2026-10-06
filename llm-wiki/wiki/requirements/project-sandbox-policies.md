@@ -8,8 +8,8 @@ audiences:
 tags:
   - type/requirement
   - status/implemented
-last_verified: 2026-09-28
-verified_against_commit: ef27349524da4db36ed49f48f6d2a9a49a32a876
+last_verified: 2026-10-06
+verified_against_commit: e8dc81b
 ---
 
 # Project sandbox policies
@@ -52,7 +52,12 @@ instead of opening another connection. Every denial is logged as
 and headers are never logged.
 Native authentication files and environment keys are replaced with scoped handles.
 Only admitted authentication fields receive real credentials. Token refresh is
-serialized against the host file and responses return handles.
+serialized against the host file and responses return handles. The provider
+spends the old refresh token before the gateway sees its response, so
+recognized rotated tokens are written to the host file before an unsupported
+response field denies the exchange; otherwise every later refresh fails with
+`refresh_token_reused`. The gateway logs `credential_exchange_rejected` with
+the rejected field names, never their values.
 Cursor API-key login is a separate exchange operation. Its access and refresh
 tokens are stored in the gateway's private state with mode 0600, survive gateway
 restart, and reach the agent only as handles. Initial login does not require a

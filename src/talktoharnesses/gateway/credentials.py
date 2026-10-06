@@ -286,7 +286,10 @@ class CredentialVault:
         """Persist token rotation and return only handles to the native client.
 
         The caller holds the credential file's cross-process refresh lock across
-        both the upstream request and this update.
+        both the upstream request and this update. The upstream has already
+        consumed the old refresh token, so recognized tokens are persisted before
+        any unsupported field rejects the response; otherwise the host keeps only
+        a spent refresh token and every later refresh fails.
         """
         if exchange is TokenExchange.CURSOR_LOGIN:
             login = CursorLoginTokens.model_validate(document)
@@ -301,6 +304,7 @@ class CredentialVault:
             for _, audience, path in self._handles.values()
             if audience == provider and len(path) > 0
         }
+        rejected: set[str] = set()
 
         def replace(value: Any, key: str = "") -> Any:
             if isinstance(value, dict):
@@ -315,14 +319,17 @@ class CredentialVault:
                 return value
             if normalized not in _SECRET_KEYS:
                 if normalized not in _METADATA_KEYS:
-                    raise UnsupportedCredential("Unsupported token exchange response field.")
+                    rejected.add(key)
+                    return None
                 return value
             aliases = {"accesstoken": ("access", "key"), "refreshtoken": ("refresh",)}
             path = paths.get(normalized) or next(
                 (paths[alias] for alias in aliases.get(normalized, ()) if alias in paths), None
             )
             if path is None:
-                raise UnsupportedCredential("The refresh response introduced an unsupported token.")
+                # An unmapped token has no native field to persist it in.
+                rejected.add(key)
+                return None
             parent = native
             for part in path[:-1]:
                 parent = parent[part]
@@ -344,6 +351,11 @@ class CredentialVault:
                             (time.time() + lifetime) * (1000 if value > 1e12 else 1)
                         )
         atomic_json(self.auth_file, native)
+        if rejected:
+            # Field names only: values can be credentials.
+            raise UnsupportedCredential(
+                "Unsupported token exchange response fields: " + ", ".join(sorted(rejected)) + "."
+            )
         return output
 
 

@@ -233,6 +233,32 @@ def test_multi_provider_oauth_refresh_updates_native_fields_and_expiry(tmp_path:
     assert native["anthropic"]["key"] == "other-provider"
 
 
+def test_refresh_persists_rotated_tokens_before_rejecting_unknown_fields(tmp_path: Path) -> None:
+    path = tmp_path / "auth.json"
+    atomic_json(path, {"tokens": {"access_token": "old-access", "refresh_token": "old-refresh"}})
+    vault = CredentialVault(kind=HarnessKind.CODEX, seed="scope", auth_file=path)
+    _, virtual = vault.snapshot()
+    assert virtual is not None
+    # The provider has already spent old-refresh when this response arrives;
+    # dropping the rotation would leave the host with a reused refresh token.
+    with pytest.raises(UnsupportedCredential, match="id_token, new_field") as error:
+        vault.refreshed(
+            {
+                "access_token": "new-access",
+                "refresh_token": "new-refresh",
+                "id_token": "unmapped-secret",
+                "new_field": "value",
+            },
+            "openai",
+        )
+    assert "unmapped-secret" not in str(error.value)
+    native = json.loads(path.read_text())
+    assert native == {"tokens": {"access_token": "new-access", "refresh_token": "new-refresh"}}
+    vault.snapshot()
+    request = vault.refresh_request({"refresh_token": virtual["tokens"]["refresh_token"]}, "openai")
+    assert request["refresh_token"] == "new-refresh"
+
+
 @pytest.mark.django_db(transaction=True)
 async def test_policy_owner_revision_and_conflict(tmp_path: Path) -> None:
     store = DjangoSandboxPolicyStore()

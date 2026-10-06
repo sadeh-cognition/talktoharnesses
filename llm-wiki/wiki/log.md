@@ -698,3 +698,17 @@ minutes. The Codex image now writes root-owned `/etc/codex/config.toml`
 GET of `wham/settings/user` at turn start. The Codex sandbox live gate passed
 with no denials, down from 52. Record the behavior in
 [Project sandbox policies](requirements/project-sandbox-policies.md).
+
+## [2026-10-06] update | Keep rotated tokens when a refresh response is rejected
+
+Against baseline `e8dc81b` plus this working tree, a refresh response with a
+field outside the gateway's allowlist was denied before the rotated tokens were
+saved. The provider had already spent the old refresh token, so the host's
+Codex login then failed every refresh with `refresh_token_reused` and every
+sandboxed turn with `workspace routing discovery unauthorized (401)`.
+`CredentialVault.refreshed` now persists recognized tokens first and then
+rejects the response, naming only the field keys; the gateway logs them as
+`credential_exchange_rejected`. Covered by
+`tests/unit/gateway/test_sandbox_policy.py` and
+`tests/unit/gateway/test_gateway_http.py`. Record the behavior in
+[Project sandbox policies](requirements/project-sandbox-policies.md).

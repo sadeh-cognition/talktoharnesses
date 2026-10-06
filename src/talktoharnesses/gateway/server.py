@@ -22,7 +22,7 @@ from tth_types.enums import HarnessKind
 from tth_types.sandbox import CommandCheck, SandboxPolicyRevision
 
 from talktoharnesses.command_policy import check_command
-from talktoharnesses.gateway.credentials import CredentialVault
+from talktoharnesses.gateway.credentials import CredentialVault, UnsupportedCredential
 from talktoharnesses.gateway.routes import (
     GATEWAY_HOST,
     GATEWAY_PORT,
@@ -344,7 +344,15 @@ class PolicyGateway:
                 flow.response.text = json.dumps(
                     self.vault.refreshed(document, route.provider, exchange=route.exchange)
                 )
-        except (OSError, ValueError):
+        except (OSError, ValueError) as exc:
+            if route is not None and route.exchange is not None:
+                # Only UnsupportedCredential messages are safe to record; other
+                # errors (e.g. validation) can quote response values.
+                logger.warning(
+                    "credential_exchange_rejected provider=%s detail=%s",
+                    route.provider,
+                    exc if isinstance(exc, UnsupportedCredential) else type(exc).__name__,
+                )
             self._deny(flow, "credential_proxy_unsupported")
         finally:
             self._unlock(flow)
